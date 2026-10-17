@@ -1,0 +1,41 @@
+[project]
+name = "rea-hwp"
+version = "0.1.0"
+description = "Lossless HWP 5.0 parser and page-accurate web renderer"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.4",
+    "olefile>=0.47",
+    "pycryptodome>=4.0.0",
+]
+
+[project.scripts]
+rea-hwp = "rea_hwp.cli:main"
+
+[project.optional-dependencies]
+bench = [
+    "pymupdf>=1.28.2",
+]
+fonts = [
+    "fonttools>=4.67.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
