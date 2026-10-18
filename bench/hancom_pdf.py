@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from corpus import CORPUS_ROOT, load_corpus
+from plain_copy import plain_streams, write_cfb
 
 #: 한글 COM은 사용자 Temp 아래 파일은 바로 열고, C:\Users\Public 아래 파일은 숨은 보안 창에서 멈췄다(2026-10-17).
 WINDOWS_WORK = Path("/mnt/c/Users/kuhys/AppData/Local/Temp/rea-hwp")
@@ -30,7 +31,8 @@ $hwp = New-Object -ComObject HWPFrame.HwpObject
 try {
   $null = $hwp.RegisterModule('FilePathCheckDLL', 'FilePathCheckerModule')
   $hwp.XHwpWindows.Item(0).Visible = $false
-  $null = $hwp.SetMessageBoxMode(0x00020021)
+  # 0x1000: 예/아니요/취소 창은 「예」. 숨은 설명 문서가 보안 설정 [높음] 창(열기/보안 설정/취소)에서 멈췄다.
+  $null = $hwp.SetMessageBoxMode(0x00021021)
   $options = 'forceopen:true;versionwarning:false'
   if ($password) { $options = "$options;password:$password" }
   if (-not $hwp.Open($src, 'HWP', $options)) { throw 'Open returned False' }
@@ -41,7 +43,33 @@ try {
   $pset.Attributes = 0
   $saved = $hwp.HAction.Execute('FileSaveAs_S', $pset.HSet)
   if (-not $saved) { $saved = $hwp.SaveAs($dst, 'PDF', '') }
-  if (-not $saved) { throw 'SaveAs returned False' }
+  if (-not $saved) {
+    # 배포용 문서는 다른 형식 저장이 막혀 PDF 프린터로 인쇄한다(글자 좌표는 PDF 저장과 0.05pt 안, 2026-10-17 실측).
+    $print = $hwp.HParameterSet.HPrint
+    $null = $hwp.HAction.GetDefault('Print', $print.HSet)
+    $print.PrinterName = 'Microsoft Print to PDF'
+    $print.PrintToFile = 1
+    $print.FileName = $dst
+    $print.Range = 0
+    $print.NumCopy = 1
+    $print.PrintMethod = 0
+    if (-not $hwp.HAction.Execute('Print', $print.HSet)) { throw 'SaveAs and Print returned False' }
+    # 인쇄는 스풀러가 파일을 나중에 다 쓰므로 크기가 멈출 때까지 기다린다.
+    $deadline = (Get-Date).AddSeconds(120); $last = -1
+    while ((Get-Date) -lt $deadline) {
+      if (Test-Path $dst) {
+        $size = (Get-Item $dst).Length
+        # 스풀러가 1MiB 단위로 쓰다 멈출 때가 있어 크기와 함께 PDF 끝 표지도 본다(hwpspec 1048576바이트에서 잘림).
+        # 스풀러가 쓰는 동안은 파일이 잠겨 읽기가 실패한다. 그때는 아직 쓰는 중으로 본다.
+        try { $tail = [IO.File]::ReadAllText($dst).TrimEnd() } catch { $tail = '' }
+        if ($size -gt 0 -and $size -eq $last -and $tail.EndsWith('%%EOF')) { $saved = $true; break }
+        $last = $size
+      }
+      Start-Sleep -Seconds 2
+    }
+    if (-not $saved) { throw 'Print did not finish' }
+    Write-Output 'method=print'
+  }
   Write-Output "pages=$($hwp.PageCount)"
 } finally {
   try { $hwp.Clear(1) } catch {}
@@ -63,11 +91,12 @@ def reset_print_method(source: Path, target: Path) -> bool:
 
     from rea_hwp import tags
     from rea_hwp.container import HwpContainer, HwpFormatError
+    from rea_hwp.crypto import HwpDecryptError
     from rea_hwp.record import parse_records
 
     try:
         container = HwpContainer.open(source)
-    except HwpFormatError:  # 우리가 못 여는 문서(옛 암호 방식 등)는 고치지 않고 한글에 그대로 넘긴다.
+    except (HwpFormatError, HwpDecryptError):  # 우리가 못 여는 문서(옛 암호 방식, 암호 문서)는 한글에 그대로 넘긴다.
         return False
     if container.header.password_protected:
         return False
@@ -101,6 +130,18 @@ def reset_print_method(source: Path, target: Path) -> bool:
     return True
 
 
+def needs_plain_copy(source: Path, password: str | None) -> bool:
+    """배포용이거나 우리가 풀 수 있는 암호 문서인가."""
+    from rea_hwp.container import HwpContainer, HwpFormatError
+    from rea_hwp.crypto import HwpDecryptError
+
+    try:
+        header = HwpContainer.open(source, password).header
+    except (HwpFormatError, HwpDecryptError):  # 옛 암호 방식(EncryptVersion 0 등)은 사본을 만들 수 없다.
+        return False
+    return header.distributed or header.password_protected
+
+
 def hancom_pids() -> set[int]:
     """COM 자동화로 뜬 한글(-Automation)만 센다. 사용자가 직접 연 한글 창은 대상이 아니다."""
     query = (
@@ -120,7 +161,7 @@ def kill_hancom(keep: set[int]) -> None:
 _SEQUENCE = iter(range(1, 1 << 30))
 
 
-def convert(source: Path, target: Path, password: str | None) -> dict:
+def convert(source: Path, target: Path, password: str | None, timeout: int = TIMEOUT_SECONDS) -> dict:
     # 프로세스마다 작업 폴더를 따로 써서 동시에 돌려도 입력·출력 파일이 섞이지 않게 한다.
     work = WINDOWS_WORK / str(os.getpid())
     work_win = WINDOWS_WORK_WIN + "\\" + str(os.getpid())
@@ -131,6 +172,12 @@ def convert(source: Path, target: Path, password: str | None) -> dict:
     serial = next(_SEQUENCE)
     work_src = work / f"input{serial}.hwp"
     work_dst = work / f"output{serial}.pdf"
+    if needs_plain_copy(source, password):
+        # 인쇄까지 막힌 배포용 문서와 암호 입력 창에서 멈추는 암호 문서는 복호화한 일반 사본을 한글에 넘긴다.
+        plain = work / f"plain{serial}.hwp"
+        write_cfb(plain_streams(source, password), plain)
+        source = plain
+        password = None
     if not reset_print_method(source, work_src):
         shutil.copyfile(source, work_src)
     work_dst.unlink(missing_ok=True)
@@ -148,29 +195,34 @@ def convert(source: Path, target: Path, password: str | None) -> dict:
         password or "",
     ]
     try:
-        completed = subprocess.run(command, capture_output=True, timeout=TIMEOUT_SECONDS)
+        completed = subprocess.run(command, capture_output=True, timeout=timeout)
         output = completed.stdout.decode("utf-8", "replace").replace("\r", "").strip()
         error = completed.stderr.decode("utf-8", "replace").replace("\r", "").strip()
     except subprocess.TimeoutExpired:
         kill_hancom(existing)
-        return {"status": "timeout", "seconds": TIMEOUT_SECONDS}
+        return {"status": "timeout", "seconds": timeout}
     if not work_dst.exists() or work_dst.stat().st_size == 0:
         kill_hancom(existing)
         return {"status": "failed", "stdout": output[-500:], "stderr": error[-500:]}
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(work_dst, target)
     pages = next((line.split("=", 1)[1] for line in output.splitlines() if line.startswith("pages=")), None)
-    return {"status": "ok", "pages": int(pages) if pages else None, "seconds": round(time.monotonic() - started, 1)}
+    method = "print" if "method=print" in output else "save"
+    seconds = round(time.monotonic() - started, 1)
+    return {"status": "ok", "method": method, "pages": int(pages) if pages else None, "seconds": seconds}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--redo", action="store_true", help="이미 만든 PDF도 다시 만든다")
+    parser.add_argument("--match", default="", help="경로에 이 글자가 든 문서만 변환한다")
+    parser.add_argument("--timeout", type=int, default=TIMEOUT_SECONDS, help="한 문서 변환 제한 시간(초)")
     args = parser.parse_args()
     log_path = OUTPUT_ROOT / "convert-log.jsonl"
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     entries = load_corpus()
+    entries = [entry for entry in entries if args.match in str(entry.path)]
     if args.limit:
         entries = entries[: args.limit]
     with open(log_path, "a", encoding="utf-8") as log:
@@ -180,7 +232,7 @@ def main() -> int:
             if target.exists() and not args.redo:
                 continue
             try:
-                outcome = convert(entry.path, target, entry.password)
+                outcome = convert(entry.path, target, entry.password, args.timeout)
             except OSError as error:  # 한 문서의 파일 오류로 전체 변환을 멈추지 않는다.
                 outcome = {"status": "failed", "stderr": f"{type(error).__name__}: {error}"}
             outcome["path"] = str(relative)
