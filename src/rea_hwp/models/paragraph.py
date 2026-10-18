@@ -106,7 +106,8 @@ class ParaText(RecordModel):
             else:
                 for char in item:
                     placed.append((position, char))
-                    position += 1
+                    # BMP 밖 글자는 대리 쌍 WCHAR 두 개다(LINE_SEG·글자 모양 위치도 WCHAR로 센다).
+                    position += 2 if ord(char) > 0xFFFF else 1
         return placed
 
 

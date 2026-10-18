@@ -265,3 +265,10 @@ def test_corpus_table_cells_tile_the_grid():
         for col in range(cell.col, cell.col + cell.col_span)
     ]
     assert sorted(covered) == [(row, col) for row in range(2) for col in range(3)]
+
+
+def test_para_text_positions_count_surrogate_pair_as_two_wchars():
+    # LINE_SEG·글자 모양 위치는 WCHAR 단위라 BMP 밖 글자(한컴 PUA U+F03C5 등)는 두 칸을 차지한다.
+    payload = "\U000f03c5가나\r".encode("utf-16-le", errors="surrogatepass")
+    model = decode(tags.PARA_TEXT, payload)
+    assert model.positioned() == [(0, "\U000f03c5"), (2, "가"), (3, "나"), (4, "\r")]

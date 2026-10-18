@@ -162,9 +162,6 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             if node.tag != tags.PARA_HEADER:
                 continue
             view = ParagraphView.build(node, self.styles)
-            if _has_stale_lines(view):
-                first = view.segments[0]
-                view = self.rebroken(view, first.column_start + first.segment_width + view.para_shape.right_margin // 2)
             # 구역 정의가 든 문단은 한 구역 스트림 안에 있어도 새 구역이다(issue-505-equations: 문단마다 구역 나눔).
             new_section = state is not None and _section_def([node]) is not None
             if new_section:
@@ -790,8 +787,6 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         shift, last_vpos = 0, 0
         for node in paragraphs:
             view = ParagraphView.build(node, self.styles)
-            if _has_stale_lines(view):
-                view = self.rebroken(view, width)
             if shift and view.segments:
                 segments = []
                 for segment in view.segments:
@@ -917,20 +912,6 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 for old, new in zip(rest, fresh, strict=True)
             ]
         return dataclasses.replace(view, segments=[*view.segments[:head_index], *fresh])
-
-    def rebroken(self, view: ParagraphView, width: float) -> ParagraphView:
-        """저장 줄을 폭 width로 다시 나눈 보기. 줄 수가 같을 때만 줄 시작을 바꾸고 세로 값은 저장값을 쓴다.
-
-        줄 수가 달라지면 뒤 문단의 저장 세로 위치와 어긋나 그대로 둔다(뒤 줄을 그만큼 미는 보정은 편람 −10만으로 뺐다).
-        """
-        fresh = self.reflowed(dataclasses.replace(view, segments=[]), width, view.segments[0].vertical_pos)
-        if len(fresh.segments) != len(view.segments):
-            return view
-        segments = [
-            dataclasses.replace(stored, text_start=new.text_start)
-            for stored, new in zip(view.segments, fresh.segments, strict=True)
-        ]
-        return dataclasses.replace(view, segments=segments)
 
     def squeezed(self, view: ParagraphView) -> bool:
         """저장 줄 가운데 공백을 다 줄여도 넘쳐 글자까지 줄여야 하는 줄이 있는가."""
@@ -1457,17 +1438,6 @@ def _has_square_wrap(nodes: list[Node]) -> bool:
         and child.model.text_wrap == TextWrap.SQUARE
         for node in nodes
         for child in node.children
-    )
-
-
-def _has_stale_lines(view: ParagraphView) -> bool:
-    """한컴 전용 기호(평면 15 PUA)가 든 문단은 저장 줄을 버리고 다시 나눈다.
-
-    실측: hwp3-sample16 2018·2024판 PUA 문단 33개 중 32개, task2287 14개, kr_156489593 3개를 한글 2022 PDF가 저장 줄과
-    다르게 나눴고 PUA 없는 문단은 거의 저장 줄 그대로다. 한글 2022·2010 저장판은 그 문단의 LINE_SEG를 빼고 저장했다.
-    """
-    return bool(view.segments) and any(
-        isinstance(item, TextChar) and 0xF0000 <= ord(item.char) <= 0xFFFFD for item in view.chars
     )
 
 
