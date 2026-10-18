@@ -77,8 +77,9 @@ class HwpContainer:
         if self.header.drm:
             raise HwpFormatError("DRM-protected HWP documents cannot be decrypted")
         if self.header.password_protected:
-            if self.header.encrypt_version != crypto.SUPPORTED_ENCRYPT_VERSION:
-                raise HwpFormatError(f"EncryptVersion {self.header.encrypt_version} is not supported (only 4)")
+            version = self.header.encrypt_version
+            if version != crypto.SUPPORTED_ENCRYPT_VERSION and version not in crypto.LEGACY_ENCRYPT_VERSIONS:
+                raise HwpFormatError(f"EncryptVersion {version} is not supported (only 0, 1, 2, 4)")
             if password is None:
                 raise crypto.HwpDecryptError("document is password protected; pass password=")
         self.password = password
@@ -103,14 +104,14 @@ class HwpContainer:
         if name.startswith("ViewText/"):
             raw = crypto.decrypt_distribute_stream(raw)
         elif self.header.password_protected:
-            raw = crypto.decrypt_password_stream(raw, self.password or "")
+            raw = crypto.decrypt_stream(raw, self.password or "", self.header.encrypt_version)
         return inflate(raw) if self.header.compressed else raw
 
     def bin_data(self, name: str, compressed: bool | None = None) -> bytes:
         """BinData 항목. compressed가 None이면 문서 기본 압축 여부를 따른다."""
         raw = self.raw_streams[name]
         if self.header.password_protected:
-            raw = crypto.decrypt_password_stream(raw, self.password or "")
+            raw = crypto.decrypt_stream(raw, self.password or "", self.header.encrypt_version)
         if self.header.compressed if compressed is None else compressed:
             return inflate(raw)
         return raw

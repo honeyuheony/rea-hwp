@@ -1,4 +1,4 @@
-"""배포용 문서(ViewText)와 열기 암호 문서(EncryptVersion 4)의 스트림 복호화."""
+"""배포용 문서(ViewText)와 열기 암호 문서(EncryptVersion 4는 AES, 0~2는 DES)의 스트림 복호화."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import hashlib
 import struct
 
 import numpy as np
-from Crypto.Cipher import AES
+from Crypto.Cipher import AES, DES
 
 from .record import parse_records
 from .tags import DISTRIBUTE_DOC_DATA
@@ -15,6 +15,9 @@ DISTRIBUTE_HEADER_SIZE = 4 + 256
 #: 열기 암호 키 유도에서 첫 바이트 앞에 두는 값(출처: rhwp src/parser/crypto.rs, MIT).
 PASSWORD_KEY_SEED = 236
 SUPPORTED_ENCRYPT_VERSION = 4
+#: 한글 2022가 같은 DES 경로로 푸는 옛 암호 버전. 0은 password-12345(5.0.1.7) 문서로 확인, 1·2는 같은 분기라 표본 없음.
+LEGACY_ENCRYPT_VERSIONS = (0, 1, 2)
+LEGACY_KEY_BYTES = 7
 _CFB1_CHUNK_BYTES = 1 << 16
 
 
@@ -75,6 +78,39 @@ def password_key(password: str) -> bytes:
         interleaved.append(byte)
         previous = byte
     return hashlib.sha1(interleaved).digest()[:16]
+
+
+def legacy_password_key(password: str) -> bytes:
+    """EncryptVersion 0~2의 DES 키. 출처: 한글 2022 HncFoundation.dll CHncEncryption 키 준비(0x1009a660)."""
+    folded = bytearray(LEGACY_KEY_BYTES + 1)
+    for index, byte in enumerate(password.encode("utf-16-le")):
+        mixed = byte ^ folded[index % LEGACY_KEY_BYTES]
+        folded[index % LEGACY_KEY_BYTES] = ((mixed << 1) | (mixed >> 7)) & 0xFF
+    # 56비트를 앞에서부터 각 바이트의 위 7비트에 나눠 넣는다. 맨 아래 비트(DES 패리티)는 접은 값 그대로 둔다.
+    key = bytearray(folded)
+    target = 0
+    for source in range(LEGACY_KEY_BYTES * 8):
+        if target % 8 == 7:
+            target += 1
+        mask = 0x80 >> (target & 7)
+        if folded[source >> 3] & (0x80 >> (source & 7)):
+            key[target >> 3] |= mask
+        else:
+            key[target >> 3] &= ~mask & 0xFF
+        target += 1
+    return bytes(key)
+
+
+def decrypt_legacy_password_stream(stream: bytes, password: str) -> bytes:
+    """DES-ECB 복호화. 8바이트에 못 미치는 꼬리는 한글처럼 그대로 둔다."""
+    aligned = len(stream) - len(stream) % 8
+    return DES.new(legacy_password_key(password), DES.MODE_ECB).decrypt(stream[:aligned]) + stream[aligned:]
+
+
+def decrypt_stream(stream: bytes, password: str, encrypt_version: int) -> bytes:
+    if encrypt_version in LEGACY_ENCRYPT_VERSIONS:
+        return decrypt_legacy_password_stream(stream, password)
+    return decrypt_password_stream(stream, password)
 
 
 def decrypt_password_stream(stream: bytes, password: str) -> bytes:

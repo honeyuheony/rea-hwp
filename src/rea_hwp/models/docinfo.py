@@ -100,6 +100,10 @@ def _bits(value: int | None, low: int, width: int) -> int:
 # --- 4.2.1 문서 속성 -------------------------------------------------------------------------------
 
 
+PASSWORD_CHECK_SIZE = 256
+DOCUMENT_PROPERTIES_SIZE = 26
+
+
 @register(tags.DOCUMENT_PROPERTIES)
 @dataclass
 class DocumentProperties(RecordModel):
@@ -115,6 +119,17 @@ class DocumentProperties(RecordModel):
         ("caret_para_id", "u32"),
         ("caret_char_pos", "u32"),
     ]
+    #: 암호 문서가 속성 앞에 두는 암호 확인 자료(같은 문서의 암호 없는 판과 비교해 확인: 282 = 256 + 26바이트).
+    password_check: bytes = b""
+
+    def decode_fields(self, reader: Reader) -> None:
+        if reader.remaining == PASSWORD_CHECK_SIZE + DOCUMENT_PROPERTIES_SIZE:
+            self.password_check = reader.bytes(PASSWORD_CHECK_SIZE)
+        self.read_spec(reader, self.FIELDS)
+
+    def encode_fields(self, writer: Writer) -> None:
+        writer.bytes(self.password_check)
+        self.write_spec(writer, self.FIELDS)
 
 
 # --- 4.2.2 아이디 매핑 헤더 -----------------------------------------------------------------------

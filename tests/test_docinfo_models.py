@@ -30,6 +30,15 @@ def test_document_properties():
     assert model.tail == b""
 
 
+def test_document_properties_after_password_check_data():
+    check = bytes(range(256))
+    payload = check + struct.pack("<7H3I", 1, 3, 1, 1, 1, 1, 1, 0, 444, 11)
+    model = roundtrip(docinfo.DocumentProperties, payload)
+    assert model.password_check == check
+    assert model.page_start == 3
+    assert model.caret_para_id == 444
+
+
 def test_id_mappings_count_follows_payload_length():
     counts = list(range(1, 19))
     model = roundtrip(docinfo.IdMappings, struct.pack("<18i", *counts))
