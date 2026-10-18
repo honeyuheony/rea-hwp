@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 from dataclasses import dataclass
 
 from .. import tags
@@ -15,6 +16,7 @@ from ..models.controls import (
     TextBoxListHeader,
     TextWrap,
 )
+from ..models.paragraph import LineSeg
 from ..models.shapes import ShapeComponent, ShapePicture
 from .common import (
     ALIGN_CENTER,
@@ -31,11 +33,14 @@ from .common import (
     column_layout,
 )
 from .forms import draw_form
-from .scene import Image
-from .table_flow import is_block_table
+from .scene import Glyph, Image
+from .table_flow import _margin_shift, is_block_table
+from .wmf import WmfDrawing, convert_wmf
 
 #: 연결 글상자를 찾을 때 넘친 줄 폭과 빈 글상자 안쪽 폭의 허용 차이(HU). 검증 안 됨: BookReview는 0~2HU 차이.
 LINK_WIDTH_TOLERANCE = 100
+#: 문단 머리 break_type의 구역(0x01)·쪽(0x04)·단(0x08) 나누기 비트.
+BREAK_SECTION_PAGE_COLUMN = 0x01 | 0x04 | 0x08
 #: 캡션 방향(명세 표72).
 CAPTION_LEFT, CAPTION_RIGHT, CAPTION_TOP, CAPTION_BOTTOM = range(4)
 
@@ -76,8 +81,19 @@ class ObjectsMixin:
         self, state: PageState, view: ParagraphView, ctrl: Node, x: float, baseline: float, area: Area
     ) -> None:
         model: ObjectCtrlHeader = ctrl.model
+        if id(ctrl) in self.__dict__.get("stacked_floats", ()):
+            # 셀 엔진이 쌓아 따로 그리는 개체(table_flow.place_stacked_float).
+            return
         width, height = self.object_size(model, state, area)
+        component = ctrl.find(tags.SHAPE_COMPONENT)
+        if component is not None and isinstance(component.model, ShapeComponent):
+            # 글상자는 개체 머리 높이가 낡아도 도형 요소 현재 높이로 그린다(실측: 3-10월_교육_통합_2022 2쪽 보기 상자
+            # 머리 1249, 현재 19904 = 기준 줄 높이 19905).
+            text_list = component.find(tags.LIST_HEADER)
+            if text_list is not None and isinstance(text_list.model, TextBoxListHeader):
+                height = max(height, float(component.model.current_height))
         margins = model.outer_margins or [0, 0, 0, 0]
+        anchor_state = state
         caption = self.object_caption(ctrl, width, margins[0])
         # 캡션은 개체 상자에 들어간다: 위·아래 캡션은 높이를, 왼·오른 캡션은 폭을 늘린다(실측: pyhwp table-caption).
         box_width = width + (caption.extent if caption and caption.beside else 0)
@@ -87,7 +103,13 @@ class ObjectsMixin:
             left = x + margins[0]
             top = baseline - TAC_ASCENT * (box_height + margins[2] + margins[3]) + margins[2]
         else:
-            left, top = self.floating_position(model, state, view, area, box_width, box_height)
+            full_height = None
+            if self.in_body and is_block_table(ctrl) and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
+                grid, _ = self.table_layout_grid(ctrl)
+                full_height = grid.height if grid is not None else None
+            left, top = self.floating_position(model, state, view, area, box_width, box_height, full_height)
+            if self.in_body and model.text_wrap == TextWrap.SQUARE:
+                state.floats.append((state.column, *outer_box(model, left, top, box_width, box_height)))
             if is_block_table(ctrl) and model.vert_offset < 0 and model.vert_rel_to == REL_COLUMN_OR_PARA:
                 # 문단 기준 자리차지 표는 문단 위로 올라가지 않는다(실측: 셀 안 issue4889 1쪽 55행 표 오프셋 −975,
                 # 위 선 289.12; 본문 kr_156369118 5쪽 s0 p63 표 오프셋 −622, 정답 기준선 695.2pt).
@@ -95,10 +117,11 @@ class ObjectsMixin:
             if self.in_body and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
                 state, top = self.stacked_top(state, left, box_width, top, box_height + margins[2] + margins[3])
             if ctrl.record.payload[:4] != tags.TABLE_CTRL.to_bytes(4, "little"):
-                # 바깥 여백 포함 상자를 기준에 맞춰 놓고 개체는 왼·위 여백만큼 안쪽에 그린다(rhwp picture_footnote.rs).
-                # 표는 table_flow.draw_table이 같은 보정을 한다.
-                left += margins[0]
-                top += margins[2]
+                # 바깥 여백까지 든 상자가 정렬 기준에 맞고 개체는 그 안에 그린다. 오른쪽·아래 정렬이면
+                # 오른·아래 여백만큼 안쪽이다(오른쪽 정렬 그림을 피한 저장 줄이 왼 여백 566HU만큼 더 좁았다).
+                # 표는 draw_table이 같은 보정을 한다.
+                left += _margin_shift(model.horz_align, margins[0], margins[1])
+                top += _margin_shift(model.vert_align, margins[2], margins[3])
         if caption and caption.direction == CAPTION_LEFT:
             left += caption.extent
         elif caption and caption.direction == CAPTION_TOP:
@@ -110,6 +133,10 @@ class ObjectsMixin:
             placed = self.draw_table(state, ctrl, left, top)
             if placed is not None and placed.last_state is not state and self.in_body and _is_top_and_bottom(model):
                 self.continue_stacked_box(state, placed.last_state, placed.bottom + margins[3])
+            if placed is not None and anchor_state is not state and placed.last_state is placed.first_state:
+                # 앞 개체에 밀려 다음 쪽에 통째로 놓인 표 뒤 본문은 기준 쪽에서 잇는다(실측: hwpspec s2 p271 표 67이
+                # 43쪽, 다음 문단 p272 21656은 같은 43쪽).
+                self.current_state = anchor_state
             if placed is not None:
                 first, left, top, last, bottom = (
                     placed.first_state,
@@ -183,8 +210,16 @@ class ObjectsMixin:
             self.in_body, self.current_note_number = saved
 
     def floating_position(
-        self, model: ObjectCtrlHeader, state: PageState, view: ParagraphView, area: Area, width: float, height: float
+        self,
+        model: ObjectCtrlHeader,
+        state: PageState,
+        view: ParagraphView,
+        area: Area,
+        width: float,
+        height: float,
+        full_height: float | None = None,
     ) -> tuple[float, float]:
+        """full_height는 쪽을 넘을 수 있는 표의 격자 높이다(저장 높이는 첫 쪽 몫만 적히기도 한다)."""
         geometry = state.geometry
         column_x, column_width = geometry.columns[state.column]
         horizontal = {
@@ -213,9 +248,34 @@ class ObjectsMixin:
             # 정답 표는 앞 문단 바로 아래). 차이가 그와 다르면 앞 개체에 밀린 줄이라 저장 줄을 기준으로 한다
             # (kr_156489726 s1 p60: 앞 표 아래 줄 47073, 정답 표는 그 줄 + 오프셋 1614).
             para_top = self.flow_position(state, para_top)
-        elif self.in_body and model.vert_rel_to == REL_COLUMN_OR_PARA:
+        elif (
+            self.in_body
+            and model.vert_rel_to == REL_COLUMN_OR_PARA
+            and model.text_wrap == TextWrap.TOP_AND_BOTTOM
+            and full_height is not None
+            and view.segments
+            and self.flow_position(state, para_top) + view.segments[0].line_height + view.segments[0].line_spacing
+            < para_top
+            and self.flow_position(state, para_top) + _pushed_extent(model, full_height)
+            > geometry.body_top + geometry.body_height
+        ):
+            # 앞 줄 끝에서 시작한 표가 이 쪽을 넘기면 첫 줄은 다음 쪽 표 나머지 아래로 저장된다. 표는 앞 줄 끝에 놓는다
+            # (실측: 정책연구용역 s0 p1822 앞 줄 끝 26000, 첫 줄 37848 = 175쪽 표 나머지 아래, 정답 표 위 선 324.84pt).
+            # 앞 줄 끝에서 한 줄 간격 안에 저장된 줄은 이 쪽 줄이다(편람 149쪽 표: 차이 1000, 정답은 저장 줄 기준).
+            para_top = self.flow_position(state, para_top)
+        elif (
+            self.in_body
+            and model.vert_rel_to == REL_COLUMN_OR_PARA
+            and (
+                not self.starts_page_by_rewind(state, view)
+                or bool(view.segments)
+                and view.segments[0].vertical_pos == view.para_shape.space_before // 2 > 0
+            )
+            and not (self.lines_after_spill == 0 and self.table_bottom is not None)
+        ):
             # 문단 기준 위치는 문단 위 간격 앞이다(편람 47쪽 s2 p214: 첫 줄 1900 = 앞 줄 끝 1200 + 위 간격 1400/2,
-            # 정답 표 위 선 132.11pt = 1200 자리).
+            # 정답 표 위 선 132.11pt = 1200 자리). 쪽 나눔(rowbreak s1 p2 500)도 위 간격을 넣어 저장하지만, 넘쳐서
+            # 새 쪽 첫 문단이 되면 위 간격 없이 저장된다(hwpspec s2 p181 31쪽 14091).
             para_top -= view.para_shape.space_before // 2
         vertical = {
             REL_PAPER: (0.0, geometry.paper_height),
@@ -227,6 +287,13 @@ class ObjectsMixin:
             _align(ref_x, ref_w, width, model.horz_align, model.horz_offset),
             _align(ref_y, ref_h, height, model.vert_align, model.vert_offset),
         )
+
+    def starts_page_by_rewind(self, state: PageState, view: ParagraphView) -> bool:
+        """쪽·단 나누기 없이 넘쳐서 이 쪽·단의 첫 문단이 됐는가."""
+        continues = (
+            self.flow_cursor is not None and self.flow_cursor[0] is state and self.flow_cursor[1] == state.column
+        )
+        return not continues and not view.node.model.break_type & BREAK_SECTION_PAGE_COLUMN
 
     def flow_position(self, state: PageState, para_top: float) -> float:
         """첫 줄이 개체 아래로 밀린 문단의 원래 위치: 같은 쪽·단에서 앞 줄이 끝난 곳."""
@@ -269,6 +336,9 @@ class ObjectsMixin:
                             state = self.states[following]
                         else:
                             state = self.new_page(state.base_geometry)
+                            # 표를 통째로 옮겨 만든 쪽이라 뒤 문단의 되감기가 이 쪽을 잇는다(실측: basicsReport s0 p101
+                            # 표 둘째가 5쪽, 정답은 p112 50528부터 같은 5쪽).
+                            self.__dict__.setdefault("float_pages", set()).add(id(state))
                         top = state.geometry.body_top
                     boxes = registry.setdefault((id(state.page), state.column), [])
                     break
@@ -283,6 +353,39 @@ class ObjectsMixin:
         boxes[-1] = (box_left, box_right, box_top, float("inf"), (last, bottom))
         registry.setdefault((id(last.page), last.column), []).append((box_left, box_right, float("-inf"), bottom, None))
 
+    def textbox_grown_line(self, view: ParagraphView, index: int) -> LineSeg | None:
+        """줄의 글자처럼 취급한 글상자 글을 다시 나누면 더 길어질 때 그만큼 늘린 줄. 아니면 None.
+
+        한글 2022는 저장 줄보다 넓어진 글상자 글을 다시 나누고 상자를 늘린다(실측: pr-1674 s0 p159 「붙임2-1」
+        저장 한 줄 6660HU, 우리 폭 6788HU > 안쪽 6662HU, 정답은 두 줄로 상자가 51.6pt가 되어 뒤 표가 다음 쪽으로 감).
+        """
+        first, last = view.line_range(index)
+        growth = 0.0
+        for order in range(first, last):
+            ctrl = view.controls.get(order)
+            if ctrl is not None and isinstance(ctrl.model, ObjectCtrlHeader) and ctrl.model.treat_as_char:
+                growth = max(growth, self.textbox_growth(ctrl))
+        if growth <= 0:
+            return None
+        segment = view.segments[index]
+        return dataclasses.replace(segment, line_height=segment.line_height + round(growth))
+
+    def textbox_growth(self, ctrl: Node) -> float:
+        component = ctrl.find(tags.SHAPE_COMPONENT)
+        text_list = component.find(tags.LIST_HEADER) if component is not None else None
+        if text_list is None or not isinstance(text_list.model, TextBoxListHeader):
+            return 0.0
+        margins = text_list.model.margins
+        paragraphs = [child for child in component.children if child.tag == tags.PARA_HEADER]
+        inner_width = ctrl.model.width - margins[0] - margins[1]
+        stored = self.paragraph_views(paragraphs, inner_width)
+        if not stored or not all(view.segments for view in stored):
+            return 0.0
+        fresh = self.recomposed_views(stored, inner_width)
+        if sum(len(view.segments) for view in fresh) <= sum(len(view.segments) for view in stored):
+            return 0.0
+        return max(0.0, fresh[-1].content_height + margins[2] + margins[3] - ctrl.model.height)
+
     def draw_component(
         self, state: PageState, component: Node, left: float, top: float, width: float, height: float
     ) -> None:
@@ -295,7 +398,7 @@ class ObjectsMixin:
             margins = header.margins
             paragraphs = [child for child in component.children if child.tag == tags.PARA_HEADER]
             inner_width = width - margins[0] - margins[1]
-            views = self.paragraph_views(paragraphs, inner_width)
+            views = self.paragraph_views(paragraphs, inner_width, textbox=True)
             area = Area(left + margins[0], top + margins[2], inner_width)
             self.place_linked_text(state, views, area, (height - margins[2] - margins[3], header.vert_align))
         for child in component.children:
@@ -383,21 +486,69 @@ class ObjectsMixin:
     def draw_picture(
         self, state: PageState, picture: ShapePicture, left: float, top: float, width: float, height: float
     ) -> None:
+        drawing = self.metafile(picture.bin_data_id)
+        if drawing is not None:
+            self.draw_metafile(state, drawing, left, top, width, height)
+            return
         href = self.image_href(picture.bin_data_id)
         if href is not None:
             state.page.items.append(Image(left, top, width, height, href))
 
-    def image_href(self, bin_data_id: int) -> str | None:
-        if bin_data_id in self.image_cache:
-            return self.image_cache[bin_data_id]
-        href = None
+    def draw_metafile(
+        self, state: PageState, drawing: WmfDrawing, left: float, top: float, width: float, height: float
+    ) -> None:
+        """WMF 그림은 도형을 SVG 그림으로, 글자는 그림 상자에 맞춰 늘린 글자로 그린다(한글 PDF도 글자로 찍는다)."""
+        svg = base64.b64encode(drawing.svg.encode("utf-8")).decode("ascii")
+        state.page.items.append(Image(left, top, width, height, f"data:image/svg+xml;base64,{svg}"))
+        scale_x = width / drawing.width if drawing.width else 1.0
+        scale_y = height / drawing.height if drawing.height else 1.0
+        for text in drawing.texts:
+            x = left + text.x * scale_x
+            for index, char in enumerate(text.text):
+                advance = text.advances[index] * scale_x if text.advances and index < len(text.advances) else 0.0
+                if char.strip():
+                    state.page.items.append(
+                        Glyph(
+                            char,
+                            x,
+                            top + text.y * scale_y,
+                            text.size * scale_y,
+                            text.face,
+                            text.color,
+                            text.bold,
+                            text.italic,
+                            advance=advance,
+                        )
+                    )
+                x += advance
+
+    def metafile(self, bin_data_id: int) -> WmfDrawing | None:
+        entry = self.styles.bin_data[bin_data_id - 1] if 1 <= bin_data_id <= len(self.styles.bin_data) else None
+        if entry is None or (entry.extension or "").lower() != "wmf":
+            return None
+        cache = self.__dict__.setdefault("_metafiles", {})
+        if bin_data_id not in cache:
+            data = self.bin_bytes(bin_data_id)
+            cache[bin_data_id] = convert_wmf(data) if data is not None else None
+        return cache[bin_data_id]
+
+    def bin_bytes(self, bin_data_id: int) -> bytes | None:
         if 1 <= bin_data_id <= len(self.styles.bin_data):
             entry = self.styles.bin_data[bin_data_id - 1]
             name = entry.storage_name
             if name and name in self.document.container.raw_streams:
                 compressed = {0: None, 1: True, 2: False}.get(entry.compression)
-                data = self.document.container.bin_data(name, compressed)
-                href = f"data:{_mime(data, name)};base64,{base64.b64encode(data).decode('ascii')}"
+                return self.document.container.bin_data(name, compressed)
+        return None
+
+    def image_href(self, bin_data_id: int) -> str | None:
+        if bin_data_id in self.image_cache:
+            return self.image_cache[bin_data_id]
+        href = None
+        data = self.bin_bytes(bin_data_id)
+        if data is not None:
+            name = self.styles.bin_data[bin_data_id - 1].storage_name
+            href = f"data:{_mime(data, name)};base64,{base64.b64encode(data).decode('ascii')}"
         self.image_cache[bin_data_id] = href
         return href
 
@@ -475,7 +626,7 @@ def _is_top_and_bottom(model) -> bool:
 
 
 def _out_of_scope(ctrl: Node) -> bool:
-    """수식이거나, OLE·차트·글맵시를 담은 그리기 개체면 True. 표는 셀 안 개체를 셀을 그릴 때 따로 판정한다."""
+    """수식이거나, OLE·차트·글맵시를 담은 그리기 개체면 True. 표·글상자 문단 안 개체는 그 글을 놓을 때 따로 판정한다."""
     kind = ctrl.record.payload[:4]
     if kind == tags.EQUATION_CTRL.to_bytes(4, "little"):
         return True
@@ -486,8 +637,28 @@ def _out_of_scope(ctrl: Node) -> bool:
         node = pending.pop()
         if node.tag in _OUT_OF_SCOPE_TAGS:
             return True
+        # 글상자 문단 속 수식은 글을 놓을 때 하나씩 제외하므로 글상자 전체를 범위 밖으로 보지 않는다.
+        if node.tag == tags.PARA_HEADER:
+            continue
         pending.extend(node.children)
     return False
+
+
+def outer_box(
+    model: ObjectCtrlHeader, left: float, top: float, width: float, height: float
+) -> tuple[float, float, float, float, int]:
+    """floating_position 자리(left, top)에 놓인 개체의 바깥 여백까지 든 상자와 글 흐름.
+
+    바깥 상자가 정렬 기준에 맞는다(표 그리기 _margin_shift와 같은 규칙, 오른쪽 정렬 그림의 피한 구간 566HU로 확인).
+    """
+    margins = model.outer_margins or [0, 0, 0, 0]
+    return (
+        left + _margin_shift(model.horz_align, margins[0], margins[1]) - margins[0],
+        top + _margin_shift(model.vert_align, margins[2], margins[3]) - margins[2],
+        width + margins[0] + margins[1],
+        height + margins[2] + margins[3],
+        int(model.text_flow),
+    )
 
 
 def _align(reference: float, span: float, size: float, align: int, offset: int) -> float:

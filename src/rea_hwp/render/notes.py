@@ -85,10 +85,9 @@ class NotesMixin:
     def draw_footnotes(self, state: PageState) -> None:
         """쪽 각주를 본문 바닥에 붙여 쌓고, 그 위에 구분선을 긋는다."""
         geometry = state.geometry
-        shape = self.footnote_shape_of(state.footnotes[0])
-        views = [self.paragraph_views(_list_paragraphs(ctrl), geometry.body_width) for ctrl in state.footnotes]
-        # 주석 안 문단들의 저장 세로 위치는 주석 첫 줄부터 이어서 센다.
-        heights = [max((v.content_height for v in group), default=0) for group in views]
+        shape = self.footnote_shape_of(state.footnotes[0].ctrl)
+        pieces = [self.footnote_pieces(note.ctrl, geometry.body_width)[note.piece] for note in state.footnotes]
+        heights = [piece_height(lines) for lines in pieces]
         spacing = shape.note_spacing if shape is not None else 0
         total = sum(heights) + spacing * max(0, len(heights) - 1)
         y = geometry.body_top + geometry.body_height - total
@@ -97,13 +96,34 @@ class NotesMixin:
             length = divider_length(shape.divider_length, geometry.body_width)
             line = BorderLine(shape.divider_line_type, shape.divider_line_width, shape.divider_line_color)
             state.page.items.extend(border_lines(line, geometry.body_left, line_y, geometry.body_left + length, line_y))
-        for ctrl, group, height in zip(state.footnotes, views, heights, strict=True):
-            self.current_note_number = ctrl.model.number
+        for note, lines, height in zip(state.footnotes, pieces, heights, strict=True):
+            self.current_note_number = note.ctrl.model.number
             area = Area(geometry.body_left, y, geometry.body_width)
-            for view in group:
-                for index in range(len(view.segments)):
-                    self.place_line(state, view, index, area)
+            for view, index in lines:
+                self.place_line(state, view, index, area)
             y += height + spacing
+
+    def footnote_pieces(self, ctrl: Node, width: float) -> list[list[tuple[ParagraphView, int]]]:
+        """각주 줄을 쪽 조각으로 나눈다. 저장 줄 위치가 앞 줄보다 크지 않은 줄에서 새 조각이 시작한다.
+
+        주석 안 문단들의 저장 세로 위치는 주석 첫 줄부터 이어서 센다(정책연구 66쪽 각주 77: 0, 1172 | 0, 1172).
+        """
+        pieces: list[list[tuple[ParagraphView, int]]] = [[]]
+        previous: int | None = None
+        for view in self.paragraph_views(_list_paragraphs(ctrl), width):
+            for index, segment in enumerate(view.segments):
+                if previous is not None and segment.vertical_pos <= previous:
+                    pieces.append([])
+                pieces[-1].append((view, index))
+                previous = segment.vertical_pos
+        return pieces
+
+    def footnote_split_pending(self, state: PageState) -> bool:
+        """쪽 마지막 각주가 다음 쪽으로 이어지는 조각인가. 그러면 그 쪽의 각주 자리는 찼다."""
+        if not state.footnotes:
+            return False
+        last = state.footnotes[-1]
+        return last.piece + 1 < len(self.footnote_pieces(last.ctrl, state.geometry.body_width))
 
     def footnote_shape_of(self, ctrl: Node) -> FootnoteShape | None:
         """각주 컨트롤이 속한 구역의 각주 모양(구역 정의 아래 첫 FOOTNOTE_SHAPE)."""
@@ -145,3 +165,8 @@ def pushing_extent(view: ParagraphView) -> int:
             margins = model.outer_margins or [0, 0, 0, 0]
             extent = max(extent, model.vert_offset + model.height + margins[3])
     return extent
+
+
+def piece_height(lines: list[tuple[ParagraphView, int]]) -> int:
+    """각주 조각이 차지하는 높이(조각 첫 줄 위치 0 기준, 마지막 줄 간격 제외)."""
+    return max((view.segments[i].vertical_pos + view.segments[i].line_height for view, i in lines), default=0)

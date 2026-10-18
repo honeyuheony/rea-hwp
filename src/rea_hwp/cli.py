@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .document import HwpDocument
-from .render.html import viewer_html
+from .render.html import text_layer, viewer_html
 from .render.layout import layout_document
 from .render.svg import HU_PER_PT, page_glyph_table, page_to_svg
 
@@ -19,13 +19,15 @@ def render(args: argparse.Namespace) -> int:
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     listing = []
+    layers = []
     glyphs = []
     for page in pages:
         name = f"page-{page.number:04d}.svg"
         (output / name).write_text(page_to_svg(page), encoding="utf-8")
         listing.append((name, page.width / HU_PER_PT, page.height / HU_PER_PT))
+        layers.append(text_layer(page.text_lines, page.width, page.height))
         glyphs.append(page_glyph_table(page))
-    (output / "index.html").write_text(viewer_html(Path(args.file).name, listing), encoding="utf-8")
+    (output / "index.html").write_text(viewer_html(Path(args.file).name, listing, layers), encoding="utf-8")
     if args.glyphs:
         (output / "glyphs.json").write_text(json.dumps(glyphs, ensure_ascii=False), encoding="utf-8")
     print(f"{len(pages)} pages -> {output / 'index.html'}")

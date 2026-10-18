@@ -98,6 +98,8 @@ def symbol_text(char: str) -> str:
 
     한컴 전용 기호(평면 15 PUA)는 PDF 텍스트에서 모두 U+F000이다(hwp3-sample16: U+F03C5, 해외직접투자: U+F02B1 등).
     """
+    if len(char) != 1:
+        return char
     code = ord(char)
     if 0xF0000 <= code <= 0xFFFFD:
         return "\uf000"

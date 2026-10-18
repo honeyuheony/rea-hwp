@@ -30,6 +30,10 @@ BASELINE_RATIO = 0.85
 FIT_EPSILON = 0.5
 #: LINE_SEG 태그 bit17/18: 줄의 첫/마지막 세그먼트. 저장 줄은 대개 둘 다 켜져 있다.
 SINGLE_SEGMENT = (1 << 17) | (1 << 18)
+#: 줄의 첫 세그먼트 표지(LINE_SEG flags 0x20000).
+LINE_FIRST_SEGMENT = 1 << 17
+#: 빈 세그먼트(0x10000)인 줄 첫 세그먼트. 한글은 구간이 하나면 그 줄을 다시 나눈다(FUN_101dbcf0).
+EMPTY_FIRST_SEGMENT = (1 << 16) | (1 << 17)
 #: 줄 간격 종류(명세 표43): 0 글자에 따라(%), 1 고정 값, 2 여백만 지정, 3 최소.
 PERCENT, FIXED, SPACE_ONLY, MINIMUM = range(4)
 #: 한글 줄 나눔 단위가 어절이 아닌 글자일 때 한 단어로 묶는 라틴 글자(kordoc splitWrapUnits).
@@ -79,7 +83,9 @@ def line_gap(para_shape: ParaShape, line_height: int) -> int:
     # kps-ai 고정 2600 → 1300; rhwp style_resolver.rs 비-Percent 값 / 2).
     value //= 2
     if kind == FIXED:
-        return max(0, value - line_height)
+        # 고정 간격이 글자보다 작으면 줄이 겹치도록 음수 간격을 둔다(실측: task2070 21쪽 「서론」 18pt·고정 16.6pt,
+        # 다음 문단이 1.40pt 위).
+        return value - line_height
     if kind == SPACE_ONLY:
         return value
     return max(0, value - line_height)
@@ -261,42 +267,195 @@ def compose(
     column_width: int,
     empty_height: int,
     start: int = 0,
+    head: tuple[float, float] = (0.0, 0.0),
 ) -> list[LineSeg]:
-    """세로 위치가 start에서 시작하는 합성 LineSeg 목록. 쪽 나누기는 paginate가 한다."""
+    """세로 위치가 start에서 시작하는 합성 LineSeg 목록. head는 문단 머리가 첫 줄·나머지 줄에서 차지하는 폭."""
     # 문단 모양 여백·들여쓰기는 2배로 저장된다(layout.place_line과 같은 규칙).
     left = para_shape.left_margin // 2
     right = para_shape.right_margin // 2
     indent = para_shape.indent // 2
     segment_width = column_width - left - right
-    first_width = segment_width - max(indent, 0)
-    rest_width = segment_width - max(-indent, 0)
+    first_width = segment_width - max(indent, 0) - head[0]
+    rest_width = segment_width - max(-indent, 0) - head[1]
     starts = break_lines(chars, boxes, para_shape, (first_width, rest_width)) if chars else [0]
     segments: list[LineSeg] = []
     vertical = start
     for number, first in enumerate(starts):
         end = starts[number + 1] if number + 1 < len(starts) else len(chars)
-        text_height = max((boxes[i].height for i in range(first, end)), default=0) or empty_height
-        line_height = max([text_height] + [boxes[i].object_height for i in range(first, end)])
-        flags = SINGLE_SEGMENT
-        if (number == 0 and indent > 0) or (number > 0 and indent < 0):
-            flags |= INDENT_APPLIED
-        text_start = positions[first] if first < len(positions) else (positions[-1] + 1 if positions else 0)
-        gap = line_gap(para_shape, text_height)
-        segments.append(
-            LineSeg(
-                text_start,
-                vertical,
-                line_height,
-                text_height,
-                round(line_height * BASELINE_RATIO),
-                gap,
-                left,
-                segment_width,
-                flags,
-            )
-        )
-        vertical += line_height + gap
+        segment = _line_seg(chars, positions, boxes, para_shape, empty_height, number, first, end, vertical)
+        segments.append(dataclasses.replace(segment, column_start=left, segment_width=segment_width))
+        vertical += segment.line_height + segment.line_spacing
     return segments
+
+
+def compose_around(
+    chars: list,
+    positions: list[int],
+    boxes: list[ItemBox],
+    para_shape: ParaShape,
+    base: tuple[int, int],
+    floats: list[tuple[float, float, float, float, int]],
+    empty_height: int,
+    start: int,
+    head: tuple[float, float] = (0.0, 0.0),
+    first_item: int = 0,
+    first_number: int = 0,
+) -> list[LineSeg] | None:
+    """compose와 같되 줄마다 그 줄 높이에서 어울림 개체를 피한 가로 구간(avoid_floats)으로 나눈다.
+
+    한글은 줄을 나눌 때마다 지금 세로 위치의 구간을 다시 구한다(HwpApp FUN_101df690 → FUN_101dbfd0). 줄 높이는 줄
+    첫 글자의 크기로 어림한다. 한 줄이 여러 구간으로 갈리면 아직 재현하지 못해 None. first_item·first_number는
+    다시 나누기 시작하는 항목 순번과 그 줄 번호다(앞 줄은 저장 줄을 쓴다).
+    """
+    indent = para_shape.indent // 2
+    segments: list[LineSeg] = []
+    vertical, first, number = start, first_item, first_number
+    while first < len(chars) or not segments:
+        height = (boxes[first].height if first < len(boxes) else 0) or empty_height
+        ranges = avoid_floats(base, floats, vertical, height)
+        if ranges is None:
+            # 쓸 구간이 없으면 겹친 개체 아래로 내려간다.
+            below = [
+                top + h for _, top, _, h, _ in floats if top <= vertical < top + h or vertical < top < vertical + height
+            ]
+            if not below or min(below) <= vertical:
+                return None
+            vertical = math.ceil(min(below))
+            continue
+        if len(ranges) > 1:
+            return None
+        column_start, width = ranges[0]
+        if number == 0:
+            available = width - max(indent, 0) - head[0]
+        else:
+            available = width - max(-indent, 0) - head[1]
+        starts = break_lines(chars[first:], boxes[first:], para_shape, (available, available)) if chars else [0]
+        end = first + starts[1] if len(starts) > 1 else len(chars)
+        segment = _line_seg(chars, positions, boxes, para_shape, empty_height, number, first, end, vertical)
+        segments.append(dataclasses.replace(segment, column_start=column_start, segment_width=width))
+        vertical += segment.line_height + segment.line_spacing
+        first, number = end, number + 1
+    return segments
+
+
+def _line_seg(
+    chars: list,
+    positions: list[int],
+    boxes: list[ItemBox],
+    para_shape: ParaShape,
+    empty_height: int,
+    number: int,
+    first: int,
+    end: int,
+    vertical: int,
+) -> LineSeg:
+    """항목 first..end를 담는 number번째 줄의 합성 LineSeg(가로 구간은 호출한 쪽이 채운다)."""
+    indent = para_shape.indent // 2
+    text_height = max((boxes[i].height for i in range(first, end)), default=0) or empty_height
+    line_height = max([text_height] + [boxes[i].object_height for i in range(first, end)])
+    flags = SINGLE_SEGMENT
+    if (number == 0 and indent > 0) or (number > 0 and indent < 0):
+        flags |= INDENT_APPLIED
+    text_start = positions[first] if first < len(positions) else (positions[-1] + 1 if positions else 0)
+    if para_shape.line_spacing_type == FIXED and not any(
+        isinstance(chars[i], TextChar) and chars[i].char not in "\r\n" for i in range(first, end)
+    ):
+        # 글자 없이 개체만 든 줄은 개체 높이를 글자 높이로 저장한다(저장 줄 실측: tac-img-02 그림 줄 th = 20500,
+        # 고정 1800 간격 −18700. task2070 30쪽 수식만 든 줄도 정답 피치가 고정 18pt).
+        text_height = line_height
+    gap = line_gap(para_shape, text_height)
+    return LineSeg(
+        text_start, vertical, line_height, text_height, round(line_height * BASELINE_RATIO), gap, 0, 0, flags
+    )
+
+
+#: 한글 2022가 줄 가로 구간을 잴 때 단 폭을 내리는 격자(HwpUnit).
+RANGE_GRID = 4
+#: 줄 가로 구간의 최소 폭(HwpApp FUN_101dbfd0, 호환 설정 0x10000이면 1mm지만 코퍼스에는 없다).
+MIN_RANGE_WIDTH = 1440
+
+
+def horizontal_range(para_shape: ParaShape, column_width: int, snap: bool = True) -> tuple[int, int] | None:
+    """한글 2022가 떠 있는 개체를 피하기 전에 줄에 주는 가로 구간 (단 안 시작, 폭). 모르면 None.
+
+    HwpApp FUN_101dbfd0: 왼쪽 = 왼쪽 여백, 오른쪽 = 단 폭 − 오른쪽 여백(여백은 2배로 저장된다). 저장 LINE_SEG가 이
+    구간과 1HU라도 다르면 한글은 그 줄을 다시 나눈다(FUN_101dbcf0). 단 폭은 4HU로 내린 값이다: 1단 코퍼스에서 여백을
+    뺀 뒤 내린 값과 다를 때 1,379줄 모두 먼저 내린 값과 같았다(kr_156369057 48190 → 48188 − 515 = 47673). 폭이 서로
+    다른 다단(snap=False)은 내리지 않는다(KTX 33355). 백분율 여백(낮은 비트)은 아직 재현하지 않았다.
+    """
+    if para_shape.left_margin & 1 or para_shape.right_margin & 1:
+        return None
+    if snap:
+        column_width -= column_width % RANGE_GRID
+    left = para_shape.left_margin >> 1
+    right = column_width - (para_shape.right_margin >> 1)
+    if right - left < MIN_RANGE_WIDTH:
+        return None
+    return left, right - left
+
+
+def avoid_floats(
+    base: tuple[int, int], floats: list[tuple[float, float, float, float, int]], top: float, height: float
+) -> list[tuple[int, int]] | None:
+    """가로 구간 base(시작, 폭)에서 어울림 개체를 피한 구간 목록(시작, 폭). 줄이 개체 아래로 내려가야 하면 None.
+
+    floats는 단 기준 바깥 상자 (왼쪽, 위, 폭, 높이, 글 흐름)이고 top·height는 줄의 위 끝과 줄 높이다.
+    HwpApp FUN_101dbfd0·FUN_101bb480(겹침 판정)·FUN_1027ab80(흐름별 구간 빼기) 재현.
+    """
+    start = base[0]
+    end = base[0] + base[1]
+    ranges = [[start, end]]
+    for left, obj_top, width, obj_height, flow in floats:
+        obj_left, obj_right = round(left), round(left + width)
+        if not (obj_left <= start < obj_right or start < obj_left < end):
+            continue
+        if not (obj_top <= top < obj_top + obj_height or top < obj_top < top + height):
+            continue
+        if not width or not obj_height:
+            continue
+        ranges = _subtract_object(ranges, flow, obj_left, obj_right)
+    if len(ranges) > 1:
+        ranges = [r for r in ranges if r[1] - r[0] >= MIN_RANGE_WIDTH]
+    if not ranges or all(r[1] - r[0] < MIN_RANGE_WIDTH for r in ranges):
+        return None
+    return [(r0, r1 - r0) for r0, r1 in ranges]
+
+
+def _subtract_object(ranges: list[list[int]], flow: int, left: int, right: int) -> list[list[int]]:
+    """구간들에서 개체 가로 자리 [left, right)를 글 흐름(0 양쪽, 1 왼쪽, 2 오른쪽, 3 큰 쪽)에 따라 뺀다."""
+    out = [list(r) for r in ranges]
+    for i, (r0, r1) in enumerate(out):
+        inside = r0 < left and r1 > right
+        if r1 <= left:
+            if flow == 2:
+                out[i][1] = r0
+            continue
+        if inside:
+            if flow == 0:
+                return [*out[:i], [r0, left], [right, r1], *out[i + 1 :]]
+            if flow == 1:
+                return [*out[:i], [r0, left]]
+            if flow == 2:
+                out[i][0] = right
+                return out
+            # 큰 쪽: 왼쪽이 좁거나 꼭 최소 폭(1440)이면 오른쪽을 남긴다.
+            if left - r0 < r1 - right or left - r0 == MIN_RANGE_WIDTH:
+                out[i][0] = right
+            else:
+                out[i][1] = left
+            return out
+        if r1 <= right:
+            covers_right_end = r0 < left
+            if flow == 1:
+                return [*out[:i], [r0, left]] if covers_right_end else out[:i]
+            out[i][1] = left if covers_right_end and flow != 2 else r0
+            continue
+        if flow == 1:
+            return out[:i]
+        if r0 < right:
+            out[i][0] = right
+        return out
+    return out
 
 
 def paragraph_gap(previous: ParaShape | None, current: ParaShape) -> int:
@@ -304,15 +463,21 @@ def paragraph_gap(previous: ParaShape | None, current: ParaShape) -> int:
     return ((previous.space_after if previous else 0) + current.space_before) // 2
 
 
-def paginate(segments: list[LineSeg], body_height: int, page_top: int) -> list[LineSeg]:
-    """줄 아래가 본문 바닥을 넘으면 그 줄부터 다음 쪽(단) 위로 올린다. 문단 첫 줄은 page_top에서 시작한다."""
+def paginate(segments: list[LineSeg], body_height, page_top: int) -> list[LineSeg]:
+    """줄 아래가 본문 바닥을 넘으면 그 줄부터 다음 쪽(단) 위로 올린다. 문단 첫 줄은 page_top에서 시작한다.
+
+    body_height는 높이이거나, (줄 번호, 그 쪽 첫 줄 번호)를 받아 그 줄이 쓸 수 있는 높이를 돌려주는 함수다.
+    """
     placed: list[LineSeg] = []
     shift = 0
+    page_first = 0
     for number, segment in enumerate(segments):
         top = segment.vertical_pos + shift
         restart = page_top if number == 0 else 0
+        room = body_height(number, page_first) if callable(body_height) else body_height
         # 저장 LINE_SEG 실측: 줄 아래(줄 간격 제외)가 본문 높이를 넘은 줄만 다음 쪽으로 간다.
-        if top + segment.line_height > body_height and top > restart:
+        if top + segment.line_height > room and top > restart:
+            page_first = number
             shift += restart - top
             top = restart
         placed.append(dataclasses.replace(segment, vertical_pos=top))

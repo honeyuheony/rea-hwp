@@ -117,6 +117,40 @@ class FontDatabase:
         return candidates[0]
 
 
+#: 한글 2022 PC에 TrueType이 없어 한컴 HFT 엔진으로 찍는(PDF Type3) 글꼴. 「신명 」으로 시작하는 이름도 같다.
+#: HCI Poppy도 Type3로 찍히지만 HFT 폭 표가 맞지 않아 넣지 않는다(LEGACY_LATIN, 넣으면 −19k).
+HFT_ONLY_FACES = frozenset(
+    {
+        "한양신명조",
+        "한양중고딕",
+        "한양견고딕",
+        "한양견명조",
+        "한양궁서",
+        "고딕",
+        "딸기",
+        "중간공한",
+        "타이프",
+        "필기",
+        "샘물",
+    }
+    | {"옥수수", "해서 약자", "해서 간자", "#디나루", "#신명조", "#태고딕", "#필기", "HCI Hollyhock", "HCI Tulip"}
+)
+
+
+#: HFT 엔진이 흉내 낸 진하게 글자가 더 차지하는 폭(em). 코퍼스 실측 한글 0.046~0.052em(한양중고딕 13pt +0.60pt,
+#: 딸기 20pt +0.96pt), 한글 밖 글자 중앙값 0.048em. TrueType(휴먼명조·맑은 고딕)은 0.
+HFT_BOLD_EXTRA_EM = 0.05
+
+
+def is_hft_only(face: str) -> bool:
+    return face in HFT_ONLY_FACES or face.startswith("신명 ")
+
+
+#: Type3 /Widths가 PDF의 실제 글자 간격과 다른 HFT 글꼴. 보충 표의 HFT 폭을 쓰지 않는다.
+#: 실측: issue2559 79쪽 AmeriGarmnd BT 숫자 간격 4.2pt = 0.495em(rhwp 폭), 보충 표 /Widths는 0.579em.
+HFT_WIDTHS_UNRELIABLE = frozenset({"AmeriGarmnd BT"})
+
+
 def _load(name: str) -> dict:
     return json.loads(gzip.decompress(resources.files("rea_hwp.render").joinpath(f"data/{name}").read_bytes()))
 
@@ -133,7 +167,11 @@ def default_database() -> FontDatabase:
     database.add_ttf_supplement(_load("font_metrics_ttf.json.gz"))
     fill = _load("font_metrics_pdf_fill.json.gz")
     database.add_ttf_supplement(fill)
-    database.hft = {font["name"]: {int(code): width for code, width in font["widths"].items()} for font in fill["hft"]}
+    database.hft = {
+        font["name"]: {int(code): width for code, width in font["widths"].items()}
+        for font in fill["hft"]
+        if font["name"] not in HFT_WIDTHS_UNRELIABLE
+    }
     return database
 
 
@@ -164,20 +202,38 @@ LEGACY_LATIN = {"HCI Poppy": "Palatino Linotype"}
 
 #: 빈칸 제어 문자(명세 표7: 30 묶음 빈칸, 31 고정폭 빈칸) → 폭이 같은 유니코드 공백(rhwp body_text.rs).
 #: 고정폭 빈칸 폭은 글자 크기의 1/4(편람 4쪽 PDF: 12pt 줄에서 탭 끝 → 쪽 번호 3pt).
+#: 「글꼴에 어울리는 빈칸」 공백을 hancom_width에 넘길 때 쓰는 자리표. 고정 폭 공백 규칙을 피해 em으로 계산한다.
+FONT_SPACE = "\uffff"
 CONTROL_SPACES = {"\x1e": "\u00a0", "\x1f": "\u2007"}
+#: 글 속에 그대로 든 U+2007은 고정폭 빈칸 제어 문자(1/4 em)와 달리 반각이다
+#: (86712 14쪽 PDF: 12pt 줄 머리 U+2007 뒤 「(A)」가 6pt 뒤, multi-table-001도 같음).
+TEXT_FIGURE_SPACE_EM = 0.5
 
 
 _NARROW_PUNCT = frozenset(",.:;'\"`·‘’‧〮〯")
 
 
+#: 반각인 한컴 전용 기호(평면 15 PUA). 정답 PDF 코퍼스 실측: 전각으로 놓으면 다음 글자가 0.45~0.5em 뒤로 밀림
+#: (F0854·F0855 exam_kor·task2287 등 120여 건, F02FC·F0848·F031C 편람, F080C issue2020). F080F는 문서끼리 갈림.
+HALF_WIDTH_HANCOM_SYMBOLS = frozenset({0xF0854, 0xF0855, 0xF02FC, 0xF0848, 0xF031C, 0xF080C})
+
+
 def fallback_em(char: str) -> float:
     """폭 표에 없는 글자의 폭(em 비율). rhwp text_measurement.rs 1488-1553."""
     code = ord(char)
-    if 0xFF61 <= code <= 0xFFDC or 0xFFE8 <= code <= 0xFFEE:
+    if 0xFF61 <= code <= 0xFFDC or 0xFFE8 <= code <= 0xFFEE or code in HALF_WIDTH_HANCOM_SYMBOLS:
         return 0.5
     # 「․」(U+2024)는 KS X 1001 전각 기호다(2010-01-06·hwp3-sample16 PDF: 휴먼명조·한양신명조 줄에서 1em).
     # 한컴 전용 기호(평면 15 PUA)는 전각이다(hwp3-sample16 4쪽 PDF: U+F03C5 글머리 기호가 12.96pt 글자에서 12.96pt).
     if is_cjk_wide(code) or 0xF0000 <= code <= 0xFFFFD or code == 0x2024:
+        return 1.0
+    # U+F500~F8FF 한컴 기호도 전각이다(정답 PDF 코퍼스 실측: U+F53A 「한」 함초롬·한컴돋움 0.88~1.0em, U+F537 0.87em).
+    # 기호 글꼴 영역 U+F000~F0FF(U+F09F·F0A7 등)는 전각이 아니다(rowbreak·biz_plan·kps-ai 하락).
+    if 0xF500 <= code <= 0xF8FF:
+        return 1.0
+    # 글꼴에 없는 수학 연산자는 한글이 전각 대체 글꼴(Haansoft Batang)로 찍는다(정답 PDF 코퍼스 실측: U+22C5 97건 1em,
+    # U+223C·2228·221A·2264·2265·2212 0.92~1em). U+2218·2219는 0.26~0.73em으로 갈려 뺀다.
+    if 0x2200 <= code <= 0x22FF and code not in (0x2218, 0x2219):
         return 1.0
     if char in _NARROW_PUNCT:
         return 0.3
@@ -196,12 +252,9 @@ def glyph_em(char: str, metric: FontMetric | None) -> float:
     width = metric.width(code)
     if width is None:
         return fallback_em(char)
-    em = metric.em
-    if code in (0x2018, 0x2019, 0x2027) and width >= em:
-        return 0.3
-    if 0x2018 <= code <= 0x2027 and width >= em:
-        return 0.5
-    return width / em
+    # 전각 폭으로 정의된 따옴표(‘’“” 등)도 글꼴 폭 그대로 쓴다(실측: 중간진도보고서 83쪽 TrueType 휴먼명조 10pt
+    # 「‘ELIPSY’」의 ‘·’ 전진 9.96pt = 1em, em/2나 0.3em으로 줄이면 줄 끝까지 밀림. 전체 평가 +9.7k, 80168 −0.5k).
+    return width / metric.em
 
 
 def slot_of(char: str, previous_slot: int) -> int:
@@ -256,7 +309,7 @@ def hancom_width(char: str, em1000: float, height: int, ratio: int, spacing: int
     return width
 
 
-#: justify_offsets 항목 종류. FIXED(개체·생성 번호)는 늘이지도 줄이지도 않고, TAB이 있는 줄은 넘쳐도 줄이지 않는다.
+#: justify_offsets 항목 종류. FIXED(개체·생성 번호)는 늘이지도 줄이지도 않는다. TAB이 있는 줄은 탭 뒤 글자만 줄인다.
 SPACE, GLYPH, FIXED, TAB = "space", "glyph", "fixed", "tab"
 #: 줄이 넘칠 때 공백 하나가 줄어드는 최대 비율. 2025 행정업무운영 편람 실측(공백 최소값 30·50·70 문단, 0·15는 미확인).
 OVERFLOW_SPACE_SHRINK = 0.2
@@ -288,8 +341,15 @@ def justify_offsets(
                 extras[i] = slack / len(widths)
         return extras
     overflow = -slack
-    # 탭이 있는 줄은 저장된 탭 폭을 그대로 두고 넘친다(편람 4쪽·국립국어원 업무계획 2쪽 목차: 탭 뒤 쪽 번호가 줄 폭 밖).
+    # 탭이 있는 줄은 저장된 탭 폭을 그대로 둔다(편람 4쪽·국립국어원 업무계획 2쪽 목차).
     if TAB in kinds:
+        # 탭 뒤 글자만 마지막 글자를 뺀 나머지에서 같은 양씩 줄인다(편람 280쪽 PDF 목차: 쪽 번호 「283」이
+        # 467.40·468.36·469.44pt, 마지막 글자 끝이 줄 끝). 탭 뒤 글자가 하나뿐이면 줄 밖으로 넘친다.
+        last_tab = max(i for i, kind in enumerate(kinds) if kind == TAB)
+        after = [i for i in range(last_tab + 1, len(kinds)) if kinds[i] == GLYPH]
+        if len(after) > 1 and after[-1] == len(kinds) - 1:
+            for i in after[:-1]:
+                extras[i] -= overflow / (len(after) - 1)
         return extras
     caps = [widths[i] * OVERFLOW_SPACE_SHRINK for i in spaces]
     shrinkable = sum(caps)

@@ -57,6 +57,20 @@ class Image:
 
 
 @dataclass
+class TextLine:
+    """복사·검색용 줄 글(공백·탭 포함)과 그 줄이 놓인 자리. 그리는 글자는 Glyph가 맡는다."""
+
+    text: str
+    #: 줄 첫 글자 원점 x와 기준선 y.
+    x: float
+    baseline: float
+    #: 줄 첫 글자부터 마지막 글자 끝까지의 폭.
+    width: float
+    #: 줄에서 가장 큰 글자 크기.
+    size: float
+
+
+@dataclass
 class Page:
     width: float
     height: float
@@ -64,6 +78,8 @@ class Page:
     items: list[Glyph | Line | Rect | Image] = field(default_factory=list)
     #: 1단계 범위 밖이라 그리지 않은 개체(수식·차트·OLE·글맵시)의 영역 (x, y, 너비, 높이).
     excluded: list[tuple[float, float, float, float]] = field(default_factory=list)
+    #: 놓은 순서대로의 줄 글. 뷰어가 투명한 글 층으로 깔아 글자를 고르고 복사할 수 있게 한다.
+    text_lines: list[TextLine] = field(default_factory=list)
 
     @property
     def glyphs(self) -> list[Glyph]:

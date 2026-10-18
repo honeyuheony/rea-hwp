@@ -287,7 +287,9 @@ def floating_bottom(view: ParagraphView) -> int:
 
 def master_pages(section_def: Node) -> dict[int, list[Node]]:
     """구역 정의 아래 바탕쪽 문단 목록을 종류(BOTH·ODD·EVEN)별로 나눈다."""
-    kinds = [kind for kind in (BOTH, ODD, EVEN) if section_def.model.attr & kind]
+    # 바탕쪽 목록은 양쪽·짝수·홀수 순서로 저장된다
+    # (실측: 편람 1구역 홀짝 바탕쪽, 정답 홀수 쪽 「제1장」·짝수 쪽 「2025 편람」).
+    kinds = [kind for kind in (BOTH, EVEN, ODD) if section_def.model.attr & kind]
     groups: list[list[Node]] = []
     for child in section_def.children:
         if isinstance(child.model, MasterPageListHeader):

@@ -10,11 +10,14 @@ from rea_hwp.cli import main as cli_main
 from rea_hwp.container import HwpContainer, HwpFormatError
 from rea_hwp.document import HwpDocument
 from rea_hwp.record import Record, RecordStream, build_tree, parse_records
+from rea_hwp.render.html import text_layer
+from rea_hwp.render.scene import TextLine
 
 CORPUS = Path.home() / "tools" / "hwp-corpus"
 SIMPLE_DOC = CORPUS / "oss" / "rhwp" / "basic__NewYear_s_Day.hwp"
 DISTRIBUTED_DOC = next(iter(sorted((CORPUS / "oss").rglob("*distribution*.hwp"))), None) if CORPUS.exists() else None
 PASSWORD_DOC = CORPUS / "oss" / "rhwp" / "hwp3-sample16-hwp5-2024-password-123456.hwp"
+LEGACY_PASSWORD_DOC = CORPUS / "oss" / "pyhwp" / "tests__hwp5_tests__fixtures__password-12345.hwp"
 needs_corpus = pytest.mark.skipif(not SIMPLE_DOC.exists(), reason="corpus not available")
 
 
@@ -70,6 +73,15 @@ def test_password_document_decrypts_with_right_password_only():
         HwpContainer.open(PASSWORD_DOC)
 
 
+@needs_corpus
+def test_legacy_des_password_document_decrypts_to_typed_records():
+    document = HwpDocument.open(LEGACY_PASSWORD_DOC, "12345")
+    assert document.container.header.encrypt_version == 0
+    assert document.sections[0].nodes[0].record.tag == 66
+    for stream in document.record_streams:
+        assert stream.to_bytes() == document.container.record_stream(stream.name)
+
+
 @pytest.mark.skipif(DISTRIBUTED_DOC is None, reason="distribution sample not available")
 def test_distributed_document_reads_view_text():
     document = HwpDocument.open(DISTRIBUTED_DOC)
@@ -83,3 +95,13 @@ def test_cli_render_writes_pages_and_viewer(tmp_path):
     assert (tmp_path / "index.html").exists()
     assert sorted(p.name for p in tmp_path.glob("page-*.svg"))[0] == "page-0001.svg"
     assert (tmp_path / "glyphs.json").read_text(encoding="utf-8").startswith("[[")
+    assert '<div class="text-layer"><span ' in (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+def test_text_layer_places_line_text_by_page_ratio():
+    line = TextLine("가 <나>", x=1000, baseline=2000, width=3000, size=1000)
+    layer = text_layer([line], width=10000, height=20000)
+    assert layer == (
+        '<div class="text-layer"><span style="left: 10%; top: 5.75%; font-size: 10.0000cqw" '
+        'data-w="0.300000">가 &lt;나&gt;</span><br></div>'
+    )

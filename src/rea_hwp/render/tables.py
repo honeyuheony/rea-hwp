@@ -29,6 +29,8 @@ class Cell:
     floor: float = 0.0
     #: 쪽을 넘는 중첩 표 다음 문단 번호와 그 표 아래 끝(셀 문단 목록 원점 기준).
     resume: tuple[int, float] | None = None
+    #: 문단이 바뀌어도 vertical_pos 0 다음 0을 새 쪽 조각으로 센다(stored_pieces paragraph_restarts).
+    paragraph_restarts: bool = False
 
 
 @dataclass
@@ -44,6 +46,10 @@ class TableGrid:
     #: 쪽을 넘는 여러 행 셀((시작 행, 열))의 저장 쪽 조각 시작 위치(셀 맨 위 기준, piece_offsets와 같은 셈).
     #: 자를 자리 후보로만 쓴다. 셀 높이·행 경계·셀 안 줄 위치에는 쓰지 않는다.
     span_piece_starts: dict[tuple[int, int], list[float]] = field(default_factory=dict)
+    #: 셀 하나라도 제목 셀이면 제목 행으로 본다(기본은 행의 모든 셀이 제목 셀일 때).
+    header_any: bool = False
+    #: 낡은 저장 줄을 셀 폭으로 다시 나눈 셀이 있는 격자인가.
+    recomposed: bool = False
 
     @property
     def width(self) -> float:
@@ -167,44 +173,79 @@ def stored_lines(paragraph: Node) -> list:
     return (getattr(found.model, "segments", None) or []) if found else []
 
 
-def stored_pieces(lines: list[list], columns: bool = False) -> tuple[list[list[int]], list[int]]:
+def stored_pieces(
+    lines: list[list], columns: bool = False, paragraph_restarts: bool = False, column_count: int = 1
+) -> tuple[list[list[int]], list[int]]:
     """줄마다 쪽 조각 번호와 조각별 내용 높이. 셀이 쪽을 넘으면 한글은 다음 쪽 줄의 vertical_pos를 다시 센다.
 
     앞 조각이 0에 놓인 한 줄뿐이면 다음 쪽 줄도 0으로 저장되므로, 같은 문단 안에서 0이 이어지는 줄도 새 조각으로
     본다(실측: table_scattered_header_rowbreak 3쪽 끝 셀 「바다모래인 / 경우」). 다단 셀(columns)의 0은 다음 단이다.
     """
+    pieces, _ = _pieces_and_columns(lines, columns, paragraph_restarts, column_count)
+    heights = [0] * (max((number for numbers in pieces for number in numbers), default=0) + 1)
+    for segments, numbers in zip(lines, pieces, strict=True):
+        for segment, number in zip(segments, numbers, strict=True):
+            heights[number] = max(heights[number], segment.vertical_pos + segment.line_height)
+    return pieces, heights
+
+
+def _pieces_and_columns(
+    lines: list[list], columns: bool, paragraph_restarts: bool, column_count: int
+) -> tuple[list[list[int]], list[list[int]]]:
+    """줄마다 (쪽 조각 번호, 단 번호). 다단 셀은 되감길 때마다 다음 단으로 가고 단이 다 차면 새 쪽 조각이다
+    (실측: multicolumns-layout 4쪽 2단 셀, 4800 다음 0이 정답에서 같은 쪽 오른쪽 단)."""
     pieces: list[list[int]] = []
-    heights = [0]
+    column_numbers: list[list[int]] = []
+    piece, column = 0, 0
     previous: int | None = None
     for segments in lines:
-        numbers = []
+        numbers, columns_of_paragraph = [], []
         for index, segment in enumerate(segments):
-            if previous is not None and (
+            if previous is not None and segment.vertical_pos < previous and column + 1 < column_count:
+                column += 1
+            elif previous is not None and (
                 segment.vertical_pos < previous
                 or segment.vertical_pos == previous == 0
-                and index > 0
+                and (index > 0 or paragraph_restarts)
                 and not columns
                 and segment.flags & LINE_FIRST_SEGMENT
             ):
-                heights.append(0)
-            heights[-1] = max(heights[-1], segment.vertical_pos + segment.line_height)
-            numbers.append(len(heights) - 1)
+                piece, column = piece + 1, 0
+            numbers.append(piece)
+            columns_of_paragraph.append(column)
             previous = segment.vertical_pos
         pieces.append(numbers)
-    return pieces, heights
+        column_numbers.append(columns_of_paragraph)
+    return pieces, column_numbers
 
 
 def cell_pieces(cell: Cell) -> tuple[list[list[int]], list[int]]:
     """셀 줄의 쪽 조각(stored_pieces)."""
-    return stored_pieces(cell.lines, _multi_column(cell))
+    column_def = cell_column_def(cell)
+    return stored_pieces(cell.lines, column_def is not None, cell.paragraph_restarts, _column_count(column_def))
 
 
-def _multi_column(cell: Cell) -> bool:
-    return any(
-        isinstance(child.model, ColumnDefCtrl) and child.model.count > 1
-        for paragraph in cell.paragraphs
-        for child in paragraph.children
-        if child.tag == tags.CTRL_HEADER
+def cell_columns(cell: Cell) -> list[list[int]]:
+    """셀 줄마다 놓일 단 번호(cell_pieces와 같은 되감기 규칙)."""
+    column_def = cell_column_def(cell)
+    return _pieces_and_columns(cell.lines, column_def is not None, cell.paragraph_restarts, _column_count(column_def))[
+        1
+    ]
+
+
+def _column_count(column_def: ColumnDefCtrl | None) -> int:
+    return column_def.count if column_def is not None else 1
+
+
+def cell_column_def(cell: Cell) -> ColumnDefCtrl | None:
+    return next(
+        (
+            child.model
+            for paragraph in cell.paragraphs
+            for child in paragraph.children
+            if child.tag == tags.CTRL_HEADER and isinstance(child.model, ColumnDefCtrl) and child.model.count > 1
+        ),
+        None,
     )
 
 
@@ -258,7 +299,9 @@ def span_piece_offsets(table: Table, cells: list[Cell]) -> dict[tuple[int, int],
     return found
 
 
-def cell_height(table: Table, cell: Cell, offsets: dict[tuple[int, int], list[float]]) -> float:
+def cell_height(
+    table: Table, cell: Cell, offsets: dict[tuple[int, int], list[float]], use_stored: bool = True
+) -> float:
     """저장된 셀 높이는 최소 높이다. 내용이 더 높으면 행이 늘어난다(쪽을 넘는 셀은 조각을 이어 붙인 높이)."""
     margins = cell_margins(table, cell)
     _, heights = cell_pieces(cell)
@@ -270,11 +313,14 @@ def cell_height(table: Table, cell: Cell, offsets: dict[tuple[int, int], list[fl
     split_span = cell.header.row_span > 1 and len(heights) > 1
     # 셀 간격이 있는 표는 쪽을 넘은 행도 저장 높이가 행 높이다(편람 s4 p47 표: 행 3·4·5 = 저장 13419·51996·25763,
     # lane-L 실측). 셀 간격이 갈림 기준인지는 이 표 하나로만 확인했다.
-    minimum = 0 if (split_row and not getattr(table, "cell_spacing", 0)) or split_span else stored_height(cell)
+    ignored = (split_row and not getattr(table, "cell_spacing", 0)) or split_span or not use_stored
+    minimum = 0 if ignored else stored_height(cell)
     if starts is None:
         # 여러 행 셀의 뒤 조각은 이어지는 쪽 조각 맨 위에 놓으므로 첫 조각만 높이에 반영한다.
         return max(minimum, max(heights[0], cell.floor) + margins[2] + margins[3])
-    return max(minimum, max(starts[-1] + heights[-1], cell.floor) + margins[2] + margins[3])
+    # 행 조각 시작은 행에서 가장 많이 나뉜 셀 기준이라, 조각이 적은 셀은 자기 마지막 조각의 시작을 쓴다
+    # (실측: 편람 314~322쪽 행 12 셀 조각 2개·6개, 행 전체 끝을 쓰면 173260, 정답 나머지 한 줄로 154996).
+    return max(minimum, max(starts[len(heights) - 1] + heights[-1], cell.floor) + margins[2] + margins[3])
 
 
 def table_grid(ctrl: Node, cell_lines: Callable[[Table, Cell], list[list]] | None = None) -> TableGrid | None:
@@ -313,6 +359,10 @@ def table_grid(ctrl: Node, cell_lines: Callable[[Table, Cell], list[list]] | Non
             for c in cells
         ],
     )
+    if any(later < earlier for earlier, later in zip(row_y, row_y[1:], strict=False)):
+        # 저장 셀 높이가 서로 맞지 않아 경계가 거꾸로 풀리면 한 행 셀로 행을 정하고 여러 행 셀은 아래 부족분으로 늘린다
+        # (task2287 s0 표 47행: 행 22~26 여러 행 셀 높이 합이 299 어긋나 행 23 경계가 행 22보다 위로 풀림).
+        row_y = solve_rows(table, cells, rows, offsets)
     # 끝 행이 위인 셀부터 늘린다. 셀 둘이 겹친 행에서 함께 모자라면 한 번만 늘어난다
     # (table_scattered_header_rowbreak 41쪽: 행 39~70·55~69 셀이 9.23pt씩 모자라고 정답은 24.93pt 행 하나).
     for cell in sorted(cells, key=lambda c: (c.header.row + c.header.row_span, c.header.row_span)):
@@ -327,6 +377,41 @@ def table_grid(ctrl: Node, cell_lines: Callable[[Table, Cell], list[list]] | Non
         col_x = [x + index * spacing for index, x in enumerate(col_x)]
         row_y = [y + index * spacing for index, y in enumerate(row_y)]
     return TableGrid(table, cells, col_x, row_y, offsets, spacing, span_piece_offsets(table, cells))
+
+
+def solve_rows(
+    table: Table, cells: list[Cell], rows: int, offsets: dict[tuple[int, int], list[float]], required=None
+) -> list[float]:
+    """한 행 셀로 행 높이를 정하고, 여러 행 셀은 끝 행이 위인 것부터 모자란 만큼 끝 행을 늘린 행 경계(셀 간격 제외).
+
+    required는 셀(id)마다 걸친 행 높이 합의 하한을 준다(여러 행 셀은 저장 높이 대신, 한 행 셀은 내용 높이와 함께).
+    """
+    heights = [0.0] * rows
+    for cell in cells:
+        if cell.header.row_span == 1:
+            need = (required or {}).get(id(cell), 0.0)
+            heights[cell.header.row] = max(heights[cell.header.row], cell_height(table, cell, offsets), need)
+    spacing = float(table.cell_spacing or 0)
+    # 저장 높이가 내용보다 작은 한 행 셀이 있는 행은 다른 버전 한글이 다르게 나눈 낡은 배치다. 그 행을 지나는 여러 행
+    # 셀의 저장 높이도 낡아 내용으로만 맞춘다(실측: task2287 146쪽 표 행 8~17 셀 저장 47708, 행 16 셀 저장 400·1082,
+    # 정답 행 17 = 내용 40.3pt).
+    stale_rows = {
+        cell.header.row
+        for cell in cells
+        if cell.header.row_span == 1 and 0 < stored_height(cell) < cell_height(table, cell, offsets) - 1
+    }
+    for cell in sorted(cells, key=lambda c: (c.header.row + c.header.row_span, c.header.row_span)):
+        if cell.header.row_span > 1:
+            end = min(cell.header.row + cell.header.row_span, rows)
+            need = (required or {}).get(id(cell))
+            stale = bool(stale_rows.intersection(range(cell.header.row, end)))
+            if need is None:
+                need = cell_height(table, cell, offsets, use_stored=not stale) - (cell.header.row_span - 1) * spacing
+            heights[end - 1] += max(0.0, need - sum(heights[cell.header.row : end]))
+    row_y = [0.0]
+    for height in heights:
+        row_y.append(row_y[-1] + height)
+    return row_y
 
 
 def _fit_stored_height(
@@ -365,7 +450,8 @@ def header_row_count(grid: TableGrid) -> int:
     rows = 0
     while True:
         cells = [c for c in grid.cells if c.header.row == rows]
-        if not cells or not all(c.header.is_header for c in cells):
+        marked = any if grid.header_any else all
+        if not cells or not marked(c.header.is_header for c in cells):
             return rows
         rows += 1
 
@@ -380,17 +466,23 @@ def draw_table_frame(
 ) -> None:
     """셀 배경을 먼저 모두 칠한 뒤 테두리를 긋는다. clip은 표 세로 좌표 [시작, 끝) 구간, y는 그 시작이 놓일 위치다."""
     start, end = clip if clip is not None else (0.0, grid.height)
-    lines = []
+    boxes = []
     for cell in grid.cells:
         cx, cy, width, height = grid.cell_box(cell)
         top_s, bottom_s = max(cy, start), min(cy + height, end)
-        if bottom_s <= top_s:
-            continue
+        if bottom_s > top_s:
+            boxes.append((cell, x + cx, y + top_s - start, width, bottom_s - top_s))
+    draw_cell_boxes(boxes, page, styles)
+
+
+def draw_cell_boxes(boxes: list[tuple[Cell, float, float, float, float]], page: Page, styles: DocStyles) -> None:
+    """(셀, 왼쪽, 위, 폭, 높이) 상자마다 배경을 먼저 모두 칠한 뒤 테두리를 긋는다."""
+    lines = []
+    for cell, left, top, width, height in boxes:
         fill = styles.border_fill(cell.header.border_fill_id)
         if fill is None:
             continue
-        left, top = x + cx, y + top_s - start
-        right, bottom = left + width, y + bottom_s - start
+        right, bottom = left + width, top + height
         color = colorref(fill.background_color)
         if color:
             page.items.append(Rect(left, top, width, bottom - top, fill=color))

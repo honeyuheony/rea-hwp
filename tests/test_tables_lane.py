@@ -47,6 +47,21 @@ def test_repeated_zero_vertical_pos_is_not_a_piece_in_columns_or_across_paragrap
     assert paragraphs == [1652]
 
 
+def test_rewind_in_multi_column_cell_moves_to_next_column_until_columns_run_out():
+    lines = [[_segment(0), _segment(1600), _segment(3200)], [_segment(0), _segment(1600)], [_segment(0)]]
+    pieces, heights = stored_pieces(lines, columns=True, column_count=2)
+    assert pieces == [[0, 0, 0], [0, 0], [1]]
+    assert heights == [4200, 1000]
+
+
+def test_multi_column_table_cell_stays_on_its_page_in_second_column():
+    path = CORPUS / "pyhwp" / "tests__hwp5_tests__fixtures__multicolumns-layout.hwp"
+    pages = layout_document(HwpDocument.open(path))
+    cell_glyphs = [(x, y) for char, x, y in page_glyph_table(pages[3]) if char == "표"]
+    assert len(pages) == 4
+    assert any(abs(x - 428) < 1 for x, _ in cell_glyphs)
+
+
 def test_half_line_baseline_is_restored_to_ascent():
     restored = _restored_baseline(_segment(0, height=1200, baseline=600, spacing=0))
     kept = _restored_baseline(_segment(0, height=1200, baseline=1020, spacing=0))
@@ -82,8 +97,9 @@ def test_unsplittable_table_moves_whole_or_overflows_a_fresh_page():
 
 
 def test_split_leaves_reserve_above_page_bottom():
-    # 남은 표가 통째로 들어가지 않으면 바닥에서 SPLIT_RESERVE(120)만큼 위에서 자른다.
-    assert _fragments(2, 0, [0.0, 4950.0, 9900.0, 12000.0]) == [(0.0, 4950.0), (4950.0, 12000.0)]
+    # 셀 안에서도 나누는 표는 바닥에서 ROW_RESERVE(80) 위까지 들어가는 행을 이 쪽에 둔다.
+    assert _fragments(2, 0, [0.0, 4950.0, 9900.0, 12000.0]) == [(0.0, 9900.0), (9900.0, 12000.0)]
+    assert _fragments(2, 0, [0.0, 4950.0, 9950.0, 12000.0]) == [(0.0, 4950.0), (4950.0, 12000.0)]
     assert _fragments(2, 0, [0.0, 4950.0, 9850.0]) == [(0.0, 9850.0)]
 
 

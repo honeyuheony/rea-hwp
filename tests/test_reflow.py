@@ -81,3 +81,51 @@ def test_paginate_moves_overflowing_line_to_page_top():
     lines = [LineSeg(0, 0, 1000, 1000, 850, 600, 0, 5000, 0), LineSeg(1, 1600, 1000, 1000, 850, 600, 0, 5000, 0)]
     placed = reflow.paginate([LineSeg(**{**vars(s), "vertical_pos": s.vertical_pos + 9000}) for s in lines], 11000, 300)
     assert [s.vertical_pos for s in placed] == [9000, 0]
+
+
+def test_compose_leaves_head_width_out_of_every_line():
+    text = "가나다라마\r"
+    segments = reflow.compose(
+        chars_of(text), list(range(len(text))), boxes_of(text), para_shape(attr1=1 << 7), 5000, 1000, head=(1000, 1000)
+    )
+    assert [s.text_start for s in segments] == [0, 4]
+
+
+def test_horizontal_range_snaps_column_width_before_margins():
+    # 여백은 2배로 저장된다. 단 폭을 먼저 4HU로 내린다(eq-01 48190 → 48188, kr_156369057 48188 − 515 = 47673).
+    assert reflow.horizontal_range(para_shape(), 48190) == (0, 48188)
+    assert reflow.horizontal_range(para_shape(right_margin=1030), 48190) == (0, 47673)
+    assert reflow.horizontal_range(para_shape(left_margin=-200), 48190) == (-100, 48288)
+    # 폭이 서로 다른 다단은 내리지 않는다(KTX 33355).
+    assert reflow.horizontal_range(para_shape(), 33355, snap=False) == (0, 33355)
+    # 백분율 여백(낮은 비트)과 최소 폭보다 좁은 구간은 모른다.
+    assert reflow.horizontal_range(para_shape(left_margin=21), 48190) is None
+    assert reflow.horizontal_range(para_shape(left_margin=2 * 47000), 48190) is None
+
+
+def test_avoid_floats_follows_text_flow_side():
+    base = (0, 20000)
+    box = (8000, 0, 4000, 5000)
+    assert reflow.avoid_floats(base, [(*box, 0)], 1000, 1000) == [(0, 8000), (12000, 8000)]
+    assert reflow.avoid_floats(base, [(*box, 1)], 1000, 1000) == [(0, 8000)]
+    assert reflow.avoid_floats(base, [(*box, 2)], 1000, 1000) == [(12000, 8000)]
+    # 큰 쪽: 같은 폭이면 왼쪽, 왼쪽이 좁으면 오른쪽을 남긴다.
+    assert reflow.avoid_floats(base, [(*box, 3)], 1000, 1000) == [(0, 8000)]
+    assert reflow.avoid_floats(base, [(6000, 0, 4000, 5000, 3)], 1000, 1000) == [(10000, 10000)]
+    # 줄이 개체 아래면 그대로, 오른쪽 끝을 덮는 개체는 그 앞까지.
+    assert reflow.avoid_floats(base, [(*box, 0)], 6000, 1000) == [(0, 20000)]
+    assert reflow.avoid_floats(base, [(15000, 0, 9000, 5000, 0)], 0, 1000) == [(0, 15000)]
+    # 남는 쪽이 최소 폭(1440)보다 좁으면 지운다. 다 좁으면 줄은 개체 아래로 내려간다(None).
+    assert reflow.avoid_floats(base, [(1000, 0, 18000, 5000, 0)], 0, 1000) is None
+    assert reflow.avoid_floats(base, [(19000, 0, 900, 5000, 0)], 0, 1000) == [(0, 19000)]
+
+
+def test_compose_around_narrows_lines_beside_float_only():
+    # 폭 1000 글자 열 개씩. 오른쪽 6000~10000에 높이 3000 개체: 개체 옆 줄은 6000, 그 아래 줄은 다시 10000.
+    text = "가" * 25 + "\r"
+    chars, boxes = chars_of(text), boxes_of(text)
+    floats = [(6000, 0, 4000, 3000, 0)]
+    segments = reflow.compose_around(chars, list(range(len(text))), boxes, para_shape(), (0, 10000), floats, 1000, 0)
+    assert [s.text_start for s in segments] == [0, 6, 12, 22]
+    assert [(s.column_start, s.segment_width) for s in segments] == [(0, 6000), (0, 6000), (0, 10000), (0, 10000)]
+    assert [s.vertical_pos for s in segments] == [0, 1600, 3200, 4800]
