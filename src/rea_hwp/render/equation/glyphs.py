@@ -1,4 +1,5 @@
-"""수식 글꼴 힌팅 폭 표(data/eq_glyph_metrics.json.gz)로 엔진의 GDI 글자 측정을 재현한다."""
+"""Windows GDI로 측정한 수식 글꼴 폭 표(data/eq_glyph_metrics.json.gz)로 엔진의 글자 측정을 재현한다.
+표는 tools/build_eq_glyph_metrics.py로 만든다."""
 
 from __future__ import annotations
 
@@ -48,6 +49,8 @@ class GlyphTable:
     def __init__(self, raw: dict) -> None:
         self.pair_index = {tuple(pair): i for i, pair in enumerate(raw["pairs"])}
         self.fonts = {name: _FontRuns(font["runs"], font["vectors"]) for name, font in raw["fonts"].items()}
+        #: 쌍마다 함초롬바탕 단독 상위 대리의 [폭, 높이] 픽셀(tools/gdi_surrogate_box.ps1).
+        self.hanja_surrogate: list[list[int]] = raw["hanja_surrogate"]
 
     def has_glyph(self, font: str, code: int) -> bool:
         runs = self.fonts.get(font)
@@ -58,9 +61,18 @@ class GlyphTable:
         if not self.has_glyph(font, code):
             font = FALLBACK_FONT
         vector = self.fonts[font].vector(code)
+        pair = ppem(size)
+        if vector is None and 0xD840 <= code <= 0xD87F and pair in self.pair_index:
+            # HncBaseDraw는 단독 상위 대리 D840~D87F를 한자로 분류해 한자 기본 글꼴(함초롬바탕) .notdef로 측정하고
+            # 높이는 tmHeight + tmInternalLeading이다(HncDRGetCharLang, FUN_10055820, FUN_1005c030)
+            width, height = self.hanja_surrogate[self.pair_index[pair]]
+            return width * UNITS_PER_PIXEL, height * UNITS_PER_PIXEL
+        if vector is None and 0xD800 <= code <= 0xDFFF:
+            # 대리 쌍은 wchar 하나씩 측정한다. 영문·기호로 분류된 상위 대리는 한컴바탕 .notdef(1024/1024 em) 한 칸,
+            # 하위 대리는 폭 0이다(FUN_1005c6f0 0x1005cd19, 시험 30건)
+            return (pair[0] * UNITS_PER_PIXEL if code < 0xDC00 else 0), pair[1] * UNITS_PER_PIXEL
         if vector is None:
             raise KeyError(f"수식 글꼴 표에 U+{code:04X} 글자가 없어 크기를 계산할 수 없습니다. 저장된 크기를 쓰세요")
-        pair = ppem(size)
         index = self.pair_index.get(pair)
         if index is None:
             raise KeyError(f"수식 글꼴 표에 ppem {pair}가 없습니다(글자 크기 {size})")

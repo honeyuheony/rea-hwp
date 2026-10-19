@@ -805,9 +805,11 @@ class Integral(Obj):
 
     GLYPHS = {2: 0xE05B, 0x2B: 0xE073, 0x2C: 0xE074, 0x2D: 0xE075, 0x2E: 0xE076, 0x2F: 0xE077}
 
+    #: FUN_10012f90은 변형(DINT·OINT 등)과 상관없이 종류를 2로 쓴다. 빈 위아래 줄이 크기 0이 되는 조건에 쓰인다.
+    kind = 2
+
     def __init__(self, ctx: Context, kind: int) -> None:
         super().__init__(ctx)
-        self.kind = kind
         self.glyph = self.GLYPHS[kind]
         self.scale = 200  # +0xa0
         self.lower = self.new_row()
@@ -858,6 +860,9 @@ class Grid(Obj):
     def __init__(self, ctx: Context, kind: int, rows: int, cols: int) -> None:
         super().__init__(ctx)
         self.kind = kind
+        if rows * cols == 0 and (kind in self.DELIMITERS or kind in (0x73, 0x74)):
+            # 괄호 행렬·LADDER의 칸 생성(FUN_100077a0)은 빈 격자를 1행 1열로 만든다. PILE류(FUN_10009bc0)는 그대로 둔다
+            rows = cols = 1
         self.nrows = rows  # +0x78
         self.ncols = cols  # +0x7c
         self.rows = [self.new_row() for _ in range(max(rows * cols, 1))]
@@ -889,6 +894,58 @@ class Grid(Obj):
             self.left.measure(height, s)
             self.right.measure(height, s)
             width += self.left.width() + self.right.width()
+        self.w, self.h, self.top = width, height, -cdiv(height, 2)
+        return self.w, self.h
+
+
+class Ladder(Grid):
+    """LADDER(0x73)·SLADDER(0x74), FUN_10009480. 마지막 줄은 한 칸 오른쪽에서 시작한다."""
+
+    def __init__(self, ctx: Context, kind: int, rows: int, cols: int) -> None:
+        super().__init__(ctx, kind, rows, cols)
+
+    def calc(self, cache: int) -> tuple[int, int]:
+        if self.cached(cache):
+            return self.w, self.h
+        self.dirty = 0
+        self.inherit()
+        s = self.size
+        ctx = self.ctx
+        ctx.set_font(s)
+        # FUN_100097a0: 사다리 모양 글리프 U+E101의 폭
+        corner = ctx.plain(0xE101)[0]
+        dots = ctx.plain(0x22EF)[0] + muldiv(s, 20, 100) if self.kind == 0x74 else 0
+        col_w = [0] * self.ncols
+        width = height = 0
+        for r in range(self.nrows):
+            row_h = 0
+            column = 1 if r == self.nrows - 1 and r > 0 else 0
+            x = 0
+            for c in range(self.ncols):
+                x += muldiv(s, 20, 100)
+                start = x
+                if c == self.ncols - 1:
+                    if r == self.nrows - 1 and r > 0:
+                        x = col_w[0] + start
+                        break
+                    if self.kind == 0x74 and r == 0 and self.ncols > 2:
+                        break
+                if column == self.ncols:
+                    break
+                cell = self.rows[r * self.ncols + c]
+                cell.size = s
+                cell_w, cell_h = cell.calc(cache)
+                row_h = max(row_h, cell_h)
+                col_w[column] = max(col_w[column], cell_w)
+                x = col_w[column] + start
+                column += 1
+            width = max(width, x)
+            height += muldiv(s, 15, 100) + row_h
+        if self.ncols > 1:
+            col_w[0] += corner
+            width += corner
+        if self.kind == 0x74 and self.ncols > 2 and self.nrows > 1:
+            width += dots
         self.w, self.h, self.top = width, height, -cdiv(height, 2)
         return self.w, self.h
 
@@ -1017,20 +1074,230 @@ class Bigg(Obj):
         return self.w, self.h
 
 
-class Unsupported(Obj):
-    """크기 계산을 아직 옮기지 않은 객체. 계산하면 NotImplementedError를 낸다."""
+class Relation(Obj):
+    """REL(0x4D)·BUILDREL(5), FUN_100174a0. +0x7c = 화살표 위, +0x78 = 화살표 아래."""
 
-    def __init__(self, ctx: Context, kind: int, rows: int) -> None:
+    #: 선으로 그리는 화살표 → 모양 번호(0x10017683 분기). 그 밖의 글자는 글꼴 글자로 측정한다.
+    DRAWN = {0x2192: 0, 0x2190: 1, 0x2194: 2, 0x21D2: 3, 0x21D0: 4, 0x21D4: 5, 0x21C4: 6}
+
+    #: FUN_10016f20이 종류를 0으로 써 두고 FUN_1000dab0도 다시 쓰지 않는다. 그래서 빈 줄도 크기를 가진다.
+    kind = 0
+
+    def __init__(self, ctx: Context) -> None:
         super().__init__(ctx)
-        self.kind = kind
-        self.rows = [self.new_row() for _ in range(rows)]
+        self.name = "REL "  # FUN_10016f20
+        self.arrow = 0  # +0x8c, FUN_100466f0
+        self.upper = self.new_row()  # +0x7c
+        self.lower = self.new_row()  # +0x78
+        self.rows = [self.upper, self.lower]
+
+    def set_arrow(self, ch: int) -> None:
+        """FUN_100466f0: 화살표 글자를 정하고 이름 뒤에 글자 이름을 붙인다."""
+        self.arrow = ch
+        self.name += char_name(ch)
 
     def calc(self, cache: int) -> tuple[int, int]:
-        raise NotImplementedError(f"수식 객체 0x{self.kind:X} 크기 계산은 아직 옮기지 않았습니다")
+        if self.cached(cache):
+            return self.w, self.h
+        self.dirty = 0
+        self.inherit()
+        ctx = self.ctx
+        s = self.size
+        self.lower.size = s
+        lower_w, lower_h = self.lower.calc(cache)
+        self.upper.size = s
+        upper_w, upper_h = self.upper.calc(cache)
+        ctx.set_font(s)
+        width = max(lower_w, upper_w) + muldiv(ctx.size, 50, 100)
+        if self.arrow == 0:
+            self.arrow = 0x21D4
+        shape = self.DRAWN.get(self.arrow)
+        if shape is None:
+            _, arrow_h = ctx.plain(self.arrow)
+        else:
+            # 0x10017718: 가운데 토막 글자(E059 또는 E070) 높이의 35%가 화살표 두께, 모양 6(⇄)은 두 배
+            _, piece_h = ctx.plain(0xE059 if shape in (0, 1, 2, 6) else 0xE070)
+            arrow_h = muldiv(piece_h, 30, 100) + muldiv(piece_h, 5, 100)
+            if shape == 6:
+                arrow_h *= 2
+        self.w = width
+        self.h = arrow_h + upper_h + lower_h
+        self.top = -upper_h - cdiv(arrow_h, 2)
+        return self.w, self.h
 
 
-#: 아직 옮기지 않은 객체 종류 → 자식 줄 수(FUN_1000dab0).
-_UNSUPPORTED_ROWS = {0x4D: 2, 5: 2, 0x6B: 2, 0x6C: 2, 0x72: 3}
+#: FUN_10018de0이 위로 솟지 않았다고 보는 PUA 글자(a c e g i j m~z 기울임 등).
+_FLAT_CODES = frozenset(
+    [0xE0E5, 0xE0E7, 0xE0E9, 0xE0EB, 0xE0ED, 0xE0EE, 0xE01A, 0xE01C, 0xE020, 0xE053]
+    + list(range(0xE0F1, 0xE0FF))
+    + list(range(0xE026, 0xE034))
+    + list(range(0xE09D, 0xE0A4))
+    + list(range(0xE0A5, 0xE0B5))
+)
+
+
+def is_flat(line: Line) -> bool:
+    """FUN_10018de0: 줄이 위로 솟지 않은 글자와 RM·IT·BOLD 객체만으로 이루어졌는가."""
+    for item in line.items():
+        if item.kind == 0x6F:
+            if item.code not in _FLAT_CODES:
+                return False
+        elif item.kind not in (0x1F, 0x20, 0x21):
+            return False
+    return True
+
+
+class Brace(Obj):
+    """OVERBRACE(0x6B)·UNDERBRACE(0x6C), FUN_1001e8d0. 첫 줄은 +0x7c, 둘째 줄은 +0x78이다."""
+
+    #: 괄호 조각 글자 +0xac·+0xae·+0xb0·+0xb2(FUN_1001e250).
+    PIECES = {0x6B: (0xE106, 0xE107, 0xE108, 0xE109), 0x6C: (0xE10A, 0xE10B, 0xE10C, 0xE10D)}
+
+    def __init__(self, ctx: Context, kind: int) -> None:
+        super().__init__(ctx)
+        self.kind = kind
+        self.first = self.new_row()  # +0x7c
+        self.second = self.new_row()  # +0x78
+        self.rows = [self.first, self.second]
+
+    def calc(self, cache: int) -> tuple[int, int]:
+        if self.cached(cache):
+            return self.w, self.h
+        self.dirty = 0
+        self.inherit()
+        ctx = self.ctx
+        s = self.size
+        under = self.kind == 0x6C
+        # FUN_1001ed20: 폭은 +0xac·+0xae·+0xb2 조각 폭의 합, 높이는 +0xae 조각 높이의 35%
+        ctx.set_font(s)
+        left, middle, _, right = self.PIECES[self.kind]
+        brace_w = ctx.plain(middle)[0] + ctx.plain(right)[0] + ctx.plain(left)[0]
+        brace_h = muldiv(ctx.plain(middle)[1], 35, 100)
+        small = muldiv(s, 0x44, 100)
+        self.second.size = s if under else small
+        self.first.size = small if under else s
+        second_w, second_h = self.second.calc(cache)
+        first_w, first_h = self.first.calc(cache)
+        gap = muldiv(s, 5 if under else 15, 100) if is_flat(self.first) else 0
+        self.w = max(second_w, first_w, brace_w)
+        self.h = brace_h - gap + second_h + first_h
+        self.top = self.second.top if under else self.first.top - brace_h - second_h + gap
+        return self.w, self.h
+
+
+class LongDivision(Obj):
+    """LONGDIV(0x72), FUN_10018660. +0x78 = 나누는 수, +0x7c = 몫, +0x80 = 나눗셈 격자(0x6D)."""
+
+    kind = 0x72
+
+    def __init__(self, ctx: Context) -> None:
+        super().__init__(ctx)
+        self.divisor = self.new_row()
+        self.quotient = self.new_row()
+        self.body = self.new_row()
+        self.rows = [self.divisor, self.quotient, self.body]
+
+    def calc(self, cache: int) -> tuple[int, int]:
+        if self.cached(cache):
+            return self.w, self.h
+        self.dirty = 0
+        self.inherit()
+        ctx = self.ctx
+        s = self.size
+        self.body.size = s
+        body_w, body_h = self.body.calc(cache)
+        self.quotient.size = s
+        quotient_w, quotient_h = self.quotient.calc(cache)
+        self.divisor.size = s
+        divisor_w, _ = self.divisor.calc(cache)
+        ctx.set_font(s)
+        # 나눗셈 기호 E10F: 폭은 그대로, 높이의 20%가 몫과 격자 사이 간격이다. 나누는 수 높이는 쓰지 않는다
+        sign_w, sign_h = ctx.plain(0xE10F)
+        gap = muldiv(sign_h, 20, 100)
+        height = gap + quotient_h + body_h
+        if height == gap:
+            height += ctx.size
+        self.w = max(quotient_w, body_w) + sign_w + divisor_w + muldiv(s, 20, 100)
+        self.h = height
+        self.top = -quotient_h - cdiv(gap, 2)
+        return self.w, self.h
+
+
+def wtoi(digits: str) -> int:
+    """MSVC _wtoi(숫자만 든 문자열). 넘치면 LONG_MAX에서 멈춘다."""
+    return min(int(digits), 0x7FFFFFFF) if digits else 0
+
+
+class LongDivisionGrid(Grid):
+    """LONGDIV 셋째 줄의 격자(0x6D), FUN_1000a980. 나눗셈을 따라가며 행마다 들여 쓸 숫자 칸 수를 정한다."""
+
+    def __init__(self, ctx: Context, rows: int, cols: int) -> None:
+        super().__init__(ctx, 0x6D, rows, cols)
+
+    @staticmethod
+    def _digits(line: Line) -> str | None:
+        """줄의 글자 이름을 이어 붙인다. 숫자로 시작하지 않는 이름이 있으면 None."""
+        text = ""
+        for item in line.items():
+            if not item.name[:1].isdigit():
+                return None
+            text += item.name
+        return text
+
+    def _offsets(self, cells: list[Line]) -> tuple[list[int], bool]:
+        """0x1000ab82~0x1000b56d: 행마다 첫 칸 앞에 비울 폭과 숫자 나눗셈으로 읽혔는지."""
+        offsets = [0] * self.nrows
+        for cell in cells[: self.nrows]:
+            first = cell.head.next
+            if first is not cell.end and first.name[:1] in (" ", "~", "`"):
+                return offsets, False
+        digit_w = self.ctx.measure(to_pua(0x31))[0]
+        shift = 0  # +local_a0, 직전 빼기에서 남은 자릿수
+        for r in range(1, min(self.nrows, len(cells))):
+            cell, prev = cells[r], cells[r - 1]
+            if r & 1:
+                shift = borrow = 0
+                upper = self._digits(prev)
+                lower = self._digits(cell) if upper is not None else None
+                if upper is None or lower is None:
+                    return offsets, False
+                if upper and lower:
+                    borrow = int(int(upper[0]) < int(lower[0]))
+                    upper = upper[: len(lower) + borrow].ljust(len(lower) + borrow, "0")
+                    diff = wtoi(upper) - wtoi(lower)
+                    shift = 0 if diff < 0 else len(lower) if diff == 0 else len(lower) - len(str(diff))
+                offsets[r] = digit_w * borrow
+            else:
+                first = cell.head.next
+                if first is not cell.end and first.name == "0":
+                    shift -= 1
+                offsets[r] = digit_w * shift
+        return offsets, True
+
+    def calc(self, cache: int) -> tuple[int, int]:
+        if self.cached(cache):
+            return self.w, self.h
+        self.dirty = 0
+        self.inherit()
+        s = self.size
+        cells = self.rows
+        for cell in cells:
+            cell.size = s
+            cell.calc(cache)
+        offsets, numeric = self._offsets(cells)
+        col_w = [0] * self.ncols
+        row_h = [0] * self.nrows
+        for i, cell in enumerate(cells):
+            r, c = divmod(i, self.ncols) if self.ncols else (0, 0)
+            if r >= self.nrows:
+                break
+            shifted = cell.w + offsets[r] if c == 0 and numeric else cell.w
+            col_w[c] = max(col_w[c], shifted)
+            row_h[r] = max(row_h[r], cell.h)
+        height = sum(row_h) + max(self.nrows - 1, 0) * muldiv(s, 15, 100)
+        width = sum(col_w) + max(self.ncols - 1, 0) * muldiv(s, 20, 100)
+        self.w, self.h, self.top = width, height, -cdiv(height, 2)
+        return self.w, self.h
 
 
 def make_object(ctx: Context, kind: int) -> Obj | None:
@@ -1067,8 +1334,12 @@ def make_object(ctx: Context, kind: int) -> Obj | None:
         return Limit(ctx, kind)
     if kind in Integral.GLYPHS:
         return Integral(ctx, kind)
-    if kind in _UNSUPPORTED_ROWS:
-        return Unsupported(ctx, kind, _UNSUPPORTED_ROWS[kind])
+    if kind in (0x4D, 5):
+        return Relation(ctx)
+    if kind in Brace.PIECES:
+        return Brace(ctx, kind)
+    if kind == 0x72:
+        return LongDivision(ctx)
     return None
 
 
@@ -1116,6 +1387,7 @@ class Converter:
         self.ctx = root.ctx
         self.cursor: Obj = root.head
         self.matrix_depth = 0  # DAT_100a5c78
+        self.pending_relation = 0  # +0x50·+0x44, REL은 화살표 글자를 받은 뒤에 만든다
 
     def parent_line(self, obj: Obj) -> Line:
         return obj if isinstance(obj, Line) else obj.parent
@@ -1179,6 +1451,9 @@ class Converter:
             return self.lone_right(ord(name[-1]))
         if kind > 0x75 and kind != 0x69:
             return None
+        if kind in (0x4D, 5) and not self.pending_relation:
+            self.pending_relation = kind
+            return None
         obj = make_object(self.ctx, kind)
         if obj is None:
             raise NotImplementedError(f"수식 객체 0x{kind:X} 생성은 아직 옮기지 않았습니다")
@@ -1233,6 +1508,12 @@ class Converter:
             return
         code = to_pua(ch) or ch
         name_ch = _PUA_TO_SYMBOL.get(ch, ch) if to_pua(ch) == 0 else ch
+        if self.pending_relation and name_ch:
+            # LAB_10046dd7: 보류한 REL을 만들고 이 글자를 화살표로 준다
+            relation = self.create(self.pending_relation)
+            self.pending_relation = 0
+            relation.set_arrow(name_ch)
+            return
         obj = Glyph(self.ctx, code)
         self.insert(obj)
         obj.name = glyph_name(name_ch, obj.prev)
@@ -1339,7 +1620,14 @@ class Converter:
                 self.convert(node.child)
                 self.move()
             elif kind in (0x18, 0x19):
-                raise NotImplementedError("REL·BUILDREL은 아직 옮기지 않았습니다")
+                self.create(0x4D if kind == 0x18 else 5)
+                self.glyph(0x6F, node.text_at(0))
+                self.convert(node.a)
+                self.move()
+                if kind == 0x19:
+                    self.move()
+                self.convert(node.b)
+                self.move()
             elif kind == 0x1D:
                 row = node.child
                 while row:
@@ -1382,7 +1670,13 @@ class Converter:
                 self.convert(node.child)
                 self.move()
             elif kind == 0x2F:
-                raise NotImplementedError("LONGDIV는 아직 옮기지 않았습니다")
+                self.create(0x72, "LONGDIV")
+                self.convert(node.b)
+                self.move()
+                self.convert(node.a)
+                self.move()
+                self.convert(node.child)
+                self.move()
             elif kind == 0x4B:
                 if node.b:
                     self.create(6, "root")
@@ -1418,8 +1712,14 @@ class Converter:
             self.grid(0x13, rows, cols)
         elif kind in (0x15, 0x16, 0x17):
             self.grid(kind - 5, rows, cols)
-        elif kind in (0x2E, 0x30, 0x31):
-            raise NotImplementedError(f"LADDER·LONGDIV류(구문 0x{kind:X})는 아직 옮기지 않았습니다")
+        elif kind in (0x2E, 0x31) and node.text_at(0) == 0:
+            obj = Ladder(self.ctx, 0x73 if kind == 0x2E else 0x74, rows, cols)
+            self.insert(obj)
+            self.cursor = obj.rows[0].head
+        elif kind == 0x30:
+            obj = LongDivisionGrid(self.ctx, rows, cols)
+            self.insert(obj)
+            self.cursor = obj.rows[0].head
         else:
             bracket = {0: 9, 0x28: 10, 0x5B: 11, 0x7C: 12}.get(node.text_at(1) if node.text_at(0) else 0)
             if bracket is not None:

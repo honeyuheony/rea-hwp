@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from .engine import Context, Converter, Line, cdiv
 from .glyphs import EQUATION_FONT
+from .legacy import LegacyEngineState, LegacyEquationError, clean_script, measure_legacy
 from .parse import parse_script
 
-__all__ = ["measure"]
+__all__ = ["LegacyEngineState", "LegacyEquationError", "measure", "measure_legacy"]
 
 
 def measure(script: str, font_size: int, font: str = EQUATION_FONT) -> tuple[int, int, int]:
     """수식 상자의 (폭, 높이, 저장 기준선 백분율). HwpApp FUN_1026e540·FUN_1026f440과 같은 값을 낸다."""
-    script = "".join(ch if ord(ch) >= 0x20 else " " for ch in script)
+    script = clean_script(script)
     parser = parse_script(script)
     ctx = Context(font)
     root = Line(ctx, None)
