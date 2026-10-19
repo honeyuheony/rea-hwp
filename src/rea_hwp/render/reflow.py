@@ -14,6 +14,7 @@ from ..models.controls import ObjectCtrlHeader, TextWrap, VertRelTo
 from ..models.docinfo import CharShape, ParaShape
 from ..models.paragraph import LINE_BREAK, ControlChar, LineSeg
 from .common import INDENT_APPLIED, ParagraphView, TextChar
+from .equation.engine import muldiv
 
 #: 줄 머리에 올 수 없는 글자(kordoc HANCOM_FORBID_START, 한글 기본 금칙).
 FORBID_START = frozenset(
@@ -26,6 +27,8 @@ FORBID_END = frozenset(
 )
 #: 기준선은 줄 높이의 0.85(rhwp baseline_distance_hwp, 저장 LINE_SEG 1500→1275 실측).
 BASELINE_RATIO = 0.85
+#: 글자와 수식 아닌 개체의 기준선 위 몫(%). HwpApp FUN_101d7770: 기준선 함수(+0x140)가 −1이면 85.
+ASCENT_PERCENT = 85
 #: 폭 비교의 반올림 여유(kordoc simulateWrap EPS).
 FIT_EPSILON = 0.5
 #: LINE_SEG 태그 bit17/18: 줄의 첫/마지막 세그먼트. 저장 줄은 대개 둘 다 켜져 있다.
@@ -51,24 +54,33 @@ class ItemBox:
     object_height: int = 0
     #: 자간 몫. 한글은 넘침 판정에 줄 마지막 글자의 자간을 넣지 않는다(kordoc lastSp).
     spacing: float = 0.0
+    #: 기준선 위 몫. 주지 않으면 줄 높이에 넣는 높이의 85%다(HwpApp FUN_101d7770, HncIntMulDiv 반올림).
+    ascent: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.ascent is None:
+            self.ascent = muldiv(self.object_height or self.height, ASCENT_PERCENT, 100)
 
 
-def measure_items(view: ParagraphView, item_width, char_shapes: list[CharShape], slot_of) -> list[ItemBox]:
-    """item_width(순번)는 layout의 글자·컨트롤 전진폭 함수, slot_of(글자, 글자 모양)는 폭을 잰 언어 슬롯 함수다."""
+def measure_items(view: ParagraphView, item_width, char_shapes: list[CharShape], slot_of, inline_box) -> list[ItemBox]:
+    """item_width(순번)는 layout의 글자·컨트롤 전진폭 함수, slot_of(글자, 글자 모양)는 폭을 잰 언어 슬롯 함수,
+    inline_box(CTRL_HEADER)는 글자처럼 취급한 개체의 (바깥 여백 포함 높이, 기준선 위 몫)이다."""
     boxes = []
     for index, item in enumerate(view.chars):
         width = item_width(index)
         shape = char_shapes[view.shape_ids[index]]
-        spacing, object_height = 0.0, 0
+        spacing, object_height, ascent = 0.0, 0, None
         if isinstance(item, TextChar):
             percent = shape.spacings[slot_of(item.char, shape)]
             spacing = width * percent / (100 + percent) if percent > -100 else 0.0
         else:
             ctrl = view.controls.get(index)
             if ctrl is not None and isinstance(ctrl.model, ObjectCtrlHeader) and ctrl.model.treat_as_char:
-                margins = ctrl.model.outer_margins or [0, 0, 0, 0]
-                object_height = ctrl.model.height + margins[2] + margins[3]
-        boxes.append(ItemBox(width, shape.base_size, object_height, spacing))
+                object_height, ascent = inline_box(ctrl)
+                if not object_height:
+                    # 높이 0인 개체는 그 자리 글자 크기를 쓴다(FUN_101d7770).
+                    ascent = None
+        boxes.append(ItemBox(width, shape.base_size, object_height, spacing, ascent))
     return boxes
 
 
@@ -338,6 +350,39 @@ def compose_around(
     return segments
 
 
+def compose_in_ranges(
+    chars: list,
+    positions: list[int],
+    boxes: list[ItemBox],
+    para_shape: ParaShape,
+    ranges: list[tuple[int, int]],
+    empty_height: int,
+    head: tuple[float, float] = (0.0, 0.0),
+    first_item: int = 0,
+    first_number: int = 0,
+) -> list[LineSeg]:
+    """줄 번호마다 ranges의 가로 구간(단 안 시작, 폭)으로 나눈 합성 LineSeg. 구간보다 줄이 많으면 마지막 구간을 쓴다.
+
+    first_item·first_number는 나누기 시작하는 항목 순번과 그 줄 번호다(ranges도 그 줄 번호로 찾는다).
+    """
+    indent = para_shape.indent // 2
+    segments: list[LineSeg] = []
+    vertical, first, number = 0, first_item, first_number
+    while first < len(chars) or not segments:
+        column_start, width = ranges[min(number, len(ranges) - 1)]
+        if number == 0:
+            available = width - max(indent, 0) - head[0]
+        else:
+            available = width - max(-indent, 0) - head[1]
+        starts = break_lines(chars[first:], boxes[first:], para_shape, (available, available)) if chars else [0]
+        end = first + starts[1] if len(starts) > 1 else len(chars)
+        segment = _line_seg(chars, positions, boxes, para_shape, empty_height, number, first, end, vertical)
+        segments.append(dataclasses.replace(segment, column_start=column_start, segment_width=width))
+        vertical += segment.line_height + segment.line_spacing
+        first, number = end, number + 1
+    return segments
+
+
 def _line_seg(
     chars: list,
     positions: list[int],
@@ -349,24 +394,29 @@ def _line_seg(
     end: int,
     vertical: int,
 ) -> LineSeg:
-    """항목 first..end를 담는 number번째 줄의 합성 LineSeg(가로 구간은 호출한 쪽이 채운다)."""
+    """항목 first..end를 담는 number번째 줄의 합성 LineSeg(가로 구간은 호출한 쪽이 채운다).
+
+    HwpApp FUN_101e3460: 줄 높이는 항목 높이(글자처럼 취급한 개체는 개체 높이)의 최댓값, 기준선은 항목 기준선 위
+    몫의 최댓값이다. 줄 간격은 글자 크기(개체는 그 자리 글자 크기) 최댓값으로 정한다.
+    """
     indent = para_shape.indent // 2
-    text_height = max((boxes[i].height for i in range(first, end)), default=0) or empty_height
-    line_height = max([text_height] + [boxes[i].object_height for i in range(first, end)])
+    items = range(first, end)
+    line_height = max((boxes[i].object_height or boxes[i].height for i in items), default=0) or empty_height
+    baseline_gap = max((boxes[i].ascent for i in items), default=0) or muldiv(line_height, ASCENT_PERCENT, 100)
+    font_height = max((boxes[i].height for i in items), default=0) or empty_height
     flags = SINGLE_SEGMENT
     if (number == 0 and indent > 0) or (number > 0 and indent < 0):
         flags |= INDENT_APPLIED
     text_start = positions[first] if first < len(positions) else (positions[-1] + 1 if positions else 0)
     if para_shape.line_spacing_type == FIXED and not any(
-        isinstance(chars[i], TextChar) and chars[i].char not in "\r\n" for i in range(first, end)
+        isinstance(chars[i], TextChar) and chars[i].char not in "\r\n" for i in items
     ):
-        # 글자 없이 개체만 든 줄은 개체 높이를 글자 높이로 저장한다(저장 줄 실측: tac-img-02 그림 줄 th = 20500,
-        # 고정 1800 간격 −18700. task2070 30쪽 수식만 든 줄도 정답 피치가 고정 18pt).
-        text_height = line_height
-    gap = line_gap(para_shape, text_height)
-    return LineSeg(
-        text_start, vertical, line_height, text_height, round(line_height * BASELINE_RATIO), gap, 0, 0, flags
-    )
+        # 글자 없이 개체만 든 줄은 개체 높이를 빼 고정 간격을 맞춘다(저장 줄 실측: tac-img-02 그림 줄 th = 20500,
+        # 고정 1800 간격 −18700. task2070 30쪽 수식만 든 줄도 정답 피치가 고정 18pt). 글자가 있는 줄까지 줄 높이로
+        # 빼면 task2070이 −1,523자라 글자 크기를 쓴다.
+        font_height = line_height
+    gap = line_gap(para_shape, font_height)
+    return LineSeg(text_start, vertical, line_height, line_height, baseline_gap, gap, 0, 0, flags)
 
 
 #: 한글 2022가 줄 가로 구간을 잴 때 단 폭을 내리는 격자(HwpUnit).

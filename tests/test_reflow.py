@@ -129,3 +129,49 @@ def test_compose_around_narrows_lines_beside_float_only():
     assert [s.text_start for s in segments] == [0, 6, 12, 22]
     assert [(s.column_start, s.segment_width) for s in segments] == [(0, 6000), (0, 6000), (0, 10000), (0, 10000)]
     assert [s.vertical_pos for s in segments] == [0, 1600, 3200, 4800]
+
+
+def test_line_takes_tallest_item_and_highest_ascent():
+    # 재저장본 3-10월_교육_통합_2022: 글자 900 사이 수식(높이 2298, 기준선 62%)이 든 줄은 줄·글자 높이 2298, 기준선
+    # 1425(= 2298 × 62%), 줄 간격은 글자 크기 900의 150%로 452다(HwpApp FUN_101e3460).
+    text = "가□나\r"
+    boxes = [
+        reflow.ItemBox(900, 900),
+        reflow.ItemBox(3000, 900, 2298, ascent=1425),
+        reflow.ItemBox(900, 900),
+        reflow.ItemBox(0, 900),
+    ]
+    segment = reflow.compose(
+        chars_of(text), list(range(len(text))), boxes, para_shape(new_line_spacing=150), 20000, 900
+    )[0]
+    assert (segment.line_height, segment.text_height, segment.baseline_gap, segment.line_spacing) == (
+        2298,
+        2298,
+        1425,
+        452,
+    )
+
+
+def test_text_baseline_rounds_half_up():
+    # 저장 줄 실측: 글자 1050 → 893, 850 → 723(HncIntMulDiv). 짝수 반올림이면 892·722가 된다.
+    for size, baseline in ((1050, 893), (850, 723)):
+        boxes = [reflow.ItemBox(1000, size), reflow.ItemBox(0, size)]
+        segment = reflow.compose(chars_of("가\r"), [0, 1], boxes, para_shape(), 20000, size)[0]
+        assert segment.baseline_gap == baseline
+
+
+def test_compose_in_ranges_starts_at_given_line_and_range():
+    text = "가" * 12 + "\r"
+    segments = reflow.compose_in_ranges(
+        chars_of(text),
+        list(range(len(text))),
+        boxes_of(text),
+        para_shape(),
+        [(0, 5000), (500, 4000)],
+        1000,
+        first_item=5,
+        first_number=1,
+    )
+    assert [s.text_start for s in segments] == [5, 9]
+    assert [(s.column_start, s.segment_width) for s in segments] == [(500, 4000), (500, 4000)]
+    assert [s.vertical_pos for s in segments] == [0, 1600]

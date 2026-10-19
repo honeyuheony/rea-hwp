@@ -12,6 +12,7 @@ from ..models.controls import (
     AutoNumberCtrl,
     CaptionListHeader,
     ColumnDefCtrl,
+    EqEdit,
     ObjectCtrlHeader,
     TextBoxListHeader,
     TextWrap,
@@ -25,14 +26,17 @@ from .common import (
     REL_PAGE,
     REL_PAPER,
     REL_PARA,
-    TAC_ASCENT,
     Area,
     PageState,
     ParagraphView,
     TextChar,
     column_layout,
 )
+from .equation import measure as measure_equation
+from .equation.engine import muldiv
+from .equation.glyphs import EQUATION_FONT, glyph_table
 from .forms import draw_form
+from .reflow import ASCENT_PERCENT
 from .scene import Glyph, Image
 from .table_flow import _margin_shift, is_block_table
 from .wmf import WmfDrawing, convert_wmf
@@ -43,6 +47,8 @@ LINK_WIDTH_TOLERANCE = 100
 BREAK_SECTION_PAGE_COLUMN = 0x01 | 0x04 | 0x08
 #: 캡션 방향(명세 표72).
 CAPTION_LEFT, CAPTION_RIGHT, CAPTION_TOP, CAPTION_BOTTOM = range(4)
+#: 한글 2022 수식 엔진(HwpPlugin)의 버전 문자열. 다른 버전은 HwpApp 옛 엔진(FUN_106578c0)이 계산하며 아직 옮기지 않았다.
+NEW_EQUATION_ENGINE = "Equation Version 60"
 
 
 @dataclass
@@ -65,6 +71,72 @@ class Caption:
 
 
 class ObjectsMixin:
+    def equation_box(self, ctrl: Node) -> tuple[int, int, int] | None:
+        """한글 2022가 문서를 열 때 다시 계산하는 수식 (폭, 높이, 저장 기준선). 수식이 아니거나 계산하지 못하면 None."""
+        key = id(ctrl)
+        if key not in self.equation_boxes:
+            self.equation_boxes[key] = _recomputed_equation(ctrl)
+        return self.equation_boxes[key]
+
+    def resized_equation(self, ctrl: Node) -> bool:
+        box = self.equation_box(ctrl)
+        return box is not None and box != (ctrl.model.width, ctrl.model.height, ctrl.find(tags.EQEDIT).model.baseline)
+
+    def resized_size(self, ctrl: Node) -> tuple[int, int] | None:
+        """한글이 문서를 열 때 바꾸는 개체 (폭, 높이). 바뀌지 않으면 None.
+
+        수식은 다시 계산한 크기다. 셀에 크기가 바뀐 수식이 든 표는 한글이 셀을 다시 짜 높이를 행 높이 합으로 다시
+        쓴다(재저장본: 그런 표 21개 모두 높이가 바뀌었고 20개가 우리 격자 높이와 같다).
+        """
+        key = ("size", id(ctrl))
+        if key not in self.equation_boxes:
+            model = ctrl.model
+            box = self.equation_box(ctrl)
+            size = box[:2] if box is not None else None
+            if box is None and ctrl.record.payload[:4] == tags.TABLE_CTRL.to_bytes(4, "little"):
+                if any(self.resized_equation(node) for node in _descendants(ctrl) if node.tag == tags.CTRL_HEADER):
+                    grid, _ = self.table_layout_grid(ctrl)
+                    size = (model.width, round(grid.height)) if grid is not None else None
+            self.equation_boxes[key] = size if size is not None and size != (model.width, model.height) else None
+        return self.equation_boxes[key]
+
+    def resized_object(self, ctrl: Node) -> bool:
+        """한글이 문서를 열 때 크기나 기준선을 바꿔 그 문단 줄을 다시 짜게 하는 개체인가."""
+        return self.resized_equation(ctrl) or self.resized_size(ctrl) is not None
+
+    def object_model(self, ctrl: Node) -> ObjectCtrlHeader:
+        """개체 머리. 크기가 바뀌는 개체는 바뀐 폭·높이를 넣은 사본이다(문서 모델은 고치지 않는다)."""
+        model = ctrl.model
+        size = self.resized_size(ctrl) if isinstance(model, ObjectCtrlHeader) else None
+        if size is None:
+            return model
+        key = ("model", id(ctrl))
+        if key not in self.equation_boxes:
+            self.equation_boxes[key] = type(model)(
+                values={**model.values, "width": size[0], "height": size[1]}, tail=model.tail
+            )
+        return self.equation_boxes[key]
+
+    def inline_box(self, ctrl: Node) -> tuple[int, int]:
+        """글자처럼 취급한 개체의 (바깥 여백 포함 높이, 기준선 위 몫).
+
+        HwpApp FUN_101d7770: 개체 높이 × 기준선 함수(+0x140) 값 / 100(HncIntMulDiv). 수식은 EQEDIT 기준선을 돌려주고
+        (FUN_1026ee50), 다른 개체는 −1이라 85다. 바깥 여백을 높이에 넣는 것은 85% 규칙을 따랐다(수식으로는 검증 안 됨).
+        """
+        model = self.object_model(ctrl)
+        margins = model.outer_margins or [0, 0, 0, 0]
+        height = model.height + margins[2] + margins[3]
+        return height, muldiv(height, self.ascent_percent(ctrl), 100)
+
+    def ascent_percent(self, ctrl: Node) -> int:
+        box = self.equation_box(ctrl)
+        if box is not None:
+            return box[2]
+        equation = ctrl.find(tags.EQEDIT) if _is_equation(ctrl) else None
+        if equation is not None and isinstance(equation.model, EqEdit):
+            return equation.model.baseline
+        return ASCENT_PERCENT
+
     def object_size(self, model: ObjectCtrlHeader, state: PageState, area: Area) -> tuple[float, float]:
         geometry = state.geometry
         width, height = float(model.width), float(model.height)
@@ -80,7 +152,7 @@ class ObjectsMixin:
     def place_object(
         self, state: PageState, view: ParagraphView, ctrl: Node, x: float, baseline: float, area: Area
     ) -> None:
-        model: ObjectCtrlHeader = ctrl.model
+        model = self.object_model(ctrl)
         if id(ctrl) in self.__dict__.get("stacked_floats", ()):
             # 셀 엔진이 쌓아 따로 그리는 개체(table_flow.place_stacked_float).
             return
@@ -99,9 +171,11 @@ class ObjectsMixin:
         box_width = width + (caption.extent if caption and caption.beside else 0)
         box_height = height + (caption.extent if caption and not caption.beside else 0)
         if model.treat_as_char:
-            # 바깥 여백을 포함한 개체 상자의 85%를 기준선 위에 둔다(rhwp TAC_OBJECT_ASCENT_RATIO, 저장 줄과 일치).
+            # 바깥 여백을 포함한 개체 상자의 기준선 위 몫(수식은 기준선 백분율, 나머지 85%)을 기준선 위에 둔다
+            # (inline_box와 같은 규칙, rhwp TAC_OBJECT_ASCENT_RATIO, 저장 줄과 일치).
             left = x + margins[0]
-            top = baseline - TAC_ASCENT * (box_height + margins[2] + margins[3]) + margins[2]
+            top = baseline - muldiv(round(box_height) + margins[2] + margins[3], self.ascent_percent(ctrl), 100)
+            top += margins[2]
         else:
             full_height = None
             if self.in_body and is_block_table(ctrl) and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
@@ -623,6 +697,37 @@ def _is_top_and_bottom(model) -> bool:
     return (
         isinstance(model, ObjectCtrlHeader) and not model.treat_as_char and model.text_wrap == TextWrap.TOP_AND_BOTTOM
     )
+
+
+def _descendants(node: Node):
+    for child in node.children:
+        yield child
+        yield from _descendants(child)
+
+
+def _is_equation(ctrl: Node) -> bool:
+    return ctrl.record.payload[:4] == tags.EQUATION_CTRL.to_bytes(4, "little")
+
+
+def _recomputed_equation(ctrl: Node) -> tuple[int, int, int] | None:
+    """HwpApp FUN_10539be0은 'eqed'마다 FUN_1026e540을 조건 없이 불러 높이·기준선을 덮어쓰고, 폭은 EQEDIT attr bit 0이
+    꺼져 있을 때만 덮어쓴다(켜져 있으면 저장 폭 안에 가운데 맞춘다)."""
+    equation = ctrl.find(tags.EQEDIT) if _is_equation(ctrl) else None
+    if equation is None or not isinstance(equation.model, EqEdit) or equation.model.version != NEW_EQUATION_ENGINE:
+        return None
+    model = equation.model
+    # 빈 글꼴 이름은 덮어쓰지 않아 개체 기본 글꼴이 남는다(FUN_10549670). 기본 글꼴을 HYhwpEQ로 본 것은 검증 안 됨.
+    font = model.font_name or EQUATION_FONT
+    if font not in glyph_table().fonts:
+        return None
+    try:
+        width, height, baseline = measure_equation(model.script or "", model.font_size, font)
+    except (KeyError, NotImplementedError):
+        # 글리프 표에 없는 글자·크기와 아직 옮기지 않은 수식 객체는 저장 크기를 쓴다.
+        return None
+    if model.attr & 1:
+        width = ctrl.model.width
+    return width, height, baseline
 
 
 def _out_of_scope(ctrl: Node) -> bool:

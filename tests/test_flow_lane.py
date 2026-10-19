@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from rea_hwp import tags
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.paragraph import LineSeg
 from rea_hwp.render import reflow
-from rea_hwp.render.common import PageState, TextChar
+from rea_hwp.render.common import PageState, ParagraphView, TextChar
 from rea_hwp.render.layout import DocumentLayout, layout_document
 from rea_hwp.render.svg import page_glyph_table
 
@@ -486,3 +488,102 @@ def test_overflowing_tab_line_condenses_glyphs_after_tab():
     # 한글 2022 PDF 편람 280쪽 목차: 넘치는 줄의 탭 뒤 쪽 번호 「283」은 마지막 「3」이 469.44pt, 「2」가 467.40pt.
     page = _open("oss/rhwp/2025 행정업무운영 편람(최종).hwp")[279]
     assert _glyphs_at(page, "3", 469.44, 124.7)
+
+
+#: 수식 크기가 한글 2022 재저장으로 바뀌는 문서(재저장본 ~/tools/hwp-corpus/resave2022, PageCount를 먼저 읽어 줄 갱신).
+EQUATION_DOC = "oss/rhwp/3-10월_교육_통합_2022.hwp"
+
+
+def _walk(node):
+    yield node
+    for child in node.children:
+        yield from _walk(child)
+
+
+def _paragraphs(document: HwpDocument) -> list:
+    return [
+        node
+        for section in document.sections
+        for top in section.nodes
+        for node in _walk(top)
+        if node.tag == tags.PARA_HEADER
+    ]
+
+
+def _equations(document: HwpDocument) -> list:
+    eq = tags.EQUATION_CTRL.to_bytes(4, "little")
+    return [
+        node
+        for section in document.sections
+        for top in section.nodes
+        for node in _walk(top)
+        if node.tag == tags.CTRL_HEADER and node.record.payload[:4] == eq
+    ]
+
+
+@needs_corpus
+def test_resized_equation_paragraphs_match_hangul_2022_resave():
+    original = HwpDocument.open(CORPUS / EQUATION_DOC)
+    resaved = HwpDocument.open(CORPUS / "resave2022" / Path(EQUATION_DOC).with_suffix(".hwp"))
+    layout = DocumentLayout(original)
+    layout.run()
+    compared = 0
+    for ours, hangul in zip(_paragraphs(original), _paragraphs(resaved), strict=True):
+        relaid = layout.equation_relaid(ParagraphView.build(ours, layout.styles))
+        if relaid is None:
+            continue
+        expected = hangul.find(tags.PARA_LINE_SEG).model.segments
+        fields = ("text_start", "text_height", "baseline_gap", "line_spacing")
+        assert [[getattr(g, f) for f in fields] for g in relaid.segments] == [
+            [getattr(g, f) for f in fields] for g in expected
+        ]
+        compared += 1
+    # 재저장본에서 크기가 바뀐 수식이 든 문단 52개(relay_oracle 집계).
+    assert compared == 52
+
+
+@needs_corpus
+def test_layout_keeps_document_model_unchanged():
+    document = HwpDocument.open(CORPUS / EQUATION_DOC)
+    layout_document(document)
+    for stream in document.sections:
+        assert stream.to_bytes() == document.container.record_stream(stream.name)
+
+
+@needs_corpus
+def test_equation_width_kept_when_attr_bit0_set():
+    document = HwpDocument.open(CORPUS / EQUATION_DOC)
+    layout = DocumentLayout(document)
+    ctrl = copy.deepcopy(_equations(document)[0])
+    ctrl.model.values["width"] = 1234
+    computed = layout.equation_box(ctrl)
+    assert computed is not None and computed[0] != 1234
+    ctrl.find(tags.EQEDIT).model.values["attr"] |= 1
+    layout.equation_boxes.clear()
+    assert layout.equation_box(ctrl) == (1234, *computed[1:])
+    # 옛 엔진 버전 문자열이면 다시 계산하지 않고 저장값을 쓴다.
+    ctrl.find(tags.EQEDIT).model.values["version"] = ""
+    layout.equation_boxes.clear()
+    assert layout.equation_box(ctrl) is None
+
+
+@needs_corpus
+def test_relaid_paragraph_shift_stays_in_its_column():
+    # 한글 2022 PDF 1쪽: 첫째 단 수식 문단이 225HU 줄어도 둘째 단 첫 줄 「문6）」은 저장 위치 그대로(301.92, 75.36pt).
+    page = _open("oss/rhwp/3-11월_실전_통합_2022.hwp")[0]
+    assert _glyphs_at(page, "문", 301.92, 75.36)
+
+
+@needs_corpus
+def test_endnote_rewound_line_advances_by_text_height():
+    # 한글 2022 PDF 11쪽 끝: 높이 1662·글자 900인 「ⅳ) 일 때」 두 줄 뒤 「그래프」가 11쪽(318.0, 807.84pt).
+    page = _open("oss/rhwp/3-11월_실전_통합_2022.hwp")[10]
+    assert _glyphs_at(page, "그", 318.0, 807.84)
+
+
+@needs_corpus
+def test_table_with_resized_equations_takes_grid_height():
+    # 한글 2022 PDF 13쪽: 셀 수식이 바뀐 글자처럼 취급 표의 높이가 저장 3771에서 행 합 3546으로 줄어 뒤 「따라서」가
+    # (301.92, 427.08pt). 저장 높이를 쓰면 2.25pt 아래다.
+    page = _open("oss/rhwp/3-09월_교육_통합_2024-구분선아래20.hwp")[12]
+    assert _glyphs_at(page, "따", 301.92, 427.08)

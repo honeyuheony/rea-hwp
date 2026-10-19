@@ -108,6 +108,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         self.table_bottom: float | None = None
         #: 그 표의 바깥 아래 여백. 표 뒤 문단은 이만큼 띄워 잇는다.
         self.table_bottom_margin = 0
+        #: 수식 CTRL_HEADER(id)마다 다시 계산한 크기와 그 크기를 넣은 개체 머리 사본(ObjectsMixin.equation_box).
+        self.equation_boxes: dict = {}
 
     def run(self) -> list[Page]:
         for section in self.document.sections:
@@ -155,6 +157,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         previous_bottom = previous_line_bottom = previous_line_end = 0
         #: 본문 바닥을 넘어 이어진 빈 줄들의 첫 세로 위치. 다음 글자 줄을 밀 때 함께 민다.
         overflow_blank_vpos: int | None = None
+        #: 이 단에서 다시 짠 문단이 길어지거나 짧아져 뒤 줄을 옮긴 양. 다음 단 저장 위치는 단 맨 위 기준이라 버린다.
+        relaid_shift = 0
         #: 앞 문단이 끝난 세로 위치와 문단 모양. LINE_SEG가 없는 문단은 여기에 이어 붙인다.
         flow_end, previous_shape, after_spill = 0, None, False
         last_paragraph = next((node for node in reversed(nodes) if node.tag == tags.PARA_HEADER), None)
@@ -191,7 +195,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 )
                 if not page_break:
                     state = self.start_zone(state, geometry, view, zone_gap)
-                    previous_vpos, flow_end = None, 0
+                    previous_vpos, flow_end, relaid_shift = None, 0, 0
             elif (
                 node.model.break_type & 0x08
                 and state is not None
@@ -203,9 +207,12 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 # 배분 다단의 마지막 단에서 단 나누기는 같은 단 정의로 새 단 영역을 연다(한글 2022 PDF 실측: shortcut
                 # 3·6쪽). 일반 다단은 새 쪽으로 간다(3-11월_실전_통합 문항마다 단 나누기).
                 state = self.start_zone(state, geometry, view, zone_gap)
-                previous_vpos, flow_end = None, 0
+                previous_vpos, flow_end, relaid_shift = None, 0, 0
             stored_view = None
-            if (
+            relaid = self.equation_relaid(view)
+            if relaid is not None:
+                stored_view, view = view, relaid
+            elif (
                 view.segments
                 and previous_vpos is not None
                 and view.segments[0].vertical_pos > previous_vpos
@@ -277,6 +284,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                             state_before, geometry, segment, forced, (previous_line_bottom, flow_end)
                         )
                 elif forced or rewound:
+                    column_before = (state, state.column)
                     state = self.next_column(
                         state,
                         geometry,
@@ -285,6 +293,11 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                         (previous_line_bottom, flow_end),
                         first_line=index == 0,
                     )
+                    if state is column_before[0] and state.column != column_before[1]:
+                        # 같은 쪽 다음 단은 단 영역 위치(zone_top)를 함께 쓴다(실측: 3-11월_실전_통합_2022 1쪽 둘째 단,
+                        # 첫째 단 수식 문단이 225 줄어도 정답 둘째 단은 저장 위치 그대로).
+                        state.zone_top -= relaid_shift
+                    relaid_shift = 0
                 elif (
                     state.continued_by_table
                     and index == 0
@@ -308,6 +321,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     state = self.new_page(geometry)
                     state.zone_top = state.zone_bottom = -start
                     state.pushed_bottom = 0.0
+                    relaid_shift = 0
                 top = state.zone_top + segment.vertical_pos
                 below_bottom = (
                     len(geometry.columns) == 1 and top > 0 and top + segment.line_height > geometry.body_height
@@ -379,10 +393,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 self.flow_cursor = (state, state.column, geometry.body_top + line_bottom + segment.line_spacing)
             if stored_view is not None:
                 # 다시 짠 줄이 저장 줄보다 길거나 짧으면 그만큼 뒤 줄을 옮긴다. 앞 줄 비교값은 저장 줄 기준이다.
-                old, new = stored_view.segments[-1], view.segments[-1]
-                state.zone_top += (new.vertical_pos + new.line_height + new.line_spacing) - (
-                    old.vertical_pos + old.line_height + old.line_spacing
-                )
+                old = stored_view.segments[-1]
+                shift = _line_end(view.segments[-1]) - _line_end(old)
+                state.zone_top += shift
+                relaid_shift += shift
                 previous_vpos = old.vertical_pos
                 previous_line_bottom = previous_bottom = old.vertical_pos + old.line_height
                 previous_line_end = previous_line_bottom + old.line_spacing
@@ -795,6 +809,13 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     segments.append(dataclasses.replace(segment, vertical_pos=segment.vertical_pos + shift))
                     last_vpos = segment.vertical_pos + shift
                 view = dataclasses.replace(view, segments=segments)
+            relaid = self.equation_relaid(view)
+            if relaid is not None:
+                # 수식 크기로 길어지거나 짧아진 만큼 뒤 문단을 옮긴다(본문 layout_section과 같다).
+                shift += _line_end(relaid.segments[-1]) - _line_end(view.segments[-1])
+                views.append(relaid)
+                last_vpos = relaid.segments[-1].vertical_pos
+                continue
             if textbox and view.segments and self.squeezed(view):
                 previous = views[-1] if views else None
                 start = reflow.flow_end(previous) if previous else view.segments[0].vertical_pos
@@ -886,7 +907,11 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         head_index = members[0]
         first_item = view.line_range(head_index)[0]
         boxes = reflow.measure_items(
-            view, lambda index: self.item_width(view, index), self.styles.char_shapes, self.measurer.slot
+            view,
+            lambda index: self.item_width(view, index),
+            self.styles.char_shapes,
+            self.measurer.slot,
+            self.inline_box,
         )
         head = self.paragraph_head(view)
         fresh = reflow.compose_around(
@@ -945,7 +970,11 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
     def reflowed(self, view: ParagraphView, width: float, start: int) -> ParagraphView:
         """LINE_SEG가 없는 문단에 폭 width로 나눈 합성 줄을 붙인다."""
         boxes = reflow.measure_items(
-            view, lambda index: self.item_width(view, index), self.styles.char_shapes, self.measurer.slot
+            view,
+            lambda index: self.item_width(view, index),
+            self.styles.char_shapes,
+            self.measurer.slot,
+            self.inline_box,
         )
         empty_height = reflow.paragraph_font_height(view, self.styles.char_shapes)
         # 머리 기호 폭은 줄 나눔에서도 뺀다(실측: task2287 338쪽 「-」 글머리표 셀 문단, 정답 「알아|보기」).
@@ -955,6 +984,58 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             view.chars, view.positions, boxes, view.para_shape, int(width), empty_height, start, shifts
         )
         return dataclasses.replace(view, segments=segments)
+
+    def equation_relaid(self, view: ParagraphView) -> ParagraphView | None:
+        """크기가 바뀐 수식(또는 그런 수식을 셀에 담은 표)이 든 문단을 한글처럼 다시 짠 보기. 없으면 None.
+
+        한글은 문서를 열 때 수식 크기를 다시 계산하고 그 문단 줄을 다시 짠다(재저장본: 그런 문단 855개 모두 새
+        LINE_SEG). 가로 구간은 저장 줄의 것을 줄 번호대로 쓴다. 세로 위치는 저장 첫 줄에서 줄 높이 + 줄 간격씩
+        내리고, 단·쪽이 바뀌어 되감긴 저장 줄 번호에서는 그 저장 위치에서 다시 시작한다. 여러 구간 줄은 다루지 않는다.
+        """
+        if not view.segments or not any(self.resized_object(ctrl) for ctrl in view.controls.values()):
+            return None
+        stored = view.segments
+        first_marks = [segment.flags & reflow.LINE_FIRST_SEGMENT for segment in stored]
+        if any(first_marks) and not all(first_marks):
+            return None
+        boxes = reflow.measure_items(
+            view,
+            lambda index: self.item_width(view, index),
+            self.styles.char_shapes,
+            self.measurer.slot,
+            self.inline_box,
+        )
+        # 바뀐 수식이 처음 든 줄 앞 줄은 입력이 그대로라 한글도 저장 줄과 같게 나눈다. 그 줄부터 다시 나눈다.
+        changed = next(
+            number
+            for number in range(len(stored))
+            if any(
+                self.resized_object(view.controls[index])
+                for index in range(*view.line_range(number))
+                if index in view.controls
+            )
+        )
+        head = self.paragraph_head(view)
+        fresh = reflow.compose_in_ranges(
+            view.chars,
+            view.positions,
+            boxes,
+            view.para_shape,
+            [(segment.column_start, segment.segment_width) for segment in stored],
+            reflow.paragraph_font_height(view, self.styles.char_shapes),
+            (head.first, head.rest) if head is not None else (0.0, 0.0),
+            view.line_range(changed)[0],
+            changed,
+        )
+        # 한글은 그 줄들도 다시 짜 줄 높이를 글자 높이로 다시 쓴다(FUN_101e3460).
+        lines = [dataclasses.replace(segment, line_height=segment.text_height) for segment in stored[:changed]]
+        for number, line in enumerate(fresh, start=changed):
+            if number < len(stored) and (number == 0 or stored[number].vertical_pos < stored[number - 1].vertical_pos):
+                vertical = stored[number].vertical_pos
+            else:
+                vertical = _line_end(lines[-1])
+            lines.append(dataclasses.replace(line, vertical_pos=vertical))
+        return dataclasses.replace(view, segments=lines)
 
     def place_line(self, state: PageState, view: ParagraphView, index: int, area: Area) -> None:
         segment = view.segments[index]
@@ -1118,8 +1199,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 shape = self.styles.char_shapes[view.shape_ids[char_index]]
                 return max((self.text_width(char, shape) for char in ctrl.model.text or ""), default=0)
             if ctrl is not None and isinstance(ctrl.model, ObjectCtrlHeader) and ctrl.model.treat_as_char:
-                margins = ctrl.model.outer_margins or [0, 0, 0, 0]
-                return ctrl.model.width + margins[0] + margins[1]
+                model = self.object_model(ctrl)
+                margins = model.outer_margins or [0, 0, 0, 0]
+                return model.width + margins[0] + margins[1]
             return 0
         if item.char in ("\r", "\n") or ord(item.char) == PARA_BREAK:
             return 0
@@ -1327,6 +1409,11 @@ def _anchored_floats(view: ParagraphView) -> list[tuple[int, Node]]:
         and ctrl.model.text_wrap == TextWrap.TOP_AND_BOTTOM
         and ctrl.model.vert_rel_to == VertRelTo.PARA
     ]
+
+
+def _line_end(segment: LineSeg) -> int:
+    """다음 줄이 시작하는 세로 위치. 한글은 글자 높이로 내린다(재저장본 줄 높이 ≠ 글자 높이인 줄 447개 모두)."""
+    return segment.vertical_pos + segment.text_height + segment.line_spacing
 
 
 def is_blank_paragraph(view: ParagraphView) -> bool:

@@ -56,7 +56,9 @@ class NotesMixin:
                         if segment.vertical_pos > previous.vertical_pos:
                             top += segment.vertical_pos - previous.vertical_pos
                         else:
-                            top += previous.line_height + previous.line_spacing
+                            # 한글은 다음 줄을 글자 높이로 내린다(재저장본 줄 높이 ≠ 글자 높이인 줄 447개 모두).
+                            # 실측: 3-11월_실전_통합_2022 11쪽 「ⅳ) 일 때」 높이 1662·글자 900, 다음 줄이 11쪽 끝.
+                            top += previous.text_height + previous.line_spacing
                     if floor is not None:
                         top = max(top, floor)
                         floor = None
