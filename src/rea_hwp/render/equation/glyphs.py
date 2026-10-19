@@ -1,0 +1,73 @@
+"""수식 글꼴 힌팅 폭 표(data/eq_glyph_metrics.json.gz)로 엔진의 GDI 글자 측정을 재현한다."""
+
+from __future__ import annotations
+
+import bisect
+import gzip
+import json
+from functools import lru_cache
+from pathlib import Path
+
+_DATA = Path(__file__).resolve().parent.parent / "data" / "eq_glyph_metrics.json.gz"
+
+#: 글리프가 없을 때 쓰는 글꼴. EqAppModule FUN_10012960이 리소스 IDS_EQ_LOG_FONTNAME(= 한컴바탕)으로 바꿔 측정한다.
+FALLBACK_FONT = "한컴바탕"
+#: 수식 글꼴. FUN_10011fd0은 현재 글꼴 다음에 이 글꼴에서 글리프를 찾는다.
+EQUATION_FONT = "HYhwpEQ"
+#: 96DPI 화면 DC에서 1픽셀 = 7200/96 HWPUNIT(FUN_1026e540의 창·뷰포트 범위).
+UNITS_PER_PIXEL = 75
+
+
+def to_pixels(units: int) -> int:
+    """논리 단위 → 장치 픽셀(반올림)."""
+    return (units * 2 + UNITS_PER_PIXEL) // (2 * UNITS_PER_PIXEL)
+
+
+def ppem(size: int) -> tuple[int, int]:
+    # 글꼴 높이 = 크기, lfWidth = 크기/2(FUN_10011f10). 세 글꼴 모두 xAvgCharWidth = em/2라 가로 ppem = 2 x 폭 픽셀
+    height = to_pixels(size)
+    width = to_pixels(size // 2)
+    # 검증 안 됨: 폭이 0픽셀이면 GDI가 lfWidth 0(종횡비 기본값)처럼 다룬다고 보았다(크기 112 미만에서만 생김)
+    return (2 * width if width else height), height
+
+
+class _FontRuns:
+    def __init__(self, runs: list[list[int]], vectors: list[list[int]]) -> None:
+        self.starts = [run[0] for run in runs]
+        self.runs = runs
+        self.vectors = vectors
+
+    def vector(self, code: int) -> list[int] | None:
+        i = bisect.bisect_right(self.starts, code) - 1
+        if i < 0 or self.runs[i][1] < code:
+            return None
+        return self.vectors[self.runs[i][2]]
+
+
+class GlyphTable:
+    def __init__(self, raw: dict) -> None:
+        self.pair_index = {tuple(pair): i for i, pair in enumerate(raw["pairs"])}
+        self.fonts = {name: _FontRuns(font["runs"], font["vectors"]) for name, font in raw["fonts"].items()}
+
+    def has_glyph(self, font: str, code: int) -> bool:
+        runs = self.fonts.get(font)
+        return runs is not None and runs.vector(code) is not None
+
+    def extent(self, font: str, code: int, size: int) -> tuple[int, int]:
+        """GetTextExtentPointW(글자 하나)의 (cx, cy). 글리프가 없으면 대체 글꼴로 측정한다."""
+        if not self.has_glyph(font, code):
+            font = FALLBACK_FONT
+        vector = self.fonts[font].vector(code)
+        if vector is None:
+            raise KeyError(f"수식 글꼴 표에 U+{code:04X} 글자가 없어 크기를 계산할 수 없습니다. 저장된 크기를 쓰세요")
+        pair = ppem(size)
+        index = self.pair_index.get(pair)
+        if index is None:
+            raise KeyError(f"수식 글꼴 표에 ppem {pair}가 없습니다(글자 크기 {size})")
+        return vector[index] * UNITS_PER_PIXEL, pair[1] * UNITS_PER_PIXEL
+
+
+@lru_cache(maxsize=1)
+def glyph_table() -> GlyphTable:
+    with gzip.open(_DATA, "rt", encoding="utf-8") as fh:
+        return GlyphTable(json.load(fh))
