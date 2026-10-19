@@ -312,23 +312,27 @@ def compose_around(
     head: tuple[float, float] = (0.0, 0.0),
     first_item: int = 0,
     first_number: int = 0,
+    active_from: list[int] | None = None,
 ) -> list[LineSeg] | None:
     """compose와 같되 줄마다 그 줄 높이에서 어울림 개체를 피한 가로 구간(avoid_floats)으로 나눈다.
 
     한글은 줄을 나눌 때마다 지금 세로 위치의 구간을 다시 구한다(HwpApp FUN_101df690 → FUN_101dbfd0). 줄 높이는 줄
     첫 글자의 크기로 어림한다. 한 줄이 여러 구간으로 갈리면 아직 재현하지 못해 None. first_item·first_number는
-    다시 나누기 시작하는 항목 순번과 그 줄 번호다(앞 줄은 저장 줄을 쓴다).
+    다시 나누기 시작하는 항목 순번과 그 줄 번호다(앞 줄은 저장 줄을 쓴다). active_from은 개체마다 그 조판 부호의
+    항목 순번이다. 한글은 줄을 짜다 부호를 만나야 개체를 놓고 부호가 든 줄부터 피한다(개체 걸린 줄 일치 76→94%).
     """
     indent = para_shape.indent // 2
     segments: list[LineSeg] = []
     vertical, first, number = start, first_item, first_number
+    reach = first_item
     while first < len(chars) or not segments:
         height = (boxes[first].height if first < len(boxes) else 0) or empty_height
-        ranges = avoid_floats(base, floats, vertical, height)
+        placed = [f for i, f in enumerate(floats) if active_from is None or active_from[i] < max(reach, first + 1)]
+        ranges = avoid_floats(base, placed, vertical, height)
         if ranges is None:
             # 쓸 구간이 없으면 겹친 개체 아래로 내려간다.
             below = [
-                top + h for _, top, _, h, _ in floats if top <= vertical < top + h or vertical < top < vertical + height
+                top + h for _, top, _, h, _ in placed if top <= vertical < top + h or vertical < top < vertical + height
             ]
             if not below or min(below) <= vertical:
                 return None
@@ -343,6 +347,10 @@ def compose_around(
             available = width - max(-indent, 0) - head[1]
         starts = break_lines(chars[first:], boxes[first:], para_shape, (available, available)) if chars else [0]
         end = first + starts[1] if len(starts) > 1 else len(chars)
+        if active_from is not None and any(first < item < end and item >= reach for item in active_from):
+            # 이 줄에서 개체 부호를 만났다. 개체를 놓은 구간으로 같은 줄을 다시 나눈다.
+            reach = end
+            continue
         segment = _line_seg(chars, positions, boxes, para_shape, empty_height, number, first, end, vertical)
         segments.append(dataclasses.replace(segment, column_start=column_start, segment_width=width))
         vertical += segment.line_height + segment.line_spacing
@@ -425,23 +433,46 @@ RANGE_GRID = 4
 MIN_RANGE_WIDTH = 1440
 
 
-def horizontal_range(para_shape: ParaShape, column_width: int, snap: bool = True) -> tuple[int, int] | None:
+def horizontal_range(
+    para_shape: ParaShape, column_width: int, snap: bool = True, char_unit: int | None = None
+) -> tuple[int, int] | None:
     """한글 2022가 떠 있는 개체를 피하기 전에 줄에 주는 가로 구간 (단 안 시작, 폭). 모르면 None.
 
     HwpApp FUN_101dbfd0: 왼쪽 = 왼쪽 여백, 오른쪽 = 단 폭 − 오른쪽 여백(여백은 2배로 저장된다). 저장 LINE_SEG가 이
     구간과 1HU라도 다르면 한글은 그 줄을 다시 나눈다(FUN_101dbcf0). 단 폭은 4HU로 내린 값이다: 1단 코퍼스에서 여백을
     뺀 뒤 내린 값과 다를 때 1,379줄 모두 먼저 내린 값과 같았다(kr_156369057 48190 → 48188 − 515 = 47673). 폭이 서로
-    다른 다단(snap=False)은 내리지 않는다(KTX 33355). 백분율 여백(낮은 비트)은 아직 재현하지 않았다.
+    다른 다단(snap=False)은 내리지 않는다(KTX 33355). 여백을 뺀 폭이 최소 폭보다 좁으면 여백을 버리고 단 왼쪽부터
+    최소 폭을 준다(0x101dc145~0x101dc182, 좁은 셀 저장 줄 (0, 1440)).
+
+    낮은 비트가 선 여백은 글자 단위(백분율)라 HncIntMulDiv(여백>>1, char_unit, 100)이다. char_unit은 FUN_101b74f0
+    (둘째 인자 1)의 값으로 document_char_unit이 구한다. 모르면(None) 그런 문단은 None을 돌려준다.
     """
-    if para_shape.left_margin & 1 or para_shape.right_margin & 1:
-        return None
+    margins = []
+    for margin in (para_shape.left_margin, para_shape.right_margin):
+        if margin & 1:
+            if char_unit is None:
+                return None
+            margins.append(muldiv(margin >> 1, char_unit, 100))
+        else:
+            margins.append(margin >> 1)
     if snap:
         column_width -= column_width % RANGE_GRID
-    left = para_shape.left_margin >> 1
-    right = column_width - (para_shape.right_margin >> 1)
+    left = margins[0]
+    right = column_width - margins[1]
     if right - left < MIN_RANGE_WIDTH:
-        return None
+        return 0, MIN_RANGE_WIDTH
     return left, right - left
+
+
+def document_char_unit(char_shapes: list[CharShape], style_char_shape: int | None) -> int:
+    """글자 단위 여백의 한 글자(HwpApp FUN_101b74f0, 둘째 인자 1). 문서 상태의 글자 모양 기준 크기의 절반이다
+    (환경 옵션 비트 4가 서면 절반 하지 않음, 기본값은 꺼짐). 그 글자 모양은 문단과 상관없이 문서에서 하나라 첫 스타일
+    (바탕글)의 글자 모양으로 본다: 코퍼스 홀수 여백 문단 209개의 저장 줄 시작이 모두 이 값으로 맞았다(글자 모양 0번은
+    153개). 문서가 없으면 500.
+    """
+    if style_char_shape is None or style_char_shape >= len(char_shapes):
+        return 500
+    return char_shapes[style_char_shape].base_size // 2
 
 
 def avoid_floats(

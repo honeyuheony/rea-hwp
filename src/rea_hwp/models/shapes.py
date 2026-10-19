@@ -48,8 +48,9 @@ _COMPONENT_FIELDS: list[FieldSpec] = [
     ("local_version", "u16"),
     ("original_width", "u32"),
     ("original_height", "u32"),
-    ("current_width", "u32"),
-    ("current_height", "u32"),
+    #: 부호 있는 값이다: 뒤집어 저장한 글상자가 높이 −1841을 담는다(온새미로 본교재 쪽 표지 글상자, 개체 높이 1842).
+    ("current_width", "i32"),
+    ("current_height", "i32"),
     ("flags", "u32"),
     ("rotation", "i16"),
     ("rotation_center_x", "i32"),

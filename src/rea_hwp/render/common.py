@@ -21,6 +21,25 @@ from .styles import DocStyles
 
 #: 한글 PDF는 글자 원점을 600dpi 장치 격자(12 HWPUNIT)에 맞춘다. 한글 2022 PDF 글자 간격 실측(2026-10-17).
 DEVICE_UNIT = 12
+#: 그리기 판정 넓힘(장치 화소): 셀·개체 3(FUN_1018cd80·FUN_1018c200), 줄 1(FUN_1017f5f0). 600dpi 화소는 검증 안 됨.
+OBJECT_PAINT_GROW = 3 * DEVICE_UNIT
+LINE_PAINT_GROW = DEVICE_UNIT
+#: 가로 쪽 그리기 판정 면: PDF 저장 기준 프린터의 기본 용지(A4 세로). 이 기계 한글 535 실측이며 프린터마다 다를 수 있다.
+FALLBACK_SURFACE = (59528, 84188)
+
+
+def paint_visible(page: Page, box: tuple[float, float, float, float], grow: float) -> bool:
+    """한글 535 PDF 저장의 그리기 판정(FUN_1030cbb0 → RectVisible): 넓힌 상자 (x, y, 폭, 높이)가 기준 면과 겹치는가.
+
+    PDF 저장 기준 프린터 DC(FUN_100cafa0 DEVMODE)는 세로 방향·사용자 지정 크기(쪽 폭·높이)다. 세로 쪽이면 그 크기가
+    면이고, 폭이 더 긴 가로 쪽은 기본 용지 면이 된다(table-ipc 7열 왼쪽 653pt·issue2063 c6 610.8pt는 빠지고, 편람
+    754×556 쪽 x 596 셀 글은 그려짐).
+    """
+    surface_width, surface_height = FALLBACK_SURFACE if page.width > page.height else (page.width, page.height)
+    x, y, width, height = box
+    return x - grow < surface_width and x + width + grow > 0 and y - grow < surface_height and y + height + grow > 0
+
+
 JUSTIFY, LEFT, RIGHT, CENTER, DISTRIBUTE, SPLIT = range(6)
 #: LINE_SEG 태그 bit20: 이 줄에 문단 들여쓰기·내어쓰기를 적용한다.
 INDENT_APPLIED = 1 << 20

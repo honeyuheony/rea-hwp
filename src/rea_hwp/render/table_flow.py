@@ -603,7 +603,8 @@ class TableFlowMixin:
         def cell_views(table, cell) -> list[list]:
             # LINE_SEG가 없는 셀 문단은 셀 폭으로 합성 줄을 만들어 행 높이와 줄 배치에 함께 쓴다.
             margins = cell_margins(table, cell)
-            width = cell.header.width - margins[0] - margins[1]
+            # 셀 글 폭은 목록 머리 text_width다(issue7333 셀 폭 0, text_width 13531 − 여백 1020 → 저장 줄 12508).
+            width = (cell.header.text_width or cell.header.width) - margins[0] - margins[1]
             views[id(cell)] = [
                 dataclasses.replace(view, segments=[_restored_baseline(segment) for segment in view.segments])
                 for view in self.paragraph_views(cell.paragraphs, width)
@@ -1412,7 +1413,9 @@ class TableFlowMixin:
         saved = self.__dict__.get("cell_line")
         self.cell_line = line
         try:
-            self.place_line(state, line.view, line.index, Area(left + line.inner_x, list_top, line.inner_width))
+            # 셀 글 목록마다 떠 있는 개체를 그 셀 글 다음에 그린다(FUN_1018cd80 → FUN_10189050).
+            with self.painting_list(("cell", line.inner_x, line.origin)):
+                self.place_line(state, line.view, line.index, Area(left + line.inner_x, list_top, line.inner_width))
         finally:
             self.cell_line = saved
 

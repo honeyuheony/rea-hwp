@@ -9,6 +9,7 @@ from .. import tags
 from ..document import Node
 from ..models.controls import CellListHeader, ColumnDefCtrl, Table
 from .borders import border_lines
+from .common import OBJECT_PAINT_GROW, paint_visible
 from .scene import Page, Rect
 from .styles import DocStyles, colorref
 
@@ -480,7 +481,7 @@ def draw_cell_boxes(boxes: list[tuple[Cell, float, float, float, float]], page: 
     lines = []
     for cell, left, top, width, height in boxes:
         fill = styles.border_fill(cell.header.border_fill_id)
-        if fill is None:
+        if fill is None or not paint_visible(page, (left, top, width, height), OBJECT_PAINT_GROW):
             continue
         right, bottom = left + width, top + height
         color = colorref(fill.background_color)

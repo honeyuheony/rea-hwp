@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import functools
+import math
+import os
+import struct
 from dataclasses import dataclass
+from pathlib import Path
 
 from .. import tags
 from ..document import Node
@@ -17,11 +22,14 @@ from ..models.controls import (
     TextBoxListHeader,
     TextWrap,
 )
+from ..models.docinfo import FILL_GRADIENT, FILL_SOLID
 from ..models.paragraph import LineSeg
-from ..models.shapes import ShapeComponent, ShapePicture
+from ..models.shapes import ShapeComponent, ShapeOle, ShapePicture
+from .chart import ChartDrawing, draw_vtchart, vtchart_contents
 from .common import (
     ALIGN_CENTER,
     ALIGN_END,
+    OBJECT_PAINT_GROW,
     REL_COLUMN_OR_PARA,
     REL_PAGE,
     REL_PAPER,
@@ -32,22 +40,30 @@ from .common import (
     TextChar,
     column_layout,
 )
+from .equation import LegacyEngineState, LegacyEquationError, measure_legacy
 from .equation import measure as measure_equation
 from .equation.engine import muldiv
 from .equation.glyphs import EQUATION_FONT, glyph_table
 from .forms import draw_form
-from .reflow import ASCENT_PERCENT
-from .scene import Glyph, Image
+from .ole import content_metafile, has_ooxml_chart
+from .ooxml_chart import draw_ooxml_chart, ooxml_chart_contents
+from .reflow import ASCENT_PERCENT, RANGE_GRID
+from .scene import Glyph, Image, Line, Rect
 from .table_flow import _margin_shift, is_block_table
+from .textart import FontFiles, TextArtDrawing, TextArtFontError, draw_textart
 from .wmf import WmfDrawing, convert_wmf
 
 #: 연결 글상자를 찾을 때 넘친 줄 폭과 빈 글상자 안쪽 폭의 허용 차이(HU). 검증 안 됨: BookReview는 0~2HU 차이.
 LINK_WIDTH_TOLERANCE = 100
 #: 문단 머리 break_type의 구역(0x01)·쪽(0x04)·단(0x08) 나누기 비트.
 BREAK_SECTION_PAGE_COLUMN = 0x01 | 0x04 | 0x08
+#: 떠 있는 개체의 그리기 층(FUN_1018c200): 글 뒤로 −1, 글 앞으로 +1, 어울림·자리차지 0.
+PAINT_LAYERS = {TextWrap.BEHIND_TEXT: -1, TextWrap.IN_FRONT_OF_TEXT: 1}
+#: 단 정의 종류 2(평행 다단). 평행 다단에서는 개체를 다음 단으로 옮기지 않는다(FUN_102dbf80).
+PARALLEL_COLUMNS = 2
 #: 캡션 방향(명세 표72).
 CAPTION_LEFT, CAPTION_RIGHT, CAPTION_TOP, CAPTION_BOTTOM = range(4)
-#: 한글 2022 수식 엔진(HwpPlugin)의 버전 문자열. 다른 버전은 HwpApp 옛 엔진(FUN_106578c0)이 계산하며 아직 옮기지 않았다.
+#: 한글 2022 수식 엔진(HwpPlugin)의 버전 문자열. 다른 버전은 HwpApp 옛 엔진(FUN_106578c0)이 계산한다.
 NEW_EQUATION_ENGINE = "Equation Version 60"
 
 
@@ -74,9 +90,22 @@ class ObjectsMixin:
     def equation_box(self, ctrl: Node) -> tuple[int, int, int] | None:
         """한글 2022가 문서를 열 때 다시 계산하는 수식 (폭, 높이, 저장 기준선). 수식이 아니거나 계산하지 못하면 None."""
         key = id(ctrl)
+        if key not in self.equation_boxes and _LEGACY_DONE not in self.equation_boxes and _is_legacy_equation(ctrl):
+            self.measure_legacy_equations()
         if key not in self.equation_boxes:
             self.equation_boxes[key] = _recomputed_equation(ctrl)
         return self.equation_boxes[key]
+
+    def measure_legacy_equations(self) -> None:
+        """옛 엔진 수식을 문서 순서대로 한꺼번에 계산한다. 글꼴 플래그가 앞 수식에서 이어진다(LegacyEngineState)."""
+        state = LegacyEngineState()
+        stack = [node for section in reversed(self.document.sections) for node in reversed(section.nodes)]
+        while stack:
+            node = stack.pop()
+            stack.extend(reversed(node.children))
+            if _is_legacy_equation(node):
+                self.equation_boxes[id(node)] = _recomputed_equation(node, state)
+        self.equation_boxes[_LEGACY_DONE] = None
 
     def resized_equation(self, ctrl: Node) -> bool:
         box = self.equation_box(ctrl)
@@ -182,27 +211,58 @@ class ObjectsMixin:
                 grid, _ = self.table_layout_grid(ctrl)
                 full_height = grid.height if grid is not None else None
             left, top = self.floating_position(model, state, view, area, box_width, box_height, full_height)
-            if self.in_body and model.text_wrap == TextWrap.SQUARE:
+            if self.overflows_to_next_column(model, ctrl, state, top, box_height + margins[2] + margins[3]):
+                # FUN_102d51c0 0x102d5474: 단 아래를 넘는 문단 기준 개체는 대기 목록에 들어갔다가 다음 단을 시작할 때
+                # 단 맨 위에 놓인다(FUN_102d6280). 다시 놓을 때 세로 오프셋을 더하는 조건(obj+0x68)은 확인하지 못해
+                # 더하지 않는다
+                state = dataclasses.replace(state, column=state.column + 1)
+                left, _ = self.floating_position(model, state, view, area, box_width, box_height, full_height)
+                top = state.geometry.body_top + state.zone_top
+            if (self.in_body or self.body_anchor) and model.text_wrap == TextWrap.SQUARE:
                 state.floats.append((state.column, *outer_box(model, left, top, box_width, box_height)))
-            if is_block_table(ctrl) and model.vert_offset < 0 and model.vert_rel_to == REL_COLUMN_OR_PARA:
-                # 문단 기준 자리차지 표는 문단 위로 올라가지 않는다(실측: 셀 안 issue4889 1쪽 55행 표 오프셋 −975,
-                # 위 선 289.12; 본문 kr_156369118 5쪽 s0 p63 표 오프셋 −622, 정답 기준선 695.2pt).
-                top -= model.vert_offset
             if self.in_body and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
                 state, top = self.stacked_top(state, left, box_width, top, box_height + margins[2] + margins[3])
+            elif self.body_anchor and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
+                # 종이·쪽 기준 위아래 개체는 옮기지 않지만 쪽 개체 목록에 들어가 뒤 개체가 피한다(FUN_102d5900)
+                self.register_stacked_box(state, left, box_width, top, box_height + margins[2] + margins[3])
             if ctrl.record.payload[:4] != tags.TABLE_CTRL.to_bytes(4, "little"):
                 # 바깥 여백까지 든 상자가 정렬 기준에 맞고 개체는 그 안에 그린다. 오른쪽·아래 정렬이면
                 # 오른·아래 여백만큼 안쪽이다(오른쪽 정렬 그림을 피한 저장 줄이 왼 여백 566HU만큼 더 좁았다).
                 # 표는 draw_table이 같은 보정을 한다.
                 left += _margin_shift(model.horz_align, margins[0], margins[1])
                 top += _margin_shift(model.vert_align, margins[2], margins[3])
+        # 떠 있는 개체는 본문 글과 따로 층으로(FUN_1018c200), 글자처럼 취급한 개체는 줄 안에서(FUN_1019b7d0) 그린다.
+        # 표는 draw_table이 자리를 다시 정하므로(다음 쪽으로 밀림 등) 개체 상자 대신 셀마다 판정한다(FUN_1018cd80).
+        is_table = ctrl.record.payload[:4] == tags.TABLE_CTRL.to_bytes(4, "little")
+        box = None if is_table else (left, top, box_width, box_height)
+        layer = None if model.treat_as_char else PAINT_LAYERS.get(model.text_wrap, 0)
+        with self.painting(state.page, box, OBJECT_PAINT_GROW, layer=layer, z_order=model.z_order):
+            self.draw_object(state, ctrl, model, caption, anchor_state, left, top, width, height)
+
+    def draw_object(
+        self,
+        state: PageState,
+        ctrl: Node,
+        model: ObjectCtrlHeader,
+        caption: Caption | None,
+        anchor_state: PageState,
+        left: float,
+        top: float,
+        width: float,
+        height: float,
+    ) -> None:
+        margins = model.outer_margins or [0, 0, 0, 0]
         if caption and caption.direction == CAPTION_LEFT:
             left += caption.extent
         elif caption and caption.direction == CAPTION_TOP:
             top += caption.extent
         first, last, bottom = state, state, top + height
-        if _out_of_scope(ctrl):
+        if self.out_of_scope(ctrl, (width, height)):
             state.page.excluded.append((left, top, width, height))
+            component = ctrl.find(tags.SHAPE_COMPONENT)
+            if component is not None:
+                # 옮기지 못한 개체도 그릴 수 있는 만큼(새 차트의 표현 그림 등)은 그리고 채점에서만 뺀다.
+                self.draw_component(state, component, left, top, width, height)
         elif ctrl.record.payload[:4] == tags.TABLE_CTRL.to_bytes(4, "little"):
             placed = self.draw_table(state, ctrl, left, top)
             if placed is not None and placed.last_state is not state and self.in_body and _is_top_and_bottom(model):
@@ -229,6 +289,22 @@ class ObjectsMixin:
         if caption:
             owner = last if caption.direction == CAPTION_BOTTOM else first
             self.place_caption(owner, caption, left, top, bottom, width)
+
+    def overflows_to_next_column(
+        self, model: ObjectCtrlHeader, ctrl: Node, state: PageState, top: float, outer_height: float
+    ) -> bool:
+        """FUN_102d51c0: 문단 기준·본문 영역 제한 개체가 단 아래를 넘고 옮겨 갈 다음 단이 있는가(표는 쪽 나눔 엔진)."""
+        geometry = state.geometry
+        column_def = geometry.column_def
+        return (
+            self.in_body
+            and not is_block_table(ctrl)
+            and model.vert_rel_to == REL_COLUMN_OR_PARA
+            and model.flow_with_text
+            and state.column + 1 < len(geometry.columns)
+            and not (column_def is not None and column_def.kind == PARALLEL_COLUMNS)
+            and top + outer_height > geometry.body_top + geometry.body_height
+        )
 
     def object_caption(self, ctrl: Node, width: float, margin_left: int) -> Caption | None:
         children = ctrl.children
@@ -296,6 +372,11 @@ class ObjectsMixin:
         """full_height는 쪽을 넘을 수 있는 표의 격자 높이다(저장 높이는 첫 쪽 몫만 적히기도 한다)."""
         geometry = state.geometry
         column_x, column_width = geometry.columns[state.column]
+        if len({w for _, w in geometry.columns}) == 1:
+            # 한글의 단 좌표는 폭이 같은 단이면 4HU로 내린 폭이다(줄 구간 reflow.horizontal_range와 같다).
+            # 단 기준 오른쪽 맞춤 개체도 그 끝에 맞는다(143E433F 2단 22961: 저장 줄이 개체 왼쪽 13325 =
+            # 22960 − 바깥 폭 9635까지).
+            column_width -= column_width % RANGE_GRID
         horizontal = {
             REL_PAPER: (0.0, geometry.paper_width),
             REL_PAGE: (geometry.body_left, geometry.body_width),
@@ -357,9 +438,15 @@ class ObjectsMixin:
             REL_COLUMN_OR_PARA: (para_top, geometry.body_height),
         }
         ref_y, ref_h = vertical.get(model.vert_rel_to, vertical[REL_COLUMN_OR_PARA])
+        vert_offset = model.vert_offset
+        if model.ctrl_id == tags.TABLE_CTRL and model.vert_rel_to == REL_COLUMN_OR_PARA and vert_offset < 0:
+            # 문단 기준 표는 문단 위로 올라가지 않는다(실측: 셀 안 issue4889 1쪽 55행 표 오프셋 −975, 위 선 289.12;
+            # 본문 kr_156369118 5쪽 s0 p63 표 오프셋 −622, 정답 기준선 695.2pt; 어울림 표 정책연구용역 오프셋 −21453,
+            # 저장 줄 40102~48102가 문단 위 끝부터 그 표를 피함).
+            vert_offset = 0
         return (
             _align(ref_x, ref_w, width, model.horz_align, model.horz_offset),
-            _align(ref_y, ref_h, height, model.vert_align, model.vert_offset),
+            _align(ref_y, ref_h, height, model.vert_align, vert_offset),
         )
 
     def starts_page_by_rewind(self, state: PageState, view: ParagraphView) -> bool:
@@ -394,7 +481,10 @@ class ObjectsMixin:
         moved = True
         while moved:
             moved = False
-            for box_left, box_right, box_top, box_bottom, continued in boxes:
+            # 겹침은 쪽 개체 목록 전체에서 찾는다(FUN_102d5900 0x102d5a5e): 두 단에 걸친 띠 아래로 다른 단 개체도 밀린다
+            # (143E433F 오른쪽 단 차트가 왼쪽 단 문단 0의 종이 기준 띠 아래 283HU)
+            page_boxes = [box for (page, _), listed in registry.items() if page == id(state.page) for box in listed]
+            for box_left, box_right, box_top, box_bottom, continued in page_boxes:
                 if left < box_right and box_left < left + width and top < box_bottom and box_top < top + height:
                     moved = True
                     if continued is None:
@@ -418,6 +508,10 @@ class ObjectsMixin:
                     break
         boxes.append((left, left + width, top, top + height, None))
         return state, top
+
+    def register_stacked_box(self, state: PageState, left: float, width: float, top: float, height: float) -> None:
+        registry = self.__dict__.setdefault("_stacked_boxes", {})
+        registry.setdefault((id(state.page), state.column), []).append((left, left + width, top, top + height, None))
 
     def continue_stacked_box(self, first: PageState, last: PageState, bottom: float) -> None:
         """방금 쌓은 상자의 표가 쪽을 넘겼다. 첫 쪽에서는 쪽 끝까지, 끝난 쪽에서는 쪽 위부터 bottom까지 차지한다."""
@@ -466,6 +560,25 @@ class ObjectsMixin:
         picture = component.find(tags.SHAPE_COMPONENT_PICTURE)
         if picture is not None and isinstance(picture.model, ShapePicture):
             self.draw_picture(state, picture.model, left, top, width, height)
+        textart = component.find(tags.SHAPE_COMPONENT_TEXTART)
+        if textart is not None:
+            drawing = self.textart_drawing(textart, width, height)
+            if drawing is not None:
+                svg = _textart_svg(drawing, component.model)
+                href = f"data:image/svg+xml;base64,{base64.b64encode(svg.encode('utf-8')).decode('ascii')}"
+                state.page.items.append(Image(left, top, width, height, href))
+        ole = component.find(tags.SHAPE_COMPONENT_OLE)
+        if ole is not None and isinstance(ole.model, ShapeOle):
+            chart = self.chart_drawing(ole.model.bin_data_id, left, top, width, height)
+            drawing = self.ole_drawing(ole.model.bin_data_id) if chart is None else None
+            if chart is not None:
+                self.draw_chart(state, chart)
+            elif drawing is not None:
+                self.draw_metafile(state, drawing, left, top, width, height)
+                # 새 차트는 도형을 비트맵으로 찍고 기울어진 범주 이름만 글자로 찍는다. 도형은 표현 그림으로 대신한다.
+                labels = self.ooxml_chart_labels(ole.model.bin_data_id, left, top, width, height)
+                if labels is not None:
+                    self.draw_chart(state, labels)
         text_list = component.find(tags.LIST_HEADER)
         if text_list is not None and isinstance(text_list.model, TextBoxListHeader):
             header = text_list.model
@@ -474,7 +587,8 @@ class ObjectsMixin:
             inner_width = width - margins[0] - margins[1]
             views = self.paragraph_views(paragraphs, inner_width, textbox=True)
             area = Area(left + margins[0], top + margins[2], inner_width)
-            self.place_linked_text(state, views, area, (height - margins[2] - margins[3], header.vert_align))
+            with self.painting_list(("text box", id(component))):
+                self.place_linked_text(state, views, area, (height - margins[2] - margins[3], header.vert_align))
         for child in component.children:
             if child.tag == tags.SHAPE_COMPONENT and isinstance(child.model, ShapeComponent):
                 sub = child.model
@@ -554,8 +668,9 @@ class ObjectsMixin:
                 self._place_lines(state, rest, area)
 
     def _place_lines(self, state: PageState, lines: list[tuple[ParagraphView, int]], area: Area) -> None:
-        for view, index in lines:
-            self.place_line(state, view, index, area)
+        with self.painting_list(("text box", id(area))):
+            for view, index in lines:
+                self.place_line(state, view, index, area)
 
     def draw_picture(
         self, state: PageState, picture: ShapePicture, left: float, top: float, width: float, height: float
@@ -577,24 +692,27 @@ class ObjectsMixin:
         scale_x = width / drawing.width if drawing.width else 1.0
         scale_y = height / drawing.height if drawing.height else 1.0
         for text in drawing.texts:
-            x = left + text.x * scale_x
+            # 기울인 글줄(글꼴 escapement)은 그림 좌표에서 글줄 방향으로 나아간 뒤 상자 비율로 늘린다.
+            cos, sin = math.cos(math.radians(text.angle)), math.sin(math.radians(text.angle))
+            along = 0.0
             for index, char in enumerate(text.text):
-                advance = text.advances[index] * scale_x if text.advances and index < len(text.advances) else 0.0
+                advance = text.advances[index] if text.advances and index < len(text.advances) else 0.0
                 if char.strip():
                     state.page.items.append(
                         Glyph(
                             char,
-                            x,
-                            top + text.y * scale_y,
+                            left + (text.x + along * cos) * scale_x,
+                            top + (text.y - along * sin) * scale_y,
                             text.size * scale_y,
                             text.face,
                             text.color,
                             text.bold,
                             text.italic,
-                            advance=advance,
+                            advance=advance * scale_x,
+                            rotation=text.angle,
                         )
                     )
-                x += advance
+                along += advance
 
     def metafile(self, bin_data_id: int) -> WmfDrawing | None:
         entry = self.styles.bin_data[bin_data_id - 1] if 1 <= bin_data_id <= len(self.styles.bin_data) else None
@@ -605,6 +723,113 @@ class ObjectsMixin:
             data = self.bin_bytes(bin_data_id)
             cache[bin_data_id] = convert_wmf(data) if data is not None else None
         return cache[bin_data_id]
+
+    def ole_drawing(self, bin_data_id: int) -> WmfDrawing | None:
+        """OLE 개체의 내용 표현 메타파일. 개체 상자에 늘려 그린다(정답 PDF 글자 위치와 일치)."""
+        cache = self.__dict__.setdefault("_ole_drawings", {})
+        if bin_data_id not in cache:
+            data = self.bin_bytes(bin_data_id)
+            metafile = content_metafile(data) if data is not None else None
+            drawing = convert_wmf(metafile) if metafile is not None else None
+            cache[bin_data_id] = drawing
+        return cache[bin_data_id]
+
+    def chart_drawing(
+        self, bin_data_id: int, left: float, top: float, width: float, height: float
+    ) -> ChartDrawing | None:
+        """VtChart OLE를 개체 상자에 그린 차트. 한글은 이 차트를 표현 스트림이 아니라 플러그인이 직접 그린다
+
+        (HwpApp FUN_10221580 → HncChartBase FUN_100ef7a0). 옮기지 않은 차트 종류면 None.
+        """
+        contents = self.__dict__.setdefault("_vtchart_contents", {})
+        if bin_data_id not in contents:
+            data = self.bin_bytes(bin_data_id)
+            contents[bin_data_id] = vtchart_contents(data) if data is not None else None
+        if contents[bin_data_id] is None:
+            return None
+        return draw_vtchart(contents[bin_data_id], left / 100, top / 100, width / 100, height / 100)
+
+    def ooxml_chart_labels(
+        self, bin_data_id: int, left: float, top: float, width: float, height: float
+    ) -> ChartDrawing | None:
+        """새 차트(OOXMLChartContents)가 PDF 글자로 찍는 기울어진 범주 이름. 새 차트가 아니거나 범위 밖이면 None."""
+        contents = self.__dict__.setdefault("_ooxml_chart_contents", {})
+        if bin_data_id not in contents:
+            data = self.bin_bytes(bin_data_id)
+            contents[bin_data_id] = ooxml_chart_contents(data) if data is not None else None
+        if contents[bin_data_id] is None:
+            return None
+        return draw_ooxml_chart(contents[bin_data_id], left / 100, top / 100, width / 100, height / 100)
+
+    def draw_chart(self, state: PageState, chart: ChartDrawing) -> None:
+        for shape in chart.shapes:
+            color = "#{:02x}{:02x}{:02x}".format(*shape.color)
+            (x1, y1), (x2, y2) = shape.points
+            if shape.kind == "line":
+                # 검증 안 됨: 차트 모듈이 선 굵기를 주지 않아 장치 한 점(600DPI = 12HU)으로 그린다.
+                state.page.items.append(Line(x1 * 100, y1 * 100, x2 * 100, y2 * 100, 12, color))
+            else:
+                state.page.items.append(Rect(x1 * 100, y1 * 100, (x2 - x1) * 100, (y2 - y1) * 100, fill=color))
+        for glyph in chart.glyphs:
+            state.page.items.append(
+                Glyph(glyph.char, glyph.x * 100, glyph.y * 100, glyph.size * 100, glyph.font, rotation=glyph.angle)
+            )
+
+    def textart_drawing(self, node: Node, width: float, height: float) -> TextArtDrawing | None:
+        """글맵시 윤곽. 글꼴 파일이 없거나 아직 옮기지 못한 모양(원·여러 줄·HFT)이면 None이고 범위 밖으로 남긴다."""
+        cache = self.__dict__.setdefault("_textart_drawings", {})
+        key = (id(node), round(width), round(height))
+        if key not in cache:
+            try:
+                cache[key] = draw_textart(node.record.payload, width, height, _textart_fonts().find)
+            except (TextArtFontError, NotImplementedError, ImportError):
+                # 그리지 못하는 글맵시는 그 영역을 채점에서 빼는 기존 동작(범위 밖)으로 둔다.
+                cache[key] = None
+        return cache[key]
+
+    def out_of_scope(self, ctrl: Node, box_size: tuple[float, float] | None = None) -> bool:
+        """수식이거나 그리지 못하는 OLE·차트·글맵시를 담은 개체. 글상자 문단 안 개체는 그 글을 놓을 때 따로 판정한다."""
+        kind = ctrl.record.payload[:4]
+        if kind == tags.EQUATION_CTRL.to_bytes(4, "little"):
+            return True
+        if kind == tags.TABLE_CTRL.to_bytes(4, "little"):
+            return False
+        pending = list(ctrl.children)
+        while pending:
+            node = pending.pop()
+            if node.tag == tags.SHAPE_COMPONENT_OLE:
+                if not isinstance(node.model, ShapeOle):
+                    return True
+                component = _owner_component(ctrl, node)
+                size = (component.model.current_width, component.model.current_height) if component else (0, 0)
+                if self.chart_drawing(node.model.bin_data_id, 0, 0, *size) is not None:
+                    continue
+                # 새 차트는 한글이 OOXML로 다시 그려(HncDrawingEngine) 표현 그림과 다를 수 있어, 글자로 찍히는
+                # 범주 이름을 옮긴 차트만 범위 안에 둔다. 표현 그림에 글자가 있으면 PDF에 없는 글자가 생겨 범위 밖이다.
+                data = self.bin_bytes(node.model.bin_data_id)
+                drawing = self.ole_drawing(node.model.bin_data_id)
+                if drawing is None or data is None:
+                    return True
+                # 범주 이름 위치는 상자 크기에 따라 달라, 그릴 상자(box_size, HU)를 아는 맨 위 도형만 판정한다.
+                if has_ooxml_chart(data) and (
+                    drawing.texts
+                    or box_size is None
+                    or component is not ctrl.find(tags.SHAPE_COMPONENT)
+                    or self.ooxml_chart_labels(node.model.bin_data_id, 0, 0, *box_size) is None
+                ):
+                    return True
+            elif node.tag == tags.SHAPE_COMPONENT_TEXTART:
+                component = _owner_component(ctrl, node)
+                size = (component.model.current_width, component.model.current_height) if component else (0, 0)
+                if self.textart_drawing(node, *size) is None:
+                    return True
+            elif node.tag in _OUT_OF_SCOPE_TAGS:
+                return True
+            # 글상자 문단 속 수식은 글을 놓을 때 하나씩 제외하므로 글상자 전체를 범위 밖으로 보지 않는다.
+            if node.tag == tags.PARA_HEADER:
+                continue
+            pending.extend(node.children)
+        return False
 
     def bin_bytes(self, bin_data_id: int) -> bytes | None:
         if 1 <= bin_data_id <= len(self.styles.bin_data):
@@ -627,8 +852,8 @@ class ObjectsMixin:
         return href
 
 
-#: 1단계 범위 밖 개체: 수식, 그리고 OLE·차트·글맵시를 담은 그리기 개체.
-_OUT_OF_SCOPE_TAGS = frozenset({tags.SHAPE_COMPONENT_OLE, tags.SHAPE_COMPONENT_TEXTART, tags.CHART_DATA, tags.EQEDIT})
+#: 1단계 범위 밖 개체: 수식, 차트 데이터를 담은 그리기 개체(OLE·글맵시는 그리지 못할 때만).
+_OUT_OF_SCOPE_TAGS = frozenset({tags.CHART_DATA, tags.EQEDIT})
 
 
 def _rendered_box(component: ShapeComponent) -> tuple[float, float, float, float] | None:
@@ -709,44 +934,40 @@ def _is_equation(ctrl: Node) -> bool:
     return ctrl.record.payload[:4] == tags.EQUATION_CTRL.to_bytes(4, "little")
 
 
-def _recomputed_equation(ctrl: Node) -> tuple[int, int, int] | None:
+#: equation_boxes에서 옛 엔진 수식을 모두 계산했다는 표지.
+_LEGACY_DONE = "legacy-equations-measured"
+
+
+def _is_legacy_equation(ctrl: Node) -> bool:
+    equation = ctrl.find(tags.EQEDIT) if _is_equation(ctrl) else None
+    return equation is not None and isinstance(equation.model, EqEdit) and equation.model.version != NEW_EQUATION_ENGINE
+
+
+def _recomputed_equation(ctrl: Node, legacy_state: LegacyEngineState | None = None) -> tuple[int, int, int] | None:
     """HwpApp FUN_10539be0은 'eqed'마다 FUN_1026e540을 조건 없이 불러 높이·기준선을 덮어쓰고, 폭은 EQEDIT attr bit 0이
     꺼져 있을 때만 덮어쓴다(켜져 있으면 저장 폭 안에 가운데 맞춘다)."""
     equation = ctrl.find(tags.EQEDIT) if _is_equation(ctrl) else None
-    if equation is None or not isinstance(equation.model, EqEdit) or equation.model.version != NEW_EQUATION_ENGINE:
+    if equation is None or not isinstance(equation.model, EqEdit):
         return None
     model = equation.model
-    # 빈 글꼴 이름은 덮어쓰지 않아 개체 기본 글꼴이 남는다(FUN_10549670). 기본 글꼴을 HYhwpEQ로 본 것은 검증 안 됨.
-    font = model.font_name or EQUATION_FONT
-    if font not in glyph_table().fonts:
-        return None
     try:
-        width, height, baseline = measure_equation(model.script or "", model.font_size, font)
+        if model.version != NEW_EQUATION_ENGINE:
+            width, height, baseline = measure_legacy(model.script or "", model.font_size, legacy_state)
+        else:
+            # 빈 글꼴 이름은 덮어쓰지 않아 개체 기본 글꼴이 남는다(FUN_10549670). 기본 글꼴 HYhwpEQ는 검증 안 됨.
+            font = model.font_name or EQUATION_FONT
+            if font not in glyph_table().fonts:
+                return None
+            width, height, baseline = measure_equation(model.script or "", model.font_size, font)
+    except LegacyEquationError:
+        # 옛 엔진 해석이 실패하면 FUN_1026e540이 저장 크기를 덮어쓰지 않는다(0x1026e7ef jne).
+        return None
     except (KeyError, NotImplementedError):
         # 글리프 표에 없는 글자·크기와 아직 옮기지 않은 수식 객체는 저장 크기를 쓴다.
         return None
     if model.attr & 1:
         width = ctrl.model.width
     return width, height, baseline
-
-
-def _out_of_scope(ctrl: Node) -> bool:
-    """수식이거나, OLE·차트·글맵시를 담은 그리기 개체면 True. 표·글상자 문단 안 개체는 그 글을 놓을 때 따로 판정한다."""
-    kind = ctrl.record.payload[:4]
-    if kind == tags.EQUATION_CTRL.to_bytes(4, "little"):
-        return True
-    if kind == tags.TABLE_CTRL.to_bytes(4, "little"):
-        return False
-    pending = list(ctrl.children)
-    while pending:
-        node = pending.pop()
-        if node.tag in _OUT_OF_SCOPE_TAGS:
-            return True
-        # 글상자 문단 속 수식은 글을 놓을 때 하나씩 제외하므로 글상자 전체를 범위 밖으로 보지 않는다.
-        if node.tag == tags.PARA_HEADER:
-            continue
-        pending.extend(node.children)
-    return False
 
 
 def outer_box(
@@ -786,3 +1007,81 @@ def _mime(data: bytes, name: str) -> str:
             return mime
     extension = name.rsplit(".", 1)[-1].lower()
     return {"wmf": "image/wmf", "emf": "image/emf", "svg": "image/svg+xml"}.get(extension, "application/octet-stream")
+
+
+#: 글맵시 글꼴을 찾을 폴더. REA_HWP_FONT_DIRS(경로 구분자로 나눔)가 없으면 Windows 글꼴과 한컴 공용 TTF 가운데 있는 것.
+_DEFAULT_FONT_DIRS = (
+    Path("C:/Windows/Fonts"),
+    Path("/mnt/c/Windows/Fonts"),
+    Path("/mnt/c/Program Files (x86)/HNC/Office 2022/HOffice120/Shared/TTF"),
+)
+
+
+@functools.cache
+def _textart_fonts() -> FontFiles:
+    configured = os.environ.get("REA_HWP_FONT_DIRS")
+    directories = [Path(p) for p in configured.split(os.pathsep) if p] if configured else _DEFAULT_FONT_DIRS
+    return FontFiles([d for d in directories if d.is_dir()])
+
+
+def _owner_component(ctrl: Node, target: Node) -> Node | None:
+    """target 레코드를 자식으로 둔 도형 요소."""
+    pending = [ctrl]
+    while pending:
+        node = pending.pop()
+        if any(child is target for child in node.children):
+            return node if node.tag == tags.SHAPE_COMPONENT else None
+        pending.extend(node.children)
+    return None
+
+
+def _colorref(value: int) -> str:
+    return f"#{value & 0xFF:02x}{value >> 8 & 0xFF:02x}{value >> 16 & 0xFF:02x}"
+
+
+def _textart_fill(tail: bytes) -> tuple[str, str]:
+    """도형 요소 tail의 채우기 정보(명세 표28: 종류 u32, 단색 12바이트, 그러데이션)를 SVG 채우기와 정의로 바꾼다."""
+    if len(tail) < 4:
+        return "none", ""
+    (kind,) = struct.unpack_from("<I", tail)
+    offset = 4
+    fill = "none"
+    if kind & FILL_SOLID and len(tail) >= offset + 12:
+        fill = _colorref(struct.unpack_from("<I", tail, offset)[0])
+        offset += 12
+    if kind & FILL_GRADIENT and len(tail) >= offset + 21:
+        # 머리는 유형 1바이트 + 4바이트 필드들(docinfo._read_gradient와 같다). 색이 셋 이상이면 위치가 먼저 온다.
+        _, angle, _, _, _, count = struct.unpack_from("<BiiiiI", tail, offset)
+        offset += 21
+        positions = list(struct.unpack_from(f"<{count}i", tail, offset)) if count > 2 else []
+        offset += 4 * count if count > 2 else 0
+        colors = struct.unpack_from(f"<{count}I", tail, offset) if len(tail) >= offset + 4 * count else ()
+        if colors:
+            # 검증 안 됨: 유형(줄무늬·원형 등)과 관계없이 각도를 준 선형 그러데이션으로 그린다(글자 위치·채점과 무관).
+            stops = "".join(
+                f'<stop offset="{(positions[i] / 100 if positions else i / max(len(colors) - 1, 1)):g}" '
+                f'stop-color="{_colorref(color)}"/>'
+                for i, color in enumerate(colors)
+            )
+            rotate = f"rotate({angle} 0.5 0.5)"
+            definition = f'<defs><linearGradient id="g" gradientTransform="{rotate}">{stops}</linearGradient></defs>'
+            return "url(#g)", definition
+    return fill, ""
+
+
+def _textart_svg(drawing: TextArtDrawing, component: ShapeComponent) -> str:
+    """그림자를 먼저, 글자 윤곽을 도형 요소의 채우기와 선으로 그린다(FUN_100fc390 → FUN_100fbbd0)."""
+    fill, definition = _textart_fill(component.tail)
+    line_width = getattr(component, "line_width", 0) or 0
+    # 선 속성 하위 6비트는 선 종류이고 0이면 선이 없다.
+    has_line = line_width > 0 and getattr(component, "line_attr", 0) & 0x3F
+    stroke = f' stroke="{_colorref(component.line_color)}" stroke-width="{line_width}"' if has_line else ""
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {drawing.width:g} {drawing.height:g}" '
+        f'preserveAspectRatio="none">{definition}'
+    ]
+    if drawing.shadow_path:
+        parts.append(f'<path d="{drawing.shadow_path}" fill="{drawing.shadow_color}"/>')
+    parts.append(f'<path d="{drawing.path}" fill="{fill}" fill-rule="nonzero"{stroke}/>')
+    parts.append("</svg>")
+    return "".join(parts)

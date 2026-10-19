@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from rea_hwp.document import HwpDocument
+from rea_hwp.render.layout import layout_document
+from rea_hwp.render.ole import content_metafile
 from rea_hwp.render.styles import DocStyles
 from rea_hwp.render.wmf import convert_wmf
 
@@ -89,3 +91,66 @@ def test_chart_metafile_axis_labels_rise_upward():
     assert drawing is not None
     labels = {text.text: text.y for text in drawing.texts if text.text in ("40.0", "50.0", "60.0")}
     assert labels["40.0"] > labels["50.0"] > labels["60.0"]
+
+
+def rotated_font(height: int, escapement: int) -> bytes:
+    params = struct.pack("<hhhhhBBBBBBBB", height, 0, escapement, escapement, 400, 0, 0, 0, 0, 0, 0, 0, 0) + b"Arial\0"
+    return record(0x02FB, params + b"\0" * (len(params) & 1))
+
+
+def test_escapement_turns_text_line_and_moves_top_alignment_sideways():
+    data = metafile(
+        record(0x020C, struct.pack("<hh", 1000, 2000)),
+        rotated_font(-100, 900),
+        record(0x012D, struct.pack("<H", 0)),
+        text_out(300, 400, b"x"),
+    )
+
+    drawing = convert_wmf(data)
+
+    assert drawing is not None
+    [text] = drawing.texts
+    assert text.angle == 90
+    # 90도 글줄에서 위 정렬 기준점은 글자 높이만큼 오른쪽(글줄의 아래쪽)으로 옮겨진 기준선 위에 있다.
+    assert text.y == pytest.approx(400)
+    assert text.x > 300
+
+
+OLE_DOC = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp" / "issue2559__1341000_research_report_footnotes.hwp"
+
+
+@pytest.mark.skipif(not OLE_DOC.exists(), reason="corpus not available")
+def test_ole_content_presentation_yields_chart_metafile_with_slanted_labels():
+    document = HwpDocument.open(OLE_DOC)
+
+    drawing = convert_wmf(content_metafile(document.container.bin_data("BinData/BIN0001.OLE", True)))
+
+    assert drawing is not None
+    angles = {text.text: text.angle for text in drawing.texts}
+    assert angles["독일"] == 45
+    assert angles["최소 보수"] == 0
+
+
+@pytest.mark.skipif(not OLE_DOC.exists(), reason="corpus not available")
+def test_ole_slanted_label_glyphs_follow_hancom_pdf_positions():
+    pages = layout_document(HwpDocument.open(OLE_DOC))
+
+    glyphs = [(g.char, g.x / 100, g.y / 100) for g in pages[89].glyphs]
+
+    # 한글 2022 PDF 90쪽의 「슬로」(45도 축 이름표) 원점.
+    for char, x, y in (("슬", 129.06, 323.20), ("로", 132.73, 319.38)):
+        assert any(c == char and abs(gx - x) <= 1 and abs(gy - y) <= 1 for c, gx, gy in glyphs)
+
+
+CHART_ONLY_DOC = Path.home() / "tools" / "hwp-corpus" / "oss" / "hwplib" / "sample_hwp__basic__차트.hwp"
+
+
+@pytest.mark.skipif(not CHART_ONLY_DOC.exists(), reason="corpus not available")
+def test_vtchart_labels_follow_hancom_pdf_positions():
+    pages = layout_document(HwpDocument.open(CHART_ONLY_DOC))
+
+    glyphs = [(g.char, g.x / 100, g.y / 100) for g in pages[0].glyphs]
+
+    # 한글 2022 PDF: 세로축 「100」 첫 글자, 가로축 「행1」, 범례 「열1」 첫 글자의 원점.
+    for char, x, y in (("1", 96.12, 119.4), ("행", 127.32, 288.36), ("열", 321.72, 150.36)):
+        assert any(c == char and abs(gx - x) <= 1 and abs(gy - y) <= 1 for c, gx, gy in glyphs)

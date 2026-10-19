@@ -13,8 +13,9 @@ from rea_hwp.document import HwpDocument
 from rea_hwp.models.paragraph import LineSeg
 from rea_hwp.render import reflow
 from rea_hwp.render.common import PageState, ParagraphView, TextChar
+from rea_hwp.render.equation import measure_legacy
 from rea_hwp.render.layout import DocumentLayout, layout_document
-from rea_hwp.render.svg import page_glyph_table
+from rea_hwp.render.svg import display_text, page_glyph_table, page_to_svg
 
 CORPUS = Path.home() / "tools" / "hwp-corpus"
 needs_corpus = pytest.mark.skipif(not CORPUS.exists(), reason="corpus not available")
@@ -282,7 +283,9 @@ SPEC_50 = "oss/hwp-rs/crates__hwp__tests__integration__hancom__files__한글문�
 def test_first_table_header_row_matches_hancom(page_number: int, baseline: float):
     table = page_glyph_table(_open(SPEC_50)[page_number - 1])
     text = "".join(row[0] for row in table)
-    assert table[text.index("자료형")][2] == pytest.approx(baseline, abs=0.5)
+    # 떠 있는 표는 본문 글 뒤에 그리므로 글자 차례가 아니라 기준선으로 쪽 첫 표를 고른다.
+    starts = [index for index in range(len(text)) if text.startswith("자료형", index)]
+    assert min(table[index][2] for index in starts) == pytest.approx(baseline, abs=0.5)
 
 
 @needs_corpus
@@ -465,6 +468,7 @@ def test_spaced_table_continues_from_visible_page_bottom():
 @needs_corpus
 def test_text_lines_keep_spaces_and_line_order():
     # 86712 14쪽 표: 복사용 줄 글은 공백을 살리고 놓은 순서(행마다 왼쪽 칸 → 오른쪽 칸)를 따르며 쪽 번호도 든다.
+    # 쪽 번호는 본문보다 먼저 그린다(FUN_10188e10, 정답 PDF 글도 「- 14 -」로 시작).
     page = _open("oss/rhwp/86712_regulatory_analysis.hwp")[13]
     texts = [line.text for line in page.text_lines]
     start = texts.index("\u2007(A) 사업자의 수 또는 범위 제한")
@@ -473,7 +477,7 @@ def test_text_lines_keep_spaces_and_line_order():
         "없음",
         "\u2007(B) 사업자의 경쟁능력 제한",
     ]
-    assert texts[-1] == "- 14 -"
+    assert texts[0] == "- 14 -"
 
 
 @needs_corpus
@@ -561,10 +565,12 @@ def test_equation_width_kept_when_attr_bit0_set():
     ctrl.find(tags.EQEDIT).model.values["attr"] |= 1
     layout.equation_boxes.clear()
     assert layout.equation_box(ctrl) == (1234, *computed[1:])
-    # 옛 엔진 버전 문자열이면 다시 계산하지 않고 저장값을 쓴다.
-    ctrl.find(tags.EQEDIT).model.values["version"] = ""
+    # 옛 엔진 버전 문자열도 FUN_1026e540이 옛 엔진(FUN_106578c0)으로 다시 계산한다.
+    equation = ctrl.find(tags.EQEDIT).model
+    equation.values["version"] = ""
     layout.equation_boxes.clear()
-    assert layout.equation_box(ctrl) is None
+    legacy = measure_legacy(equation.script, equation.font_size)
+    assert layout.equation_box(ctrl) == (1234, *legacy[1:])
 
 
 @needs_corpus
@@ -587,3 +593,95 @@ def test_table_with_resized_equations_takes_grid_height():
     # (301.92, 427.08pt). 저장 높이를 쓰면 2.25pt 아래다.
     page = _open("oss/rhwp/3-09월_교육_통합_2024-구분선아래20.hwp")[12]
     assert _glyphs_at(page, "따", 301.92, 427.08)
+
+
+@needs_corpus
+def test_cell_text_width_keeps_stored_lines_of_zero_width_cell():
+    # 셀 머리 폭 0, 목록 머리 text_width 34633: 저장 줄 33612는 text_width − 여백을 4HU로 내린 구간과 같다.
+    pages = _open("oss/rhwp/issue7333__aaaaaa.hwp")
+
+    glyphs = [(g.char, g.x / 100, g.y / 100) for g in pages[8].glyphs]
+
+    # 한글 2022 PDF 9쪽 「스캔된 문서의 이미지」 첫 글자와 「이」의 원점.
+    for char, x, y in (("스", 197.04, 663.24), ("이", 270.36, 663.24)):
+        assert any(c == char and abs(gx - x) <= 1 and abs(gy - y) <= 1 for c, gx, gy in glyphs)
+
+
+@needs_corpus
+def test_paper_anchored_square_object_joins_body_float_list():
+    layout = DocumentLayout(HwpDocument.open(CORPUS / "oss/rhwp/hwp3-sample5-hwp5.hwp"))
+    layout.run()
+
+    page4 = next(state for state in layout.states if state.page.number == 4)
+
+    # 4쪽 문단 74의 종이 기준 그림 오른쪽 끝(단 기준)이 다음 문단 저장 줄 시작 37164와 같다.
+    rights = [x + width - page4.geometry.body_left for _, x, _, width, _, _ in page4.floats]
+    assert rights == [37164]
+
+
+@needs_corpus
+def test_linked_text_box_lines_keep_width_of_next_box():
+    # 넘친 줄은 연결된 다음 글상자(폭 13832)에 놓이니 원래 글상자 폭으로 다시 나누지 않는다.
+    pages = _open("oss/rhwp/basic__BookReview.hwp")
+
+    glyphs = [(g.char, g.x / 100, g.y / 100) for g in pages[1].glyphs]
+
+    # 한글 2022 PDF 2쪽: 「5장에서는 …」 첫 글자 (389.88, 665.76), 둘째 줄 첫 글자 「맞」 (415.2, 677.28).
+    # 세로 위치는 이 문서에서 따로 어긋나 있어 줄 나눔(가로 위치와 줄 간격)만 본다.
+    text = "".join(c for c, _, _ in glyphs)
+    first = glyphs[text.index("5장에서는")]
+    assert abs(first[1] - 389.88) <= 1
+    assert any(c == "맞" and abs(gx - 415.2) <= 1 and abs(gy - first[2] - 11.52) <= 1 for c, gx, gy in glyphs)
+
+
+@needs_corpus
+def test_paragraph_object_overflowing_column_moves_below_band_in_next_column():
+    # 문단 7 차트는 왼쪽 단 아래를 넘어 오른쪽 단 맨 위로 가고(FUN_102d51c0), 두 단에 걸친 종이 기준 띠 아래로 밀린다
+    # (FUN_102d5900). 한글 2022 PDF: 세로축 「1000」 첫 글자 (321.0, 202.9)
+    pages = _open("oss/rhwp/143E433F503322BD33.hwp")
+
+    placed = page_glyph_table(pages[0])
+    assert any(char == "1" and abs(x - 321.0) <= 1 and abs(y - 202.9) <= 1 for char, x, y in placed)
+
+
+@needs_corpus
+def test_landscape_cells_outside_print_surface_are_not_drawn():
+    # 한글 535 PDF 저장은 가로 쪽을 A4 세로 면으로 판정해 왼쪽 끝 653pt인 7열(「상당금액」)과 8열(「비고」)을 빼고,
+    # 왼쪽 586pt인 6열(「단위」)은 그린다(FUN_1018cd80 → RectVisible).
+    text = "".join(char for char, _, _ in page_glyph_table(_open("oss/rhwp/table-ipc.hwp")[0]))
+    assert "단위" in text
+    assert "상당금액" not in text and "비고" not in text
+
+
+@needs_corpus
+def test_floating_box_text_follows_body_text():
+    # 한글 PDF 2쪽: 쪽 번호 → 본문 줄 → 본문 사이 상자 안 글(층 0 떠 있는 개체는 본문 글 다음, FUN_101891a0).
+    text = "".join(char for char, _, _ in page_glyph_table(_open("oss/rhwp/pic-in-head-02.hwp")[1]))
+    assert text.startswith("-2-")
+    assert text.index("한다.") < text.index("※‘허가초과의약품사용관리제도’란?")
+
+
+@needs_corpus
+def test_flipped_text_box_height_keeps_box_on_page():
+    # 도형 요소 현재 높이 −1841(부호 있는 값)인 쪽 아래 글상자: 한글 PDF처럼 쪽 안(기준선 792pt)에 놓인다.
+    page = _open("oss/rhwp/[2027] 온새미로 1 본교재.hwp")[1]
+    assert [round(y) for char, x, y in page_glyph_table(page) if char == "온" and x < 100] == [792]
+
+
+def test_display_text_turns_old_hangul_pua_into_jamo_and_keeps_symbol_pua():
+    # HncPUAStrToUniStr: 옛한글 음절 PUA는 첫가끝 자모로, 기호 글꼴 영역(U+F000~F0FF)과 평면 15 PUA는 그대로.
+    assert display_text("") == "ᄒᆞᆫ"
+    assert display_text("\U000f02b1") == "\U000f02b1"
+
+
+@needs_corpus
+def test_svg_writes_old_hangul_pua_as_jamo():
+    svg = page_to_svg(_open("oss/rhwp/pua-test.hwp")[0])
+    assert "ᄒᆞᆫ" in svg and "" not in svg
+
+
+@needs_corpus
+def test_svg_draws_symbol_area_pua_with_wingdings():
+    # 한글 PDF: 함초롬바탕 글자 모양의 U+F076이 Wingdings로 찍힌다(기본 글꼴 목록에서 글리프가 있는 첫 글꼴).
+    svg = page_to_svg(_open("oss/rhwp/pua-test.hwp")[0])
+    assert 'font-family="Wingdings" ><' in svg

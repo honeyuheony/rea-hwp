@@ -2,11 +2,47 @@
 
 from __future__ import annotations
 
+import functools
+import gzip
+import json
+from importlib import resources
 from xml.sax.saxutils import escape, quoteattr
 
 from .scene import Glyph, Image, Line, Page, Rect
 
 HU_PER_PT = 100.0
+
+
+@functools.cache
+def _pua_table() -> dict:
+    data = resources.files("rea_hwp.render").joinpath("data/pua_hangul.json.gz").read_bytes()
+    return json.loads(gzip.decompress(data))
+
+
+@functools.cache
+def _pua_hangul() -> dict[int, str]:
+    return {int(code, 16): text for code, text in _pua_table()["jamo"].items()}
+
+
+def display_font(char: str, family: str) -> str:
+    """기호 영역(U+F000~F0FF) 글자는 글꼴에 글리프가 없으면 기본 글꼴 목록에서 글리프가 있는 첫 글꼴로 그린다.
+
+    HncBaseDraw FUN_10055910·FUN_10055820과 fontinfo.dat [Default Fonts KOR] Symbol 줄(tools/build_pua_hangul.py).
+    """
+    table = _pua_table()
+    fallback = table["symbol_fallbacks"].get(f"{ord(char):X}") if len(char) == 1 else None
+    if fallback is None or ord(char) in table["symbol_coverage"].get(family, ()):
+        return family
+    return fallback
+
+
+def display_text(text: str) -> str:
+    """보여 주고 복사하는 글: 옛한글 PUA를 한글처럼 첫가끝 자모로 바꾼다(HncPUAStrToUniStr, tools/build_pua_hangul.py).
+
+    기호 PUA와 평면 15·16 PUA는 한글에도 표준 글자 대응이 없어 그대로 두고 글꼴 글리프로 그린다.
+    """
+    table = _pua_hangul()
+    return "".join(table.get(ord(char), char) for char in text)
 
 
 def _pt(value: float) -> str:
@@ -23,12 +59,13 @@ def _glyph(glyph: Glyph) -> str:
     if glyph.color != "#000000":
         style.append(f'fill="{glyph.color}"')
     attrs = " ".join(style)
-    family = quoteattr(glyph.font_family)
-    text = escape(glyph.char)
-    if abs(glyph.scale_x - 1.0) > 0.001:
+    family = quoteattr(display_font(glyph.char, glyph.font_family))
+    text = escape(display_text(glyph.char))
+    if abs(glyph.scale_x - 1.0) > 0.001 or glyph.rotation:
         # 장평은 가로로만 줄이거나 늘린다. 원점을 기준으로 변환해 x 위치가 흔들리지 않게 한다.
+        rotate = f" rotate({-glyph.rotation:g})" if glyph.rotation else ""
         return (
-            f'<text transform="translate({_pt(glyph.x)} {_pt(glyph.y)}) scale({glyph.scale_x:.4f} 1)" '
+            f'<text transform="translate({_pt(glyph.x)} {_pt(glyph.y)}){rotate} scale({glyph.scale_x:.4f} 1)" '
             f'font-size="{_pt(glyph.size)}" font-family={family} {attrs}>{text}</text>'
         )
     return (

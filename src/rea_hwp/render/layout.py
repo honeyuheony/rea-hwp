@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import itertools
 import unicodedata
 
 from .. import tags
@@ -22,7 +24,7 @@ from ..models.controls import (
     VertRelTo,
 )
 from ..models.docinfo import CharShape
-from ..models.paragraph import PARA_BREAK, TAB, ControlChar, LineSeg
+from ..models.paragraph import PARA_BREAK, TAB, ControlChar, LineSeg, ParaLineSeg
 from . import heads, metrics, reflow
 from .common import (
     CENTER,
@@ -30,6 +32,7 @@ from .common import (
     DISTRIBUTE,
     INDENT_APPLIED,
     JUSTIFY,
+    LINE_PAINT_GROW,
     MIRRORED,
     RIGHT,
     SPLIT,
@@ -48,12 +51,14 @@ from .common import (
     _superscript,
     column_layout,
     device_round,
+    paint_visible,
     script_scale,
 )
 from .decor import DecorMixin
 from .notes import NotesMixin, piece_height
 from .numbering import format_number
 from .objects import ObjectsMixin, outer_box
+from .paint import PaintUnit, arrange_pages
 from .scene import Glyph, Page, TextLine
 from .styles import DocStyles, colorref
 from .table_flow import TableFlowMixin, is_block_table
@@ -76,6 +81,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
     def __init__(self, document: HwpDocument) -> None:
         self.document = document
         self.styles = DocStyles.from_document(document)
+        self.char_unit = reflow.document_char_unit(
+            self.styles.char_shapes, self.styles.styles[0].char_shape_id if self.styles.styles else None
+        )
         self.measurer = TextMeasurer(self.styles)
         self.pages: list[Page] = []
         self.states: list[PageState] = []
@@ -98,6 +106,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         self.flow_cursor: tuple[PageState, int, float] | None = None
         #: 본문 흐름에 놓는 중이면 True(표를 쪽 단위로 나눌 수 있다). 셀·머리말·주석 안에서는 False.
         self.in_body = False
+        #: 본문 문단에 묶인 개체를 놓는 중이면 True. 종이·쪽 기준 개체는 in_body를 끄지만 줄은 여전히 그 개체를 피한다.
+        self.body_anchor = False
         #: 표가 쪽을 늘렸을 때 본문이 이어 쓸 마지막 쪽.
         self.current_state: PageState | None = None
         #: 쪽을 넘긴 표 문단 뒤에 놓은 줄 수.
@@ -124,7 +134,59 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         for index, state in enumerate(self.states):
             self.decorate_page(state, self.page_sections[index], self.page_numbers[index])
         self.flush_linked_text()
+        arrange_pages(self.__dict__.pop("paint_units", []))
         return self.pages
+
+    @contextlib.contextmanager
+    def painting(
+        self,
+        page: Page,
+        box: tuple[float, float, float, float] | None,
+        grow: float,
+        *,
+        is_line: bool = False,
+        layer: int | None = None,
+        z_order: int = 0,
+    ):
+        """이 안에서 page에 넣은 항목을 그리기 단위 하나로 적는다. box가 None이면 판정하지 않는다."""
+        units: list[PaintUnit] = self.__dict__.setdefault("paint_units", [])
+        stack: list[PaintUnit] = self.__dict__.setdefault("paint_stack", [])
+        unit = PaintUnit(
+            page,
+            len(page.items),
+            len(page.text_lines),
+            box is None or paint_visible(page, box, grow),
+            next((open_unit for open_unit in reversed(stack) if open_unit.page is page), None),
+            layer,
+            z_order,
+            self.__dict__.get("paint_list"),
+            is_line,
+            len(units),
+        )
+        units.append(unit)
+        stack.append(unit)
+        try:
+            yield
+        finally:
+            stack.pop()
+            unit.item_end, unit.line_end = len(page.items), len(page.text_lines)
+
+    @contextlib.contextmanager
+    def painting_list(self, key: object):
+        """이 안에서 놓는 줄이 속한 글 목록을 정한다(떠 있는 개체를 그 목록의 글 다음에 그린다)."""
+        saved = self.__dict__.get("paint_list")
+        self.paint_list = key
+        try:
+            yield
+        finally:
+            self.paint_list = saved
+
+    def shift_paint_units(self, page: Page, recorded: int, offset: int) -> None:
+        """앞서 적은 page 단위 recorded개의 항목 위치를 offset만큼 민다(꾸밈이 본문 앞에 항목을 끼울 때)."""
+        for unit in self.__dict__.get("paint_units", [])[:recorded]:
+            if unit.page is page:
+                unit.item_start += offset
+                unit.item_end += offset
 
     def new_page(self, geometry: SectionGeometry) -> PageState:
         page = Page(geometry.paper_width, geometry.paper_height, len(self.pages) + 1)
@@ -150,7 +212,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         # 한 쪽 안에서 단 정의가 바뀌면 새 단 영역은 앞 영역 아래에서 구역 정의의 「단 사이 간격」만큼 띄운다
         # (한글 2022 PDF 실측: shortcut 2000HU 6곳, interview·multicolumns-widths 1134HU).
         zone_gap = _section_def(nodes).column_gap if _section_def(nodes) is not None else 0
-        square_wrap = _has_square_wrap(nodes)
+        square_wrap = _square_wrap_neighbours(nodes)
         state: PageState | None = None
         previous_vpos: int | None = None
         #: 앞 줄(위아래 배치 개체 포함)이 차지한 아래 끝의 저장 세로 위치.
@@ -220,7 +282,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             ):
                 # 앞 줄 다음에 이어지는 문단만 판정한다. 되감기는 문단은 루프에서 다음 단·쪽이 정해진 뒤의 구간이라
                 # 여기서는 그 단을 모른다(KTX-003 둘째 단 44863).
-                rejudged = self.rejudged_lines(state, geometry, view, certain_only=square_wrap)
+                rejudged = self.rejudged_lines(state, geometry, view, certain_only=id(node) in square_wrap)
                 if rejudged is not None:
                     if [g.text_start for g in rejudged.segments] != [g.text_start for g in view.segments]:
                         stored_view = view
@@ -799,6 +861,21 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         """
         views: list[ParagraphView] = []
         shift, last_vpos = 0, 0
+        # 목록 안 어울림 개체 자리는 아직 모르니, 있으면 개체로 생길 수 없는 차이만 판정한다(본문 certain_only).
+        floating = any(
+            isinstance(ctrl.model, ObjectCtrlHeader)
+            and not ctrl.model.treat_as_char
+            and ctrl.model.text_wrap == TextWrap.SQUARE
+            for node in paragraphs
+            for ctrl in node.children
+        )
+        # 목록 안 다단(글상자 등)은 단 폭으로 판정한다. 폭이 다른 다단은 줄마다 단을 알아야 해 판정하지 않는다.
+        column_def = next(
+            (c.model for node in paragraphs for c in node.children if isinstance(c.model, ColumnDefCtrl)), None
+        )
+        column_widths = {w for _, w in column_layout(column_def, round(width))}
+        judged_width = column_widths.pop() if len(column_widths) == 1 else None
+        rewound = False
         for node in paragraphs:
             view = ParagraphView.build(node, self.styles)
             if shift and view.segments:
@@ -816,6 +893,21 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 views.append(relaid)
                 last_vpos = relaid.segments[-1].vertical_pos
                 continue
+            stored_vpos = [segment.vertical_pos for segment in view.segments]
+            if views and views[-1].segments and stored_vpos and stored_vpos[0] < views[-1].segments[-1].vertical_pos:
+                rewound = True
+            # 되감긴 글상자 줄은 연결된 다음 글상자에 놓여 그 폭을 여기서 모른다(BookReview 넘친 줄 13832).
+            base = (
+                reflow.horizontal_range(view.para_shape, judged_width, char_unit=self.char_unit)
+                if view.segments and judged_width is not None and not (textbox and rewound)
+                else None
+            )
+            rewound = rewound or any(b < a for a, b in itertools.pairwise(stored_vpos))
+            rejudged = self.rejudged_against(view, base, [], floating) if base is not None else None
+            if rejudged is not None:
+                shift += _line_end(rejudged.segments[-1]) - _line_end(view.segments[-1])
+                view = rejudged
+                last_vpos = view.segments[-1].vertical_pos
             if textbox and view.segments and self.squeezed(view):
                 previous = views[-1] if views else None
                 start = reflow.flow_end(previous) if previous else view.segments[0].vertical_pos
@@ -860,12 +952,15 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         if state is None or not view.segments or state.column >= len(geometry.columns):
             return None
         column_x, _ = geometry.columns[state.column]
-        base = reflow.horizontal_range(view.para_shape, geometry.columns[state.column][1], _same_width(geometry))
+        base = reflow.horizontal_range(
+            view.para_shape, geometry.columns[state.column][1], _same_width(geometry), self.char_unit
+        )
         if base is None:
             return None
         area = Area(state.geometry.body_left + column_x, geometry.body_top + state.zone_top, 0)
         floats = [(x - area.x, y - area.y, w, h, flow) for col, x, y, w, h, flow in state.floats if col == state.column]
-        for ctrl in view.controls.values():
+        active_from = [-1] * len(floats)
+        for item, ctrl in view.controls.items():
             model = ctrl.model
             if not isinstance(model, ObjectCtrlHeader) or model.treat_as_char or model.text_wrap != TextWrap.SQUARE:
                 continue
@@ -874,10 +969,21 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             left, top = self.floating_position(model, state, view, column_area, width, height)
             x, y, w, h, flow = outer_box(model, left, top, width, height)
             floats.append((x - area.x, y - area.y, w, h, flow))
-        if floats and not certain_only:
-            # 개체 피하기 구간은 우리 개체 위치가 맞아야 재현된다(코퍼스 개체에 걸린 줄 일치 71.6%).
-            # 아직 저장 줄을 쓴다.
-            return None
+            active_from.append(item)
+        return self.rejudged_against(view, base, floats, certain_only, active_from)
+
+    def rejudged_against(
+        self,
+        view: ParagraphView,
+        base: tuple[int, int],
+        floats: list[tuple[float, float, float, float, int]],
+        certain_only: bool,
+        active_from: list[int] | None = None,
+    ) -> ParagraphView | None:
+        """가로 구간 base와 어울림 개체 floats로 저장 줄을 판정해(FUN_101dbcf0) 다르면 그 줄부터 다시 짠 보기.
+
+        active_from은 개체마다 조판 부호의 항목 순번이다(앞 쪽에서 놓인 개체는 −1). 부호가 든 줄부터 피한다.
+        """
         lines: list[list[int]] = []
         for index, segment in enumerate(view.segments):
             if segment.flags & reflow.LINE_FIRST_SEGMENT or not lines:
@@ -890,7 +996,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 # 되감긴 줄은 다음 단·쪽에 있다. 그 단의 구간은 따로 판정해야 해 여기서 멈춘다.
                 break
             stored = [(view.segments[i].column_start, view.segments[i].segment_width) for i in members]
-            expected = reflow.avoid_floats(base, floats, first.vertical_pos, first.line_height)
+            line_end = view.line_range(members[-1])[1]
+            placed = [f for i, f in enumerate(floats) if active_from is None or active_from[i] < line_end]
+            expected = reflow.avoid_floats(base, placed, first.vertical_pos, first.line_height)
             empty_first = first.flags & reflow.EMPTY_FIRST_SEGMENT == reflow.EMPTY_FIRST_SEGMENT
             if certain_only:
                 differs = any(
@@ -926,6 +1034,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             (head.first, head.rest) if head is not None else (0.0, 0.0),
             first_item,
             stale,
+            active_from,
         )
         if fresh is None:
             return None
@@ -1039,6 +1148,16 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
 
     def place_line(self, state: PageState, view: ParagraphView, index: int, area: Area) -> None:
         segment = view.segments[index]
+        # 줄 상자(FUN_10217470): 왼쪽은 줄 시작·들여쓰기 중 작은 쪽, 오른쪽은 목록 폭, 위아래는 줄 높이 ×5·×4 넓힘.
+        left = area.x + min(segment.column_start, view.para_shape.indent // 2)
+        line_top = area.y + segment.vertical_pos
+        height = segment.line_height
+        box = (left, line_top - 5 * height, area.x + area.width - left, 10 * height)
+        with self.painting(state.page, box, LINE_PAINT_GROW, is_line=True):
+            self.draw_line(state, view, index, area)
+
+    def draw_line(self, state: PageState, view: ParagraphView, index: int, area: Area) -> None:
+        segment = view.segments[index]
         first, last = view.line_range(index)
         items = list(range(first, last))
         forced_break = False
@@ -1104,6 +1223,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             if not head.text.endswith((" ", "\t")):
                 pieces.append(" ")
         sizes = [self.styles.char_shapes[view.shape_ids[i]].base_size for i in items] or [0]
+        # 그림자 글자는 글자 모양 구간마다 그림자 한 걸음씩 구간 전체를 찍은 뒤 본 글자를 찍는다(FUN_1017df40 →
+        # FUN_1030c200, 구간 경계 FUN_10175e50: 글자 모양이 바뀌거나 컨트롤 문자를 만나면 끊고 공백에서는 끊지 않는다).
+        shadow_run: list[tuple[list[Glyph], Glyph]] = []
+        run_shape: CharShape | None = None
         for order, (char_index, width) in enumerate(zip(items, widths, strict=True)):
             item = view.chars[char_index]
             if isinstance(item, TextChar):
@@ -1111,6 +1234,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             elif item.code == TAB:
                 pieces.append("\t")
             if isinstance(item, TextChar):
+                shape = self.styles.char_shapes[item.shape_id]
+                if shadow_run and (shape is not run_shape or _joins_previous_jamo(view, char_index)):
+                    _flush_shadow_run(state.page, shadow_run)
                 if (
                     _joins_previous_jamo(view, char_index)
                     and state.page.items
@@ -1118,16 +1244,25 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 ):
                     last = state.page.items[-1]
                     state.page.items[-1] = dataclasses.replace(last, char=last.char + item.char)
+                elif item.char.strip() and shape.shadow_type:
+                    glyph = self.make_glyph(
+                        item.char, shape, self.measurer.slot(item.char, shape), device_round(x), baseline
+                    )
+                    shadow_run.append((self.shadow_strikes(glyph, shape), glyph))
+                    run_shape = shape
                 elif item.char.strip():
-                    shape = self.styles.char_shapes[item.shape_id]
                     slot = self.measurer.slot(item.char, shape)
                     self.append_glyph(state, item.char, shape, slot, device_round(x), baseline)
-            elif char_index in view.controls:
+                x += width + extras[order]
+                continue
+            _flush_shadow_run(state.page, shadow_run)
+            if char_index in view.controls:
                 self.place_control(state, view, view.controls[char_index], x, line_top, baseline, area, char_index)
             elif item.code == TAB and tab_fill(item) == LEADER_DOT:
                 shape = self.styles.char_shapes[view.shape_ids[char_index]]
                 self.place_leader(state, shape, x, width + extras[order], baseline)
             x += width + extras[order]
+        _flush_shadow_run(state.page, shadow_run)
         self.line_pieces = outer_pieces
         text = "".join(pieces)
         if text.strip():
@@ -1224,19 +1359,24 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
     def append_glyph(self, state: PageState, char: str, shape: CharShape, slot: int, x: float, baseline: float) -> None:
         """그림자가 있으면 그림자 글자를 본 글자보다 먼저(아래에) 넣는다."""
         glyph = self.make_glyph(char, shape, slot, x, baseline)
-        if shape.shadow_type:
-            # 그림자 간격은 글자 크기의 %, 양수는 오른쪽·아래(tac-img-02 1쪽 PDF: 28pt·8% → 2.28pt).
-            dx = device_round(shape.base_size * shape.shadow_gap_x / 100)
-            dy = device_round(shape.base_size * shape.shadow_gap_y / 100)
-            color = colorref(shape.shadow_color) or "#000000"
-            # 연속 그림자(2)는 0부터 간격까지 12HU 한 칸씩 겹쳐 찍는다(같은 PDF 20벌 실측). 비연속(1)은 한 벌.
-            steps = max(abs(dx), abs(dy)) // DEVICE_UNIT if shape.shadow_type == 2 else 1
-            for step in range(steps + 1 if shape.shadow_type == 2 else 1):
-                ratio = step / steps if shape.shadow_type == 2 and steps else 1.0
-                state.page.items.append(
-                    dataclasses.replace(glyph, x=glyph.x + dx * ratio, y=glyph.y + dy * ratio, color=color)
-                )
+        state.page.items.extend(self.shadow_strikes(glyph, shape))
         state.page.items.append(glyph)
+
+    def shadow_strikes(self, glyph: Glyph, shape: CharShape) -> list[Glyph]:
+        """본 글자보다 먼저(아래에) 찍는 그림자 글자들. 그림자가 없으면 빈 목록."""
+        if not shape.shadow_type:
+            return []
+        # 그림자 간격은 글자 크기의 %, 양수는 오른쪽·아래(tac-img-02 1쪽 PDF: 28pt·8% → 2.28pt).
+        dx = device_round(shape.base_size * shape.shadow_gap_x / 100)
+        dy = device_round(shape.base_size * shape.shadow_gap_y / 100)
+        color = colorref(shape.shadow_color) or "#000000"
+        # 연속 그림자(2)는 0부터 간격까지 12HU 한 칸씩 겹쳐 찍는다(같은 PDF 20벌 실측). 비연속(1)은 한 벌.
+        steps = max(abs(dx), abs(dy)) // DEVICE_UNIT if shape.shadow_type == 2 else 1
+        strikes = []
+        for step in range(steps + 1 if shape.shadow_type == 2 else 1):
+            ratio = step / steps if shape.shadow_type == 2 and steps else 1.0
+            strikes.append(dataclasses.replace(glyph, x=glyph.x + dx * ratio, y=glyph.y + dy * ratio, color=color))
+        return strikes
 
     def make_glyph(self, char: str, shape: CharShape, slot: int, x: float, baseline: float) -> Glyph:
         size = shape.base_size * shape.rel_sizes[slot] / 100
@@ -1297,10 +1437,12 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             # 종이·쪽 기준으로 놓은 개체는 본문 흐름을 따라 쪽을 넘지 않는다(21_언어_기출 p206: 종이 아래 기준 표가
             # 본문 바닥 아래에 있어도 한글 PDF는 같은 쪽에 그린다).
             self.in_body = in_body and (model.treat_as_char or model.vert_rel_to == VertRelTo.PARA)
+            # HwpApp FUN_101dbfd0은 기준과 관계없이 구역의 개체 목록 전체를 피한다(hwp3-sample5 종이 기준 그림 옆 줄).
+            body_anchor, self.body_anchor = self.body_anchor, in_body
             try:
                 self.place_object(state, view, ctrl, x, baseline, area)
             finally:
-                self.in_body = in_body
+                self.in_body, self.body_anchor = in_body, body_anchor
         elif isinstance(model, HeaderFooterCtrl):
             target = (
                 self.section.headers
@@ -1516,16 +1658,42 @@ def _same_width(geometry: SectionGeometry) -> bool:
     return len({width for _, width in geometry.columns}) == 1
 
 
-def _has_square_wrap(nodes: list[Node]) -> bool:
-    """구역 본문에 글을 피해 흐르게 하는(어울림) 떠 있는 개체가 있는가. 그 줄의 가로 구간은 아직 재현하지 못했다."""
-    return any(
-        child.tag == tags.CTRL_HEADER
-        and isinstance(child.model, ObjectCtrlHeader)
-        and not child.model.treat_as_char
-        and child.model.text_wrap == TextWrap.SQUARE
-        for node in nodes
-        for child in node.children
-    )
+def _square_wrap_neighbours(nodes: list[Node]) -> set[int]:
+    """어울림 개체를 아직 모를 수 있는 문단(id). 저장 줄 세로 위치가 되감기는 곳(쪽·단 경계)으로 문단을 묶어,
+    어울림 개체가 묶인 묶음과 그 앞뒤 묶음의 문단이다. 개체는 자기 쪽 줄만 피하고, 앞뒤 묶음까지 넣어 2단 쪽도 덮는다.
+    """
+    spans: list[tuple[int, int, int]] = []
+    group, last_vpos = 0, None
+    anchored: set[int] = set()
+    for node in nodes:
+        if node.tag != tags.PARA_HEADER:
+            continue
+        first = group
+        for child in node.children:
+            if isinstance(child.model, ParaLineSeg):
+                for segment in child.model.segments:
+                    if last_vpos is not None and segment.vertical_pos < last_vpos:
+                        group += 1
+                    last_vpos = segment.vertical_pos
+        spans.append((id(node), first, group))
+        if any(
+            child.tag == tags.CTRL_HEADER
+            and isinstance(child.model, ObjectCtrlHeader)
+            and not child.model.treat_as_char
+            and child.model.text_wrap == TextWrap.SQUARE
+            for child in node.children
+        ):
+            anchored.update(range(first, group + 1))
+    near = {g + d for g in anchored for d in (-1, 0, 1)}
+    return {key for key, first, last in spans if any(g in near for g in range(first, last + 1))}
+
+
+def _flush_shadow_run(page: Page, run: list[tuple[list[Glyph], Glyph]]) -> None:
+    """모은 구간을 그림자 걸음마다 구간 전체로 찍고 본 글자를 찍은 뒤 비운다."""
+    for step in range(max((len(strikes) for strikes, _ in run), default=0)):
+        page.items.extend(strikes[step] for strikes, _ in run if step < len(strikes))
+    page.items.extend(glyph for _, glyph in run)
+    run.clear()
 
 
 def layout_document(document: HwpDocument) -> list[Page]:

@@ -98,9 +98,10 @@ def test_horizontal_range_snaps_column_width_before_margins():
     assert reflow.horizontal_range(para_shape(left_margin=-200), 48190) == (-100, 48288)
     # 폭이 서로 다른 다단은 내리지 않는다(KTX 33355).
     assert reflow.horizontal_range(para_shape(), 33355, snap=False) == (0, 33355)
-    # 백분율 여백(낮은 비트)과 최소 폭보다 좁은 구간은 모른다.
+    # 한 글자 크기를 모르면 글자 단위 여백(낮은 비트)은 판정하지 않는다.
     assert reflow.horizontal_range(para_shape(left_margin=21), 48190) is None
-    assert reflow.horizontal_range(para_shape(left_margin=2 * 47000), 48190) is None
+    # 여백을 뺀 폭이 최소 폭보다 좁으면 여백 없이 최소 폭(HwpApp 0x101dc145).
+    assert reflow.horizontal_range(para_shape(left_margin=2 * 47000), 48190) == (0, 1440)
 
 
 def test_avoid_floats_follows_text_flow_side():
@@ -129,6 +130,18 @@ def test_compose_around_narrows_lines_beside_float_only():
     assert [s.text_start for s in segments] == [0, 6, 12, 22]
     assert [(s.column_start, s.segment_width) for s in segments] == [(0, 6000), (0, 6000), (0, 10000), (0, 10000)]
     assert [s.vertical_pos for s in segments] == [0, 1600, 3200, 4800]
+
+
+def test_compose_around_avoids_own_float_from_line_holding_its_control():
+    # 개체 부호가 항목 14(둘째 줄)에 있다. 첫 줄은 개체를 모르고 10000, 부호가 든 줄부터 6000으로 피한다.
+    text = "가" * 25 + "\r"
+    chars, boxes = chars_of(text), boxes_of(text)
+    floats = [(6000, 0, 4000, 3000, 0)]
+    segments = reflow.compose_around(
+        chars, list(range(len(text))), boxes, para_shape(), (0, 10000), floats, 1000, 0, active_from=[14]
+    )
+    assert [(s.column_start, s.segment_width) for s in segments[:3]] == [(0, 10000), (0, 6000), (0, 10000)]
+    assert [s.text_start for s in segments[:3]] == [0, 10, 16]
 
 
 def test_line_takes_tallest_item_and_highest_ascent():
@@ -175,3 +188,9 @@ def test_compose_in_ranges_starts_at_given_line_and_range():
     assert [s.text_start for s in segments] == [5, 9]
     assert [(s.column_start, s.segment_width) for s in segments] == [(500, 4000), (500, 4000)]
     assert [s.vertical_pos for s in segments] == [0, 1600]
+
+
+def test_horizontal_range_char_unit_margin():
+    # 낮은 비트가 선 여백은 글자 단위: (여백>>1) x 한 글자 / 100 (HwpApp FUN_101dbfd0·FUN_101b74f0)
+    assert reflow.horizontal_range(para_shape(left_margin=201), 48190, char_unit=500) == (500, 47688)
+    assert reflow.horizontal_range(para_shape(right_margin=301), 48190, char_unit=500) == (0, 47438)

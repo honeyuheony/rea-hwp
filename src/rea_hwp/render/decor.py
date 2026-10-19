@@ -12,6 +12,7 @@ from ..models.docinfo import CharShape
 from . import metrics
 from .common import DEVICE_UNIT, Area, PageState, ParagraphView, SectionState, _list_paragraphs
 from .numbering import format_number
+from .paint import BAND_LIST, MASTER_LIST
 
 #: 쪽 번호 글꼴의 아랫부분(winDescent/unitsPerEm). 아래쪽 쪽 번호 기준선은 꼬리말 영역 아래끝에서 이만큼 올라간다.
 #: 값은 한글 2022 설치 글꼴 파일의 OS/2 표에서 읽었다.
@@ -94,23 +95,29 @@ class DecorMixin:
         # 한글 PDF는 바탕쪽·머리말·꼬리말·쪽 번호 글자를 본문보다 먼저 쓴다.
         body_items = state.page.items
         state.page.items = []
+        recorded = len(self.__dict__.get("paint_units", []))
         saved = self.page_numbers[-1]
         self.page_numbers[-1] = number
         master = carry.masters.get(odd)
         if master is not None and not hide & 0x04:
             area = Area(geometry.body_left, geometry.body_top, geometry.body_width)
-            self.place_paragraphs(state, master, area)
+            with self.painting_list(MASTER_LIST):
+                self.place_paragraphs(state, master, area)
         header = carry.headers.get(odd)
         footer = carry.footers.get(odd)
-        if header is not None and not hide & 0x01:
-            self.place_band(state, header, width_area, page_def.margin_top, page_def.margin_header)
-        if footer is not None and not hide & 0x02:
-            top = geometry.paper_height - page_def.margin_bottom - page_def.margin_footer
-            self.place_band(state, footer, width_area, top, page_def.margin_footer)
-        self.page_numbers[-1] = saved
-        if carry.page_number_pos is not None and not hide & 0x20:
-            self.draw_page_number(state, carry.page_number_pos, number)
+        with self.painting_list(BAND_LIST):
+            if header is not None and not hide & 0x01:
+                self.place_band(state, header, width_area, page_def.margin_top, page_def.margin_header)
+            if footer is not None and not hide & 0x02:
+                top = geometry.paper_height - page_def.margin_bottom - page_def.margin_footer
+                self.place_band(state, footer, width_area, top, page_def.margin_footer)
+            self.page_numbers[-1] = saved
+            if carry.page_number_pos is not None and not hide & 0x20:
+                with self.painting(state.page, None, 0):
+                    self.draw_page_number(state, carry.page_number_pos, number)
+        decor_count = len(state.page.items)
         state.page.items.extend(body_items)
+        self.shift_paint_units(state.page, recorded, decor_count)
         if state.footnotes:
             self.draw_footnotes(state)
 
