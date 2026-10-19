@@ -13,14 +13,14 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from accuracy import TOLERANCE_PT, PlacedChar, pdf_pages, score_page
+from accuracy import TOLERANCE_PT, PlacedChar, merge_effect_strikes, order_match, pdf_pages, score_page
 from corpus import CORPUS_ROOT, load_corpus
 from equation_oracle import graft_equation_layout
 from hancom_resave import RESAVE_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import layout_document
-from rea_hwp.render.svg import page_glyph_table
+from rea_hwp.render.svg import HU_PER_PT, page_glyph_table, symbol_text
 
 REFERENCE_ROOT = CORPUS_ROOT / "ref2022"
 
@@ -37,6 +37,15 @@ def score_layout(pages, reference_pages) -> dict:
         totals["within"] += score.within
         totals["matched"] += score.matched
         totals["offsets"].extend(score.offsets)
+    # 렌더 쪽도 정답 PDF와 같이 효과 겹침을 한 글자로 센다(그림자 글자는 두 번 놓인다).
+    rendered_pages = [
+        merge_effect_strikes([PlacedChar(symbol_text(g.char), g.x / HU_PER_PT, g.y / HU_PER_PT) for g in page.glyphs])
+        for page in pages
+    ]
+    order = order_match(
+        [[c.char for c in page] for page in reference_pages], [[c.char for c in page] for page in rendered_pages]
+    )
+    totals |= {f"order_{key}": value for key, value in order.items()}
     return totals
 
 
@@ -89,6 +98,39 @@ def _with_equation_sizes(result: dict) -> dict:
     return oracle if oracle and "within" in oracle else result
 
 
+#: 문서별 하락 목록에서 비교하는 칸: (이름, 분자, 분모). 비율이 이전 결과보다 낮아지면 하락으로 센다.
+REGRESSION_RATIOS = (
+    ("origin", "within", "reference_chars"),
+    ("recall", "order_matched", "order_reference"),
+    ("precision", "order_matched", "order_rendered"),
+)
+
+
+def regressions(results: dict, baseline: dict) -> list[str]:
+    """이전 결과와 문서별로 맞대 나빠진 칸을 적는다. 전체 평균이 그대로여도 일부 문서가 나빠진 것을 잡는다."""
+    lines = []
+    for path, result in results.items():
+        old = baseline.get(path)
+        if old is None or old.get("status") != "ok":
+            continue
+        if result["status"] != "ok":
+            lines.append(f"{path}: {result['status']}")
+            continue
+        changes = []
+        if result["pages"] != old["pages"] and old["pages"] == old["reference_pages"]:
+            changes.append(f"pages {old['pages']}->{result['pages']}/{result['reference_pages']}")
+        for name, numerator, denominator in REGRESSION_RATIOS:
+            if old.get(numerator) is None or result.get(numerator) is None:
+                continue
+            before = old[numerator] / old[denominator] if old[denominator] else 1.0
+            after = result[numerator] / result[denominator] if result[denominator] else 1.0
+            if after < before - 1e-9:
+                changes.append(f"{name} {before:.3%}->{after:.3%} ({result[numerator] - old[numerator]:+d})")
+        if changes:
+            lines.append(f"{path}: " + ", ".join(changes))
+    return lines
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0)
@@ -96,6 +138,7 @@ def main() -> int:
     parser.add_argument("--details", action="store_true")
     parser.add_argument("--json", type=Path)
     parser.add_argument("--jobs", type=int, default=1, help="문서를 나눠 맡을 프로세스 수")
+    parser.add_argument("--baseline", type=Path, help="이전 --json 결과. 문서별로 나빠진 칸을 목록으로 낸다")
     args = parser.parse_args()
     entries = [entry for entry in load_corpus() if args.match in entry.path.name]
     if args.limit:
@@ -122,6 +165,16 @@ def main() -> int:
     if chars:
         print(f"glyph origin within {TOLERANCE_PT}pt: {within}/{chars} = {within / chars:.3%}")
         print(f"excluded (out-of-scope objects: equation, chart, OLE, text art): {excluded} reference chars")
+    ordered = [r for r in checked if r.get("order_matched") is not None]
+    if ordered:
+        order_matched = sum(r["order_matched"] for r in ordered)
+        order_reference = sum(r["order_reference"] for r in ordered)
+        order_rendered = sum(r["order_rendered"] for r in ordered)
+        print(
+            f"order recall (letters, reading order): {order_matched}/{order_reference} = "
+            f"{order_matched / order_reference:.3%}  precision: {order_matched}/{order_rendered} = "
+            f"{order_matched / order_rendered:.3%}  unscorable: {len(checked) - len(ordered)}"
+        )
     oracles = [r["equation_oracle"] for r in checked if "equation_oracle" in r]
     applied = [o for o in oracles if "within" in o]
     if applied:
@@ -146,6 +199,11 @@ def main() -> int:
     for path, result in results.items():
         if result["status"] == "render-error":
             print(f"render-error: {path}: {result['reason']}")
+    if args.baseline:
+        dropped = regressions(results, json.loads(args.baseline.read_text(encoding="utf-8")))
+        print(f"documents worse than baseline: {len(dropped)}")
+        for line in dropped:
+            print(f"  {line}")
     if args.json:
         args.json.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
     return 0

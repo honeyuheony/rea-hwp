@@ -71,7 +71,6 @@ def pdf_pages(path: str) -> list[list[PlacedChar]]:
     with pymupdf.open(path) as document:
         for page in document:
             placed = []
-            kept_by_char: dict[str, list[tuple[float, float]]] = {}
             fit = _fit_scale(page)
             for block in page.get_text("rawdict")["blocks"]:
                 for line in block.get("lines", []):
@@ -82,15 +81,23 @@ def pdf_pages(path: str) -> list[list[PlacedChar]]:
                         for char in span["chars"]:
                             if not char["c"].strip():
                                 continue
-                            # 외곽선·그림자 효과는 같은 글자를 1pt 안쪽으로 비켜 여러 번 찍는다. 한 글자로 센다.
                             x, y = char["origin"][0] * scale[0], char["origin"][1] * scale[1]
-                            nearby = kept_by_char.setdefault(char["c"], [])
-                            if any(abs(x - kx) <= 1.0 and abs(y - ky) <= 1.0 for kx, ky in nearby):
-                                continue
-                            nearby.append((x, y))
                             placed.append(PlacedChar(char["c"], x, y, span["font"]))
-            pages.append(placed)
+            pages.append(merge_effect_strikes(placed))
     return pages
+
+
+def merge_effect_strikes(chars: list[PlacedChar]) -> list[PlacedChar]:
+    """외곽선·그림자 효과는 같은 글자를 1pt 안쪽으로 비켜 여러 번 찍는다. 먼저 찍은 것 하나만 남긴다."""
+    kept = []
+    kept_by_char: dict[str, list[tuple[float, float]]] = {}
+    for char in chars:
+        nearby = kept_by_char.setdefault(char.char, [])
+        if any(abs(char.x - kx) <= 1.0 and abs(char.y - ky) <= 1.0 for kx, ky in nearby):
+            continue
+        nearby.append((char.x, char.y))
+        kept.append(char)
+    return kept
 
 
 def _inside(char: PlacedChar, boxes: list[tuple[float, float, float, float]]) -> bool:
@@ -140,3 +147,34 @@ def score_page(
         if distance <= TOLERANCE_PT:
             score.within += 1
     return score
+
+
+#: 문서 전체 글자 열 비교 상한. 넘는 문서는 쪽 수가 같을 때만 쪽별로 맞대고, 다르면 채점불가로 둔다.
+ORDER_WHOLE_LIMIT = 40_000
+
+
+def letters(chars) -> list[str]:
+    """순서 지표가 세는 글자: str.isalnum()이 참인 한 글자. 공백·문장부호·PUA 기호는 빼고 센다."""
+    return [c for c in chars if len(c) == 1 and c.isalnum()]
+
+
+def order_match(reference_pages: list[list[str]], rendered_pages: list[list[str]]) -> dict:
+    """글자 열을 읽는 순서대로 맞대 맞은 수를 센다. 순서가 바뀐 글은 맞지 않은 것으로 센다.
+
+    재현율 = matched / reference, 정밀도 = matched / rendered. 채점불가면 matched가 None이다.
+    """
+    reference = [letters(page) for page in reference_pages]
+    rendered = [letters(page) for page in rendered_pages]
+    result = {"reference": sum(map(len, reference)), "rendered": sum(map(len, rendered)), "matched": None}
+    if max(result["reference"], result["rendered"]) <= ORDER_WHOLE_LIMIT:
+        pairs = [([c for page in reference for c in page], [c for page in rendered for c in page])]
+    elif len(reference) == len(rendered):
+        pairs = list(zip(reference, rendered, strict=True))
+    else:
+        return result
+    result["matched"] = sum(
+        block.size
+        for a, b in pairs
+        for block in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks()
+    )
+    return result
