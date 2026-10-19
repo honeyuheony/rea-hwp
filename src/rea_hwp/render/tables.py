@@ -184,9 +184,10 @@ def stored_pieces(
     """
     pieces, _ = _pieces_and_columns(lines, columns, paragraph_restarts, column_count)
     heights = [0] * (max((number for numbers in pieces for number in numbers), default=0) + 1)
+    # 내용 높이는 글자 높이로 측정한다(issue1510 셀: 줄 높이 2800, 글자 높이 2518, 정답 행 2800 = 2518 + 여백 282).
     for segments, numbers in zip(lines, pieces, strict=True):
         for segment, number in zip(segments, numbers, strict=True):
-            heights[number] = max(heights[number], segment.vertical_pos + segment.line_height)
+            heights[number] = max(heights[number], segment.vertical_pos + segment.text_height)
     return pieces, heights
 
 

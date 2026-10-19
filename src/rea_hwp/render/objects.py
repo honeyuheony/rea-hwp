@@ -220,10 +220,11 @@ class ObjectsMixin:
                 top = state.geometry.body_top + state.zone_top
             if (self.in_body or self.body_anchor) and model.text_wrap == TextWrap.SQUARE:
                 state.floats.append((state.column, *outer_box(model, left, top, box_width, box_height)))
-            if self.in_body and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
+            if self.in_body and model.text_wrap == TextWrap.TOP_AND_BOTTOM and model.flow_with_text:
                 state, top = self.stacked_top(state, left, box_width, top, box_height + margins[2] + margins[3])
-            elif self.body_anchor and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
-                # 종이·쪽 기준 위아래 개체는 옮기지 않지만 쪽 개체 목록에 들어가 뒤 개체가 피한다(FUN_102d5900)
+            elif (self.in_body or self.body_anchor) and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
+                # FUN_102d5900은 본문 영역으로 제한한(attr 0x2000) 문단 기준 개체만 앞 개체 아래로 민다(issue1510 표 C는
+                # 표 B와 겹친다). 종이·쪽 기준이나 제한 없는 개체도 쪽 개체 목록에 들어가 뒤 개체가 피한다.
                 self.register_stacked_box(state, left, box_width, top, box_height + margins[2] + margins[3])
             if ctrl.record.payload[:4] != tags.TABLE_CTRL.to_bytes(4, "little"):
                 # 바깥 여백까지 든 상자가 정렬 기준에 맞고 개체는 그 안에 그린다. 오른쪽·아래 정렬이면
@@ -439,10 +440,16 @@ class ObjectsMixin:
         }
         ref_y, ref_h = vertical.get(model.vert_rel_to, vertical[REL_COLUMN_OR_PARA])
         vert_offset = model.vert_offset
-        if model.ctrl_id == tags.TABLE_CTRL and model.vert_rel_to == REL_COLUMN_OR_PARA and vert_offset < 0:
-            # 문단 기준 표는 문단 위로 올라가지 않는다(실측: 셀 안 issue4889 1쪽 55행 표 오프셋 −975, 위 선 289.12;
-            # 본문 kr_156369118 5쪽 s0 p63 표 오프셋 −622, 정답 기준선 695.2pt; 어울림 표 정책연구용역 오프셋 −21453,
-            # 저장 줄 40102~48102가 문단 위 끝부터 그 표를 피함).
+        if (
+            model.ctrl_id == tags.TABLE_CTRL
+            and model.vert_rel_to == REL_COLUMN_OR_PARA
+            and model.flow_with_text
+            and vert_offset < 0
+        ):
+            # 본문 영역으로 제한한(attr 0x2000) 문단 기준 개체는 문단 위로 올라가지 않는다(FUN_101c58e0: 음수 세로
+            # 오프셋을 0으로). 실측: 셀 안 issue4889 1쪽 55행 표 오프셋 −975, 위 선 289.12; 본문 kr_156369118 5쪽 s0 p63
+            # 표 오프셋 −622, 정답 기준선 695.2pt; 어울림 표 정책연구용역 오프셋 −21453. 제한하지 않으면 그대로 올라간다
+            # (issue1510 표 B 오프셋 −2000, 정답 위 선 82.03pt = 문단 위 99.2 − 20 + 바깥 여백 2.83).
             vert_offset = 0
         return (
             _align(ref_x, ref_w, width, model.horz_align, model.horz_offset),
@@ -465,7 +472,31 @@ class ObjectsMixin:
         if cursor_state is not state:
             # 쪽 첫 문단이면 쪽(단 영역) 맨 위에서 시작한다(issue6946 s2 p0: 구역 첫 문단의 표 두 개 뒤 줄 65959).
             return min(para_top, state.geometry.body_top + state.zone_top)
-        return bottom if column == state.column and bottom < para_top else para_top
+        if column != state.column or bottom >= para_top:
+            return para_top
+        # 앞 문단 위아래 배치 개체에 걸린 자리는 그 아래에서 시작한다(kr_156489673 s0 p1: 앞 줄 끝 9638이 p0 표
+        # 7126~28256 안, 정답 표는 저장 줄 28256 + 오프셋 2866). 자기 문단 개체는 이 자리를 기준으로 놓이므로 빼고 본다.
+        earlier = self.__dict__.get("earlier_boxes", set())
+        registry = self.__dict__.get("_stacked_boxes", {})
+        boxes = [box for (page, _), listed in registry.items() if page == id(state.page) for box in listed]
+        column_x, column_width = state.geometry.columns[state.column]
+        left = state.geometry.body_left + column_x
+        moved = True
+        while moved:
+            moved = False
+            for box in boxes:
+                box_left, box_right, box_top, box_bottom, continued = box
+                # 앞 쪽에서 넘어온 표 나머지(위 끝 −inf)는 표 쪽 나눔이 이어 붙인 자리라 피하지 않는다(hwpspec 42쪽).
+                if (
+                    id(box) in earlier
+                    and continued is None
+                    and box_top != float("-inf")
+                    and box_left < left + column_width
+                    and left < box_right
+                    and box_top <= bottom < box_bottom
+                ):
+                    bottom, moved = box_bottom, True
+        return min(bottom, para_top)
 
     def stacked_top(
         self, state: PageState, left: float, width: float, top: float, height: float
@@ -555,8 +586,16 @@ class ObjectsMixin:
         return max(0.0, fresh[-1].content_height + margins[2] + margins[3] - ctrl.model.height)
 
     def draw_component(
-        self, state: PageState, component: Node, left: float, top: float, width: float, height: float
+        self,
+        state: PageState,
+        component: Node,
+        left: float,
+        top: float,
+        width: float,
+        height: float,
+        origin: tuple[float, float] | None = None,
     ) -> None:
+        """origin은 맨 바깥 묶음의 왼쪽 위다. 자식 렌더링 행렬과 오프셋은 바로 위 묶음이 아니라 그 묶음 기준이다."""
         picture = component.find(tags.SHAPE_COMPONENT_PICTURE)
         if picture is not None and isinstance(picture.model, ShapePicture):
             self.draw_picture(state, picture.model, left, top, width, height)
@@ -589,13 +628,15 @@ class ObjectsMixin:
             area = Area(left + margins[0], top + margins[2], inner_width)
             with self.painting_list(("text box", id(component))):
                 self.place_linked_text(state, views, area, (height - margins[2] - margins[3], header.vert_align))
+        # 중첩 묶음 자식도 맨 바깥 묶음 기준이다(편람 9쪽: 세 단계 묶음 이동 행렬이 모두 25159, 정답 x 268pt).
+        origin = origin or (left, top)
         for child in component.children:
             if child.tag == tags.SHAPE_COMPONENT and isinstance(child.model, ShapeComponent):
                 sub = child.model
                 box = _rendered_box(sub)
                 if box is None:
                     box = (sub.offset_x, sub.offset_y, sub.current_width, sub.current_height)
-                self.draw_component(state, child, left + box[0], top + box[1], box[2], box[3])
+                self.draw_component(state, child, origin[0] + box[0], origin[1] + box[1], box[2], box[3], origin)
 
     def place_linked_text(
         self, state: PageState, views: list[ParagraphView], area: Area, alignment: tuple[float, int]
@@ -857,15 +898,16 @@ _OUT_OF_SCOPE_TAGS = frozenset({tags.CHART_DATA, tags.EQEDIT})
 
 
 def _rendered_box(component: ShapeComponent) -> tuple[float, float, float, float] | None:
-    """묶음 안 도형이 그려지는 상자(묶음 기준 x, y, 폭, 높이). 이동 행렬 · (축척·회전 행렬 쌍)… 을 원래 크기에 적용한다.
+    """묶음 안 도형이 그려지는 상자(맨 바깥 묶음 기준 x, y, 폭, 높이). 원래 크기에 단계마다 축척 → 회전, 끝으로 이동.
 
-    실측: kr_156489577 2쪽 목차 묶음. 자식 오프셋·현재 크기만 쓰면 +93pt, −320pt 어긋난다.
+    실측: kr_156489577 2쪽 목차 묶음. 자식 오프셋·현재 크기만 쓰면 +93pt, −320pt 어긋난다. 좌우 뒤집힌 글상자(회전 행렬
+    −1)는 축척을 먼저 적용해야 정답 위치다(편람 4쪽 「차례」 상자 왼쪽 9640HU = 96.4pt, 회전 먼저면 −51310HU).
     """
     if component.translation is None or not component.scale_rotation:
         return None
     matrix = component.translation
     for scale, rotation in component.scale_rotation:
-        matrix = _compose(_compose(matrix, scale), rotation)
+        matrix = _compose(_compose(matrix, rotation), scale)
     corners = [_apply(matrix, x, y) for x in (0, component.original_width) for y in (0, component.original_height)]
     xs, ys = [c[0] for c in corners], [c[1] for c in corners]
     return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)

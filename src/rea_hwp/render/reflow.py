@@ -565,12 +565,12 @@ def paginate(segments: list[LineSeg], body_height, page_top: int) -> list[LineSe
     return placed
 
 
-def flow_end(view: ParagraphView) -> int:
-    """다음 문단이 이어질 세로 위치(문단 아래 간격 제외). 위아래 배치 개체가 줄보다 길면 개체 아래다."""
+def flow_end(view: ParagraphView, objects: bool = True) -> int:
+    """다음 문단이 이어질 세로 위치(문단 아래 간격 제외). objects면 위아래 배치 개체가 줄보다 길 때 개체 아래다."""
     last = view.segments[-1]
     end = last.vertical_pos + last.line_height + last.line_spacing
     top = view.segments[0].vertical_pos
-    for ctrl in view.controls.values():
+    for ctrl in view.controls.values() if objects else ():
         model = ctrl.model
         if (
             isinstance(model, ObjectCtrlHeader)

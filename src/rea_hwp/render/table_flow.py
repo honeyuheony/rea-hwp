@@ -399,7 +399,8 @@ def cell_items(
                 if index == 0
                 else 0.0
             )
-            items.append(PagingLine(top, segment.line_height, lead, reach))
+            # 행 높이는 글자 높이로 측정한다(tables.stored_pieces와 같다, issue1510).
+            items.append(PagingLine(top, segment.text_height, lead, reach))
             sources.append((view, index))
             stack_bottom = top + reach
             for ctrl in stacked[1:]:
@@ -413,7 +414,10 @@ def cell_items(
                 stack_bottom += extent
                 floor = max(floor, stack_bottom)
             if index == 0:
-                para_top = top
+                # 문단 기준 개체 위치는 문단 위 간격 앞이다(본문 objects.floating_position과 같다). kr_156489673 2쪽
+                # 셀 표: 줄 27392 = 앞 줄 끝 25392 + 위 간격 2000, 정답 표 위 = 25392 + 오프셋 3918 + 바깥 위 여백.
+                previous_end = flow_end if previous is not None else 0.0
+                para_top = max(top - view.para_shape.space_before // 2, previous_end)
             if index == len(view.segments) - 1:
                 for ctrl in below:
                     # 기준 문단 줄보다 아래에서 시작하는 개체는 따로 쌓아 셀이 개체 앞에서 쪽을 나눌 수 있게 한다
@@ -699,9 +703,10 @@ class TableFlowMixin:
             # 글자처럼 취급하지 않는 표는 정렬 기준 쪽 바깥 여백만큼 안으로 들인다(실측: issue2063 왼쪽 정렬 -1.4pt).
             left += _margin_shift(model.horz_align, model.outer_margins[0], model.outer_margins[1])
             top += _margin_shift(model.vert_align, model.outer_margins[2], model.outer_margins[3])
-            if self.in_body and model.vert_rel_to == REL_COLUMN_OR_PARA:
-                # 문단 기준 본문 표는 음수 세로 오프셋이어도 본문 위(+ 바깥 위 여백) 위로 올라가지 않는다
+            if self.in_body and model.vert_rel_to == REL_COLUMN_OR_PARA and model.flow_with_text:
+                # 본문 영역으로 제한한(attr 0x2000) 문단 기준 본문 표는 본문 위(+ 바깥 위 여백) 위로 올라가지 않는다
                 # (실측: 편람 4구역 p64 표 오프셋 −600, 쪽 맨 위 문단이라 정답 위 선 111.95 = 본문 위 110.56 + 1.4).
+                # 제한하지 않으면 본문 위로 나간다(issue1510 표 B 위 선 82.03pt, 본문 위 99.2pt).
                 top = max(top, state.geometry.body_top + model.outer_margins[2])
         plans = self.__dict__.get("block_plans", {})
         if id(ctrl) in plans:

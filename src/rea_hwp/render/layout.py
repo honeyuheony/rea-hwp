@@ -213,6 +213,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         # (한글 2022 PDF 실측: shortcut 2000HU 6곳, interview·multicolumns-widths 1134HU).
         zone_gap = _section_def(nodes).column_gap if _section_def(nodes) is not None else 0
         square_wrap = _square_wrap_neighbours(nodes)
+        stale_vertical = _stale_vertical_positions(nodes, geometry)
         state: PageState | None = None
         previous_vpos: int | None = None
         #: 앞 줄(위아래 배치 개체 포함)이 차지한 아래 끝의 저장 세로 위치.
@@ -228,6 +229,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             if node.tag != tags.PARA_HEADER:
                 continue
             view = ParagraphView.build(node, self.styles)
+            if stale_vertical:
+                # 한글처럼 줄을 다시 짜고 세로 값을 계산한다. 위아래 배치 개체는 줄마다 피한다(pushed_below_floats).
+                view = dataclasses.replace(view, segments=[])
             # 구역 정의가 든 문단은 한 구역 스트림 안에 있어도 새 구역이다(issue-505-equations: 문단마다 구역 나눔).
             new_section = state is not None and _section_def([node]) is not None
             if new_section:
@@ -322,6 +326,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                         )
                     view = dataclasses.replace(view, segments=reflow.paginate(view.segments, body_height, page_top))
             spilled = False
+            # 이 문단 개체를 놓기 전에 쪽에 있던 위아래 배치 상자(objects.flow_position이 피한다).
+            registry = self.__dict__.get("_stacked_boxes", {})
+            self.earlier_boxes = {id(box) for listed in registry.values() for box in listed}
             for index, segment in enumerate(view.segments):
                 rewound = previous_vpos is not None and self.restarts_column(
                     state, geometry, (previous_vpos, previous_line_bottom, previous_bottom), segment
@@ -345,6 +352,15 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                         state = self.next_column(
                             state_before, geometry, segment, forced, (previous_line_bottom, flow_end)
                         )
+                elif rewound and not forced and index > 0 and _anchored_floats(view, index):
+                    # 둘째 줄부터도 같다(pic-in-head-01 s0 p32: 둘째 줄에 묶인 표 46878이 10쪽 첫 줄 끝에서 시작하고,
+                    # 표 아래에 들어가지 않는 둘째 줄만 11쪽 0으로 저장).
+                    state = self.place_floats_before_page(state, geometry, view, index)
+                    if state is None:
+                        state = self.next_column(
+                            state_before, geometry, segment, forced, (previous_line_bottom, flow_end)
+                        )
+                    relaid_shift = 0
                 elif forced or rewound:
                     column_before = (state, state.column)
                     state = self.next_column(
@@ -400,6 +416,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     and not any(id(ctrl) in preplaced for _, ctrl in _anchored_floats(view))
                 ):
                     state = self.place_floats_first(state, geometry, view, segment)
+                if stale_vertical:
+                    if index == 0:
+                        self.place_anchored_floats(state, geometry, view)
+                    state = self.pushed_below_floats(state, geometry, segment)
                 previous_vpos = segment.vertical_pos
                 previous_line_bottom = previous_bottom = segment.vertical_pos + segment.line_height
                 previous_line_end = previous_line_bottom + segment.line_spacing
@@ -463,7 +483,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 previous_line_bottom = previous_bottom = old.vertical_pos + old.line_height
                 previous_line_end = previous_line_bottom + old.line_spacing
                 view = stored_view
-            flow_end = reflow.flow_end(view)
+            flow_end = reflow.flow_end(view, objects=not stale_vertical)
             previous_bottom = max(previous_bottom, flow_end)
             if spilled:
                 # 쪽을 넘긴 표 뒤는 표 마지막 조각 아래에서 이어진다. 그 위치를 모르면 그 쪽 맨 위에서 잇는다.
@@ -477,7 +497,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             after_spill = spilled
 
     def place_floats_before_page(
-        self, state: PageState, geometry: SectionGeometry, view: ParagraphView
+        self, state: PageState, geometry: SectionGeometry, view: ParagraphView, line: int = 0
     ) -> PageState | None:
         """줄은 다음 쪽으로 넘어갔지만 문단 기준 자리차지 개체는 앞 문단 바로 아래(앞 쪽)에서 시작한다.
 
@@ -489,15 +509,15 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             return None
         column_x, column_width = geometry.columns[state.column]
         area = Area(state.geometry.body_left + column_x, geometry.body_top + state.zone_top, column_width)
-        if state.continued_by_table and area.y + view.segments[0].vertical_pos >= self.flow_cursor[2]:
+        if state.continued_by_table and area.y + view.segments[line].vertical_pos >= self.flow_cursor[2]:
             # 표가 넘어온 쪽에서 표 나머지보다 아래로 저장된 줄은 이미 이 쪽 좌표다(실측: 5.0 revision 46쪽 표 83,
             # 저장 6999, 앞 표 나머지 끝 3813, 정답 표 위 선 153.07pt = 저장 위치).
             return None
         # 첫 개체가 앞 쪽 남은 자리에서 시작조차 못 하고(표는 첫 행, 다른 개체는 전체) 저장 줄도 그 개체에 밀린 자리가
         # 아니면(줄 < 개체 높이) 평소처럼 되감는다(실측: hwpspec s2 p181 앞 쪽 4pt, 줄 14091 < 표 41089, 정답 표는
         # 31쪽 저장 위치. basicsReport p101은 줄 45887 > 표 45605라 앞 쪽 끝에서 시작해 다음 쪽 맨 위).
-        floats = _anchored_floats(view)
-        if floats and view.segments[0].vertical_pos < floats[0][1].model.height:
+        floats = _anchored_floats(view, line)
+        if floats and view.segments[line].vertical_pos < floats[0][1].model.height:
             model = floats[0][1].model
             grid = self.table_layout_grid(floats[0][1])[0] if is_block_table(floats[0][1]) else None
             start_height = grid.row_y[1] if grid is not None and len(grid.row_y) > 1 else model.height
@@ -505,13 +525,13 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             if self.flow_cursor[2] + outer_top + start_height > geometry.body_top + geometry.body_height:
                 return None
         placed = self.__dict__.setdefault("_preplaced", set())
-        # 개체의 문단 기준 위치는 저장된 첫 줄(다음 쪽)이 아니라 앞 문단이 끝난 자리다.
+        # 개체의 문단 기준 위치는 저장된 줄(다음 쪽)이 아니라 앞 줄이 끝난 자리다.
         first = dataclasses.replace(view.segments[0], vertical_pos=round(self.flow_cursor[2] - area.y))
         view = dataclasses.replace(view, segments=[first, *view.segments[1:]])
         self.in_body = True
         last, placed_any = state, False
         try:
-            for char_index, ctrl in _anchored_floats(view):
+            for char_index, ctrl in floats:
                 self.current_state = None
                 self.place_control(state, view, ctrl, area.x, area.y, area.y, area, char_index)
                 placed.add(id(ctrl))
@@ -529,6 +549,46 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             return None
         state = self.states[following]
         state.continued_by_table = False
+        return state
+
+    def place_anchored_floats(self, state: PageState, geometry: SectionGeometry, view: ParagraphView) -> None:
+        """첫 줄에 묶인 위아래 배치 개체를 줄보다 먼저 문단 시작 자리 기준으로 놓는다(줄이 그 상자를 피하도록)."""
+        column_x, column_width = geometry.columns[state.column]
+        area = Area(state.geometry.body_left + column_x, geometry.body_top + state.zone_top, column_width)
+        placed = self.__dict__.setdefault("_preplaced", set())
+        self.in_body = True
+        try:
+            for char_index, ctrl in _anchored_floats(view):
+                self.current_state, self.table_bottom = None, None
+                self.place_control(state, view, ctrl, area.x, area.y, area.y, area, char_index)
+                placed.add(id(ctrl))
+        finally:
+            self.in_body = False
+            self.current_state = None
+
+    def pushed_below_floats(self, state: PageState, geometry: SectionGeometry, segment: LineSeg) -> PageState:
+        """줄 상자가 이 쪽 위아래 배치 개체 상자와 겹치면 상자 아래로 내린다. 쪽에 들어가지 않으면 다음 쪽 맨 위로 간다.
+
+        한글 세로 값 계산 실측(issue1510): 제목 줄 위 = 표 B 바깥 상자 아래 144.86pt, filler08 위 = 표 A 아래 330.86pt.
+        """
+        registry = self.__dict__.get("_stacked_boxes", {})
+        boxes = [box for (page, _), listed in registry.items() if page == id(state.page) for box in listed]
+        column_x, column_width = geometry.columns[state.column]
+        left = state.geometry.body_left + column_x
+        top = geometry.body_top + state.zone_top + segment.vertical_pos
+        moved = True
+        while moved:
+            moved = False
+            for box_left, box_right, box_top, box_bottom, continued in boxes:
+                # 다음 쪽으로 이어진 표 상자(continued)는 그 쪽 끝까지라 아래 쪽 넘김이 맡는다.
+                if continued is not None or not (box_left < left + column_width and left < box_right):
+                    continue
+                if box_top < top + segment.line_height and top < box_bottom:
+                    state.zone_top += box_bottom - top
+                    top, moved = box_bottom, True
+        if top + segment.line_height > geometry.body_top + geometry.body_height and top > geometry.body_top:
+            state = self.new_page(geometry)
+            state.zone_top = state.zone_bottom = -segment.vertical_pos
         return state
 
     def place_floats_first(
@@ -1537,15 +1597,16 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         return mark, _superscript(self.styles.char_shapes[view.shape_ids[char_index]])
 
 
-def _anchored_floats(view: ParagraphView) -> list[tuple[int, Node]]:
-    """첫 줄에 놓인 문단 기준 자리차지(떠 있는) 개체들의 (글자 순번, 컨트롤)."""
+def _anchored_floats(view: ParagraphView, line: int = 0) -> list[tuple[int, Node]]:
+    """line번째 줄(기본 첫 줄)에 놓인 문단 기준 자리차지(떠 있는) 개체들의 (글자 순번, 컨트롤)."""
     if not view.segments:
         return []
-    first_line_end = view.segments[1].text_start if len(view.segments) > 1 else 1 << 31
+    line_start = view.segments[line].text_start if line > 0 else -1
+    line_end = view.segments[line + 1].text_start if line + 1 < len(view.segments) else 1 << 31
     return [
         (index, ctrl)
         for index, ctrl in sorted(view.controls.items())
-        if view.positions[index] < first_line_end
+        if line_start <= view.positions[index] < line_end
         and isinstance(ctrl.model, ObjectCtrlHeader)
         and not ctrl.model.treat_as_char
         and ctrl.model.text_wrap == TextWrap.TOP_AND_BOTTOM
@@ -1686,6 +1747,47 @@ def _square_wrap_neighbours(nodes: list[Node]) -> set[int]:
             anchored.update(range(first, group + 1))
     near = {g + d for g in anchored for d in (-1, 0, 1)}
     return {key for key, first, last in spans if any(g in near for g in range(first, last + 1))}
+
+
+def _stale_vertical_positions(nodes: list[Node], geometry: SectionGeometry) -> bool:
+    """저장 줄 세로 위치가 한글 계산값이 아닌 구역인가. 한글은 다음 줄을 앞 줄 + 글자 높이 + 줄 간격 아래에 둔다.
+
+    한글은 저장 줄을 재사용해도 세로 값은 다시 계산한다(FUN_101dbcf0 → FUN_101e3b80). 앞 문단 끝 줄과 같은 자리에
+    저장된 첫 줄은 앞 줄이 나아가는 높이(글자 높이 + 줄 간격)가 0일 때(음수 줄 간격, kr_156489809)나 그 줄이 들어가지
+    않아 새 쪽으로 갈 때(tac-img-02)만 한글 출력이다. 다른 프로그램이 0으로 채운 구역(issue1510)은 다시 계산한다.
+    """
+    columns = len(geometry.columns)
+    previous: LineSeg | None = None
+    for node in nodes:
+        if node.tag != tags.PARA_HEADER:
+            continue
+        column_def = _column_def(node)
+        if column_def is not None:
+            columns, previous = max(column_def.count, 1), None
+        line_seg = node.find(tags.PARA_LINE_SEG)
+        segments = line_seg.model.segments if line_seg is not None and isinstance(line_seg.model, ParaLineSeg) else []
+        # 글자처럼 취급한 개체 줄은 한글이 개체 크기를 다시 정해 저장 높이로는 쪽에 드는지 모른다(p122 그림: 저장
+        # 22238, 정답은 쪽보다 큰 그림이 2쪽을 차지). 그런 줄이 낀 쌍은 판정하지 않는다.
+        if not segments or any(
+            isinstance(child.model, ObjectCtrlHeader) and child.model.treat_as_char for child in node.children
+        ):
+            previous = None
+            continue
+        first = segments[0]
+        # 폭 0인 앞 줄은 개체에 밀려 그 쪽에 자리가 없던 줄이라 다음 줄은 새 쪽이다(issue_157 쪽 높이 표).
+        if (
+            previous is not None
+            and columns == 1
+            and previous.segment_width > 0
+            and not node.model.break_type & 0x0C
+            and first.vertical_pos == previous.vertical_pos
+            and previous.text_height + previous.line_spacing > 0
+            and previous.vertical_pos + previous.text_height + previous.line_spacing + first.line_height
+            <= geometry.body_height
+        ):
+            return True
+        previous = segments[-1]
+    return False
 
 
 def _flush_shadow_run(page: Page, run: list[tuple[list[Glyph], Glyph]]) -> None:

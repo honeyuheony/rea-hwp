@@ -17,7 +17,7 @@ from rea_hwp.render.tables import cell_margins, stored_pieces
 
 
 def _paragraph(*positions: tuple[int, int]) -> list:
-    return [SimpleNamespace(vertical_pos=top, line_height=height) for top, height in positions]
+    return [SimpleNamespace(vertical_pos=top, line_height=height, text_height=height) for top, height in positions]
 
 
 def _line(top: float, origin: float, carry: int = 0, cell_top: float = 0.0) -> CellLine:

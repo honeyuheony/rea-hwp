@@ -685,3 +685,43 @@ def test_svg_draws_symbol_area_pua_with_wingdings():
     # 한글 PDF: 함초롬바탕 글자 모양의 U+F076이 Wingdings로 찍힌다(기본 글꼴 목록에서 글리프가 있는 첫 글꼴).
     svg = page_to_svg(_open("oss/rhwp/pua-test.hwp")[0])
     assert 'font-family="Wingdings" ><' in svg
+
+
+def _first(page, char: str, low: float = 0.0, high: float = 1e9) -> tuple[float, float] | None:
+    return next(((x, y) for c, x, y in page_glyph_table(page) if c == char and low <= y <= high), None)
+
+
+@needs_corpus
+def test_stale_stored_positions_are_recomputed_around_unrestricted_floats():
+    # 한글 2022 PDF: 모든 줄이 0으로 저장된 문서. 제목은 표 B 아래, filler08은 표 A 아래, 본문 영역 제한이 없는 표 B는
+    # 문단 위로 올라가고 표 C는 B와 겹친다.
+    page = _open("oss/rhwp/issue1510_coanchored_float_tables.hwp")[0]
+    assert _first(page, "I") == pytest.approx((230.28, 153.36), abs=0.5)
+    assert _first(page, "8") == pytest.approx((173.52, 339.36), abs=0.5)
+    assert _first(page, "B") == pytest.approx((123.0, 104.52), abs=0.5)
+    assert _first(page, "C", high=130) == pytest.approx((93.0, 121.68), abs=0.5)
+
+
+@needs_corpus
+def test_float_on_rewound_second_line_starts_on_previous_page():
+    # 한글 2022 PDF 10쪽: p32 둘째 줄에 묶인 표의 「동시수행 과제 제한」 기준선 321.48pt(둘째 줄은 11쪽).
+    page = _open("oss/rhwp/pic-in-head-01.hwp")[9]
+    assert _first(page, "동", 300, 330) == pytest.approx((97.08, 321.48), abs=0.5)
+
+
+@needs_corpus
+def test_float_of_paragraph_pushed_by_earlier_float_and_cell_float_before_space_before():
+    # 한글 2022 PDF 1쪽: p1 표는 p0 표에 밀린 줄 기준(「법무부는」 342.24pt),
+    # 셀 안 표는 문단 위 간격 앞 기준(「수원」 686.76pt).
+    page = _open("public/kr_156489673_196610453.hwp")[0]
+    assert _first(page, "법") == pytest.approx((92.76, 342.24), abs=0.5)
+    assert _first(page, "수", 600) == pytest.approx((85.44, 686.76), abs=0.5)
+
+
+@needs_corpus
+def test_group_children_scale_before_rotation_from_outermost_group():
+    # 한글 2022 PDF 편람 4쪽: 좌우 뒤집힌 글상자 「차례」(축척 먼저),
+    # 9쪽: 세 단계 묶음 안 「행정업무」(맨 바깥 묶음 기준).
+    pages = _open("oss/rhwp/2025 행정업무운영 편람(최종).hwp")
+    assert _first(pages[3], "차") == pytest.approx((96.36, 110.64), abs=0.5)
+    assert _first(pages[8], "행", 260, 280) == pytest.approx((267.72, 269.4), abs=0.5)
