@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import math
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -68,6 +69,9 @@ ETO_OPAQUE, ETO_CLIPPED, ETO_GLYPH_INDEX = 0x0002, 0x0004, 0x0010
 FW_SEMIBOLD = 600
 ANSI_CHARSET = 0
 SRCCOPY = 0x00CC0020
+#: 투명 합성에 쓰는 래스터 연산(MS-WMF 2.1.1.31 TernaryRasterOperation): 바탕 OR 원본, 바탕 AND 원본.
+SRCPAINT = 0x00EE0086
+SRCAND = 0x008800C6
 PATCOPY, BLACKNESS, WHITENESS = 0x00F00021, 0x00000042, 0x00FF0062
 BI_BITFIELDS = 3
 
@@ -98,6 +102,8 @@ class WmfText:
     italic: bool
     color: str
     advances: list[float] | None = None
+    #: 글줄 방향 각도(도, 반시계). 글꼴 escapement에서 온다.
+    angle: float = 0.0
 
 
 @dataclass
@@ -131,6 +137,8 @@ class _Font:
     italic: bool
     charset: int
     face: str
+    #: 글줄 방향(0.1도, 반시계, 장치 x축 기준. MS-WMF 2.2.1.2 Font).
+    escapement: int = 0
 
 
 @dataclass
@@ -357,9 +365,9 @@ class _Converter:
         self.add_object(_Brush(BS_SOLID, "#808080", pattern=pattern) if pattern else _Brush(BS_NULL, "#000000"))
 
     def create_font(self, params: bytes) -> None:
-        height, _, _, _, weight, italic, _, _, charset = struct.unpack_from("<5h4B", params)
+        height, _, escapement, _, weight, italic, _, _, charset = struct.unpack_from("<5h4B", params)
         face = params[18:50].split(b"\0", 1)[0].decode("cp949", errors="replace")
-        self.add_object(_Font(height, weight, bool(italic), charset, face))
+        self.add_object(_Font(height, weight, bool(italic), charset, face, escapement))
 
     def select_object(self, params: bytes) -> None:
         (index,) = struct.unpack_from("<H", params)
@@ -658,8 +666,9 @@ class _Converter:
     def add_image(
         self, rop: int, dib: bytes, source: tuple[int, int, int, int], dest: tuple[int, int, int, int]
     ) -> None:
-        # 마스크 합성(SRCAND·SRCPAINT 등)은 SVG로 옮기지 않는다. 그대로 그리면 검은 판이 덮인다.
-        if rop != SRCCOPY:
+        # 비트 OR·AND는 채널마다 최댓값·최솟값(lighten·darken 혼합)으로 그린다. 한쪽 값이 0·255인 화소에서는 같다.
+        blend = {SRCCOPY: "", SRCPAINT: ' style="mix-blend-mode:lighten"', SRCAND: ' style="mix-blend-mode:darken"'}
+        if rop not in blend:
             return
         bitmap = _dib_to_bmp(dib)
         if bitmap is None:
@@ -670,7 +679,7 @@ class _Converter:
         x0, y0 = self.to_frame(x_dest, y_dest)
         x1, y1 = self.to_frame(x_dest + dest_w, y_dest + dest_h)
         href = f"data:image/bmp;base64,{base64.b64encode(bmp).decode('ascii')}"
-        image = f'<image width="{pixels_x}" height="{pixels_y}" preserveAspectRatio="none" href="{href}"/>'
+        image = f'<image width="{pixels_x}" height="{pixels_y}" preserveAspectRatio="none"{blend[rop]} href="{href}"/>'
         # 원본 사각형을 viewBox로 잘라 내고, 목적지 모서리 순서가 뒤집혔으면 거울상으로 놓는다.
         flip = f"translate({_num(x0)} {_num(y0)}) scale({1 if x1 >= x0 else -1} {1 if y1 >= y0 else -1})"
         self.elements.append(
@@ -706,19 +715,21 @@ class _Converter:
             extent = sum(advances)
         else:
             extent = sum(em * (WIDE_ADVANCE if ord(char) >= 0x1100 else NARROW_ADVANCE) for char, _ in chars)
-        left, top = self.to_frame(x, y)
+        origin_x, origin_y = self.to_frame(x, y)
         horizontal = state.text_align & TA_HORIZONTAL_MASK
-        if horizontal == TA_RIGHT:
-            left -= extent
-        elif horizontal == TA_CENTER:
-            left -= extent / 2
+        along = -extent if horizontal == TA_RIGHT else -extent / 2 if horizontal == TA_CENTER else 0.0
         vertical = state.text_align & TA_VERTICAL_MASK
         if vertical == TA_BOTTOM:
-            baseline = top - em * FONT_DESCENT
+            down = -em * FONT_DESCENT
         elif vertical == TA_BASELINE:
-            baseline = top
+            down = 0.0
         else:
-            baseline = top + em * FONT_ASCENT
+            down = em * FONT_ASCENT
+        # 정렬 기준점은 글줄 방향(along)과 그에 수직인 아래쪽(down)으로 옮긴다. 장치 좌표는 y가 아래로 자란다.
+        angle = font.escapement / 10 if font is not None else 0.0
+        cos, sin = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+        left = origin_x + along * cos + down * sin
+        baseline = origin_y - along * sin + down * cos
         if state.text_align & TA_UPDATECP:
             state.position = (x + round(extent / scale_x) if scale_x else x, y)
         self.texts.append(
@@ -732,5 +743,6 @@ class _Converter:
                 italic=bool(font and font.italic),
                 color=state.text_color,
                 advances=advances,
+                angle=angle,
             )
         )

@@ -21,6 +21,8 @@ class Glyph:
     scale_x: float = 1.0
     #: 레이아웃이 정한 전진폭. 브라우저 글꼴 폭과 달라도 이 폭에 맞춰 그린다.
     advance: float = 0.0
+    #: 원점을 축으로 돌린 각도(도, 반시계).
+    rotation: float = 0.0
 
 
 @dataclass
