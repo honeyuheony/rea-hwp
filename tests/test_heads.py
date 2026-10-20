@@ -1,5 +1,20 @@
+from pathlib import Path
+
+import pytest
+
+from rea_hwp.document import HwpDocument
 from rea_hwp.models.docinfo import CharShape
 from rea_hwp.render.heads import HeadSpec, NumberingCounter, head_geometry
+from rea_hwp.render.layout import layout_document
+
+SPEC_DOC = (
+    Path.home()
+    / "tools"
+    / "hwp-corpus"
+    / "oss"
+    / "hwp-rs"
+    / "crates__hwp__tests__integration__hancom__files__한글문서파일형식_5.0_revision1.3.hwp"
+)
 
 
 def _shape(size: int) -> CharShape:
@@ -31,3 +46,12 @@ def test_head_without_auto_indent_shifts_only_first_line():
     geometry = head_geometry(spec, _shape(1000), 800.0, indent=0)
     assert geometry is not None
     assert (geometry.first, geometry.rest) == (1300, 0)
+
+
+@pytest.mark.skipif(not SPEC_DOC.exists(), reason="corpus not available")
+def test_outline_head_in_text_box_uses_its_own_section_numbering():
+    page = layout_document(HwpDocument.open(SPEC_DOC))[7]
+    # 한글 2022 PDF 8쪽: 표지 글상자 제목은 4구역 개요 번호(1수준 형식이 빈 문자열)를 써서 번호 없이 「I. 」로 시작한다.
+    title = next(line.text for line in page.text_lines if "5.0 파일" in line.text)
+    assert title.startswith("I.")
+    assert title.rstrip().endswith("구조")

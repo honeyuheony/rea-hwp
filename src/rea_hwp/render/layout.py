@@ -1506,7 +1506,13 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             if "numbering_counter" not in self.__dict__:
                 self.numbering_counter = heads.NumberingCounter()
                 self.outline_ids = heads.outline_numbering_ids(self.document)
-            section = next((i for i, s in enumerate(self.document.sections) if view.node in s.nodes), 0)
+            if "node_sections" not in self.__dict__:
+                # 글상자·표 안 문단도 그 구역의 개요 번호를 쓴다(실측: 한글문서파일형식_5.0 8쪽 표지 글상자 제목은
+                # 4구역 개요 번호 1수준 형식이 비어 정답에 번호가 없다).
+                self.node_sections = {
+                    id(node): index for index, s in enumerate(self.document.sections) for node in s.walk()
+                }
+            section = self.node_sections.get(id(view.node), 0)
             outline_id = self.outline_ids[section] if section < len(self.outline_ids) else 1
             spec = heads.numbering_spec(self.styles, para_shape, outline_id, self.numbering_counter)
         if spec is None:
