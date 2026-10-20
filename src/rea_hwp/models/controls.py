@@ -346,6 +346,8 @@ class AutoNumberKind(IntEnum):
     FIGURE = 3
     TABLE = 4
     EQUATION = 5
+    #: 전체 쪽 수(HWPX numType TOTAL_PAGE).
+    TOTAL_PAGE = 6
 
 
 class _NumberingAttr:

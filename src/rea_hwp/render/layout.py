@@ -13,6 +13,7 @@ from .. import tags
 from ..document import HwpDocument, Node
 from ..models.controls import (
     AutoNumberCtrl,
+    AutoNumberKind,
     ColumnDefCtrl,
     DutmalCtrl,
     FieldCtrl,
@@ -1992,7 +1993,11 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
 
     def auto_number(self, view: ParagraphView, char_index: int, model: AutoNumberCtrl) -> tuple[str, CharShape]:
         shape = self.styles.char_shapes[view.shape_ids[char_index]]
-        number = self.page_numbers[-1] if model.kind == 0 else self.current_note_number
+        if model.kind == AutoNumberKind.TOTAL_PAGE:
+            # 쪽 꾸밈은 모든 쪽을 놓은 뒤 그리므로 쪽 목록이 문서 전체 쪽 수다(exam_eng 꼬리말 「8/8」, 저장값 8).
+            number = len(self.pages)
+        else:
+            number = self.page_numbers[-1] if model.kind == 0 else self.current_note_number
         text = _affix(model.prefix_char) + format_number(number, model.number_shape) + _affix(model.suffix_char)
         if model.kind != 0:
             # 주석 번호에는 자간을 적용하지 않는다(실측: 중간진도보고서 각주 「8)」 바탕 9pt 장평 95% 자간 −15%,
