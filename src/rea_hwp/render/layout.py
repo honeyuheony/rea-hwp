@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import itertools
+import re
 import unicodedata
 
 from .. import tags
@@ -12,6 +13,7 @@ from ..document import HwpDocument, Node
 from ..models.controls import (
     AutoNumberCtrl,
     ColumnDefCtrl,
+    FieldCtrl,
     HeaderFooterCtrl,
     NewNumberCtrl,
     NoteCtrl,
@@ -1298,8 +1300,12 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         # FUN_1030c200, 구간 경계 FUN_10175e50: 글자 모양이 바뀌거나 컨트롤 문자를 만나면 끊고 공백에서는 끊지 않는다).
         shadow_run: list[tuple[list[Glyph], Glyph]] = []
         run_shape: CharShape | None = None
+        guide_text = _guide_text_chars(view)
         for order, (char_index, width) in enumerate(zip(items, widths, strict=True)):
             item = view.chars[char_index]
+            if char_index in guide_text:
+                x += width + extras[order]
+                continue
             if isinstance(item, TextChar):
                 pieces.append(item.char)
             elif item.code == TAB:
@@ -1662,6 +1668,45 @@ def _floats_overlap_first_line(view: ParagraphView, body_height: int) -> bool:
         and first_line.vertical_pos < extent
         and extent + first_line.line_height > body_height
     )
+
+
+#: 필드 시작·끝 제어 글자(명세 표6).
+FIELD_BEGIN, FIELD_END = 3, 4
+#: 필드 속성 bit 15(명세 표153): 필드 내용이 수정되었다.
+FIELD_MODIFIED = 1 << 15
+_DIRECTION = re.compile(r"Direction:wstring:(\d+):")
+
+
+def _guide_text_chars(view: ParagraphView) -> frozenset[int]:
+    """수정하지 않은 누름틀에 안내문이 그대로 든 글자 번호. 자리는 차지하지만 인쇄하지 않는다.
+
+    수정 표시가 없고 글이 안내문과 같은 누름틀 116곳은 정답 PDF에 그 글이 없다(80168 등). 수정 표시가 없어도 글이
+    안내문과 다르면 인쇄한다(86712, 안내문이 빈 law_18543285 「0000.00.00.」).
+    """
+    if not any(isinstance(ctrl.model, FieldCtrl) for ctrl in view.controls.values()):
+        return frozenset()
+    hidden: set[int] = set()
+    open_fields: list[tuple[FieldCtrl | None, list[int]]] = []
+    for index, item in enumerate(view.chars):
+        if isinstance(item, ControlChar) and item.code == FIELD_BEGIN:
+            model = view.controls[index].model if index in view.controls else None
+            open_fields.append((model if isinstance(model, FieldCtrl) else None, []))
+        elif isinstance(item, ControlChar) and item.code == FIELD_END and open_fields:
+            model, inside = open_fields.pop()
+            if open_fields:
+                open_fields[-1][1].extend(inside)
+            if model is None or model.ctrl_id != tags.CLICK_HERE_CTRL or model.attr & FIELD_MODIFIED:
+                continue
+            # 명령 문자열 「Direction:wstring:<글자 수>:<안내문>」(누름틀 안내문).
+            direction = _DIRECTION.search(model.command or "")
+            if direction is None or not int(direction.group(1)):
+                continue
+            guide = model.command[direction.end() : direction.end() + int(direction.group(1))]
+            if "".join(view.chars[i].char for i in inside) == guide:
+                hidden.update(inside)
+        elif isinstance(item, TextChar) and open_fields:
+            open_fields[-1][1].append(index)
+    return frozenset(hidden)
 
 
 def _line_has_ink(view: ParagraphView, index: int, floats: bool = True) -> bool:

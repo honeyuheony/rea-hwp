@@ -45,3 +45,12 @@ def test_form_captions_and_marlett_frames():
     # 값이 1인 선택 상자만 선택 표시 'b'를 더 찍는다. 라디오 단추(값 0)는 'i'가 없다.
     assert "gfedcb" in chars
     assert "nmlkj" in chars and "nmlkji" not in chars
+
+
+@pytest.mark.skipif(not (CORPUS / "rhwp" / "80168_regulatory_analysis.hwp").exists(), reason="corpus not available")
+def test_unmodified_click_here_guide_text_is_not_printed():
+    pages = layout_document(HwpDocument.open(CORPUS / "rhwp" / "80168_regulatory_analysis.hwp"))
+
+    # 한글 2022 PDF 28쪽에는 수정하지 않은 누름틀의 안내문 「적용이면 O표시, 미적용은 공란으로처리」가 없다.
+    text = "".join(glyph.char for glyph in pages[27].glyphs)
+    assert "적용이면" not in text
