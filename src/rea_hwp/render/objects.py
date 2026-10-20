@@ -296,7 +296,9 @@ class ObjectsMixin:
         else:
             component = ctrl.find(tags.SHAPE_COMPONENT)
             if component is not None:
-                self.draw_component(state, component, left, top, width, height)
+                # 글자처럼 취급해 늘어나는 글상자(textbox_grown_line)는 늘어난 줄도 찍는다(pr-1674 16쪽 「2-1」).
+                growth = self.textbox_growth(ctrl) if model.treat_as_char else 0.0
+                self.draw_component(state, component, left, top, width, height, text_growth=growth)
             form = ctrl.find(tags.FORM_OBJECT)
             if form is not None:
                 draw_form(self, state, form, left, top, width, height)
@@ -619,6 +621,7 @@ class ObjectsMixin:
         width: float,
         height: float,
         origin: tuple[float, float] | None = None,
+        text_growth: float = 0.0,
     ) -> None:
         """origin은 맨 바깥 묶음의 왼쪽 위다. 자식 렌더링 행렬과 오프셋은 바로 위 묶음이 아니라 그 묶음 기준이다."""
         if isinstance(component.model, ShapeComponent):
@@ -662,7 +665,9 @@ class ObjectsMixin:
                 if header.text_direction:
                     self.place_vertical_text(state, views, area, inner_height, header)
                 else:
-                    self.place_linked_text(state, views, area, (inner_height, header.vert_align))
+                    self.place_linked_text(
+                        state, views, area, (inner_height, header.vert_align), inner_height + margins[3] + text_growth
+                    )
         # 중첩 묶음 자식도 맨 바깥 묶음 기준이다(편람 9쪽: 세 단계 묶음 이동 행렬이 모두 25159, 정답 x 268pt).
         origin = origin or (left, top)
         for child in component.children:
@@ -692,9 +697,18 @@ class ObjectsMixin:
                     self.draw_vertical_line(state, view, index, column_right, area.y, header.text_direction == 1)
 
     def place_linked_text(
-        self, state: PageState, views: list[ParagraphView], area: Area, alignment: tuple[float, int]
+        self,
+        state: PageState,
+        views: list[ParagraphView],
+        area: Area,
+        alignment: tuple[float, int],
+        visible_height: float,
     ) -> None:
         """글상자 문단을 놓는다. 되돌아간 뒤 줄은 연결된 다음 글상자로 넘어간다. alignment는 (안쪽 높이, 세로 정렬).
+
+        위 끝이 visible_height(상자 아래 끝) 밑인 저장 줄은 찍지 않는다. 정답 PDF 실측: group-drawing-02 「id」
+        1600 ≥ 1000 + 284, 편람 161쪽 「기재란」 1600 ≥ 1404 + 142는 없고, 8쪽 「의미함」 4086 < 3565 + 850은 있다.
+        대체 글꼴로 다시 나눈 줄은 한글 배치가 아니라 빼지 않는다(annual_report 5쪽 「다.」는 정답에서 앞 줄 끝).
 
         연결 대상은 같은 쪽의 빈 글상자 가운데 안쪽 폭이 그 줄 폭과 같은 것이다(basic__BookReview 2쪽: 넘친 줄 폭
         13832·19132가 빈 글상자 폭과 같고, PDF에서 그 상자에 이어진다). 빈 글상자를 나중에 그리면 그때 놓는다.
@@ -742,7 +756,9 @@ class ObjectsMixin:
             shift = {1: slack / 2, 2: slack}.get(vert_align, 0.0)
             placed = [(view, index, Area(box.x, box.y + shift, box.width)) for view, index, box in placed]
         for view, index, box in placed:
-            self.place_line(state, view, index, box)
+            # 세로 정렬은 상자 밖 줄까지 든 내용 높이로 정한다(편람 161쪽 「민원인」: 뺀 줄을 정렬에서 빼면 2pt 내려감).
+            if view.segments[index].vertical_pos < visible_height or not _is_stored_line(view, index):
+                self.place_line(state, view, index, box)
         if not rest:
             return
         # 줄 폭은 문단 왼·오른 여백(2배 저장)을 뺀 값이다.
@@ -986,6 +1002,12 @@ def _compose(first: tuple, second: tuple) -> tuple:
 def _apply(matrix: tuple, x: float, y: float) -> tuple[float, float]:
     a, b, tx, c, d, ty = matrix
     return a * x + b * y + tx, c * x + d * y + ty
+
+
+def _is_stored_line(view: ParagraphView, index: int) -> bool:
+    """줄이 LINE_SEG 레코드에 저장된 그대로인가(다시 나누거나 옮긴 줄이 아닌가)."""
+    stored = view.node.find(tags.PARA_LINE_SEG)
+    return stored is not None and any(segment is view.segments[index] for segment in stored.model.segments)
 
 
 def _pushes_first_line(view: ParagraphView) -> bool:

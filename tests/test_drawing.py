@@ -10,6 +10,7 @@ from rea_hwp.render.scene import Glyph, Image
 RHWP = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp"
 VERTICAL_DOC = RHWP / "hwpx__hancom-hwp__tbox-v-flow-01.hwp"
 MANUAL_DOC = RHWP / "2025 행정업무운영 편람(최종).hwp"
+GROUP_DOC = RHWP / "group-drawing-02.hwp"
 
 
 def _svg_images(page) -> list[str]:
@@ -47,3 +48,10 @@ def test_rectangle_solid_fill_is_drawn():
     page = layout_document(HwpDocument.open(MANUAL_DOC))[84]
     # 바탕쪽 「제1절」 상자: 채우기 종류 1(단색) 0x646464, 선 종류 0(없음).
     assert any('fill="#646464" stroke="none"' in svg for svg in _svg_images(page))
+
+
+@pytest.mark.skipif(not GROUP_DOC.exists(), reason="corpus not available")
+def test_text_box_line_below_inner_height_is_not_drawn():
+    page = layout_document(HwpDocument.open(GROUP_DOC))[0]
+    # 「item id」 상자 일곱 개(안쪽 높이 1000)의 둘째 줄 「id」(세로 위치 1600)는 정답 PDF에 없다. 「d」는 3개뿐이다.
+    assert sum(1 for item in page.items if isinstance(item, Glyph) and item.char == "d") == 3
