@@ -6,6 +6,7 @@ import pytest
 from rea_hwp import tags
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import DocumentLayout, layout_document
+from rea_hwp.render.scene import Image
 from rea_hwp.render.table_flow import (
     BIG_ROOM,
     CellLine,
@@ -190,3 +191,16 @@ def test_inline_table_on_line_with_floored_half_baseline_starts_at_line_top():
     page = layout_document(HwpDocument.open(RHWP / "exam_science.hwp"))[2]
     # 한글 2022 PDF 3쪽: 기준선이 높이 23931의 내림한 절반 11965로 저장된 표 줄, 첫 셀 줄 「[실험 과정]」 154.20pt.
     assert _baseline_of(page, "[실험과정]") == pytest.approx(154.20, abs=0.5)
+
+
+@pytest.mark.skipif(not (RHWP / "issue1921__59043_regulatory_analysis.hwp").exists(), reason="corpus not available")
+def test_no_overlap_cell_pictures_stack_below_earlier_ones():
+    pages = layout_document(HwpDocument.open(RHWP / "issue1921__59043_regulatory_analysis.hwp"))
+
+    def tops(page) -> list[float]:
+        return sorted(item.y / 100 for item in page.items if isinstance(item, Image) and item.width > 5000)
+
+    # 한글 2022 PDF: 셀 그림 위 끝 11쪽 515.9·693.1pt(앞 그림 아래), 넷째 그림은 12쪽 조각 위 59.6pt, 13쪽엔 그림 없음.
+    assert tops(pages[10])[-2:] == pytest.approx([515.9, 693.1], abs=1.0)
+    assert tops(pages[11])[0] == pytest.approx(59.6, abs=1.0)
+    assert tops(pages[12]) == []

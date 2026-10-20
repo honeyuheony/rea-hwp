@@ -345,6 +345,9 @@ def cell_items(
     floor = 0.0
     para_top = 0.0
     after: list[tuple[Node, NestedInput]] = []
+    #: 이 셀에 놓인 겹침 불가 개체 상자(가로 시작, 가로 끝, 위, 아래). 뒤 문단 개체가 피한다.
+    float_boxes: list[tuple[float, float, float, float]] = []
+    chained = False
     for number, view in enumerate(views):
         for index, segment in enumerate(view.segments):
             if previous is not None:
@@ -405,6 +408,16 @@ def cell_items(
             items.append(PagingLine(top, segment.text_height, lead, reach))
             sources.append((view, index))
             stack_bottom = top + reach
+            if stacked:
+                first_model = stacked[0].model
+                float_boxes.append(
+                    (
+                        first_model.horz_offset,
+                        first_model.horz_offset + first_model.width,
+                        top + max(0, first_model.vert_offset),
+                        stack_bottom,
+                    )
+                )
             for ctrl in stacked[1:]:
                 # 겹칠 수 없는 개체는 앞 개체 아래에 쌓고, 셀은 개체 사이에서 쪽을 나눈다. 음수 세로 오프셋은 쓰지
                 # 않는다(실측: issue2004 셀 문단 하나의 그림 5장, 정답 4~8쪽마다 한 장씩 조각 위 + 셀 위 여백).
@@ -413,13 +426,49 @@ def cell_items(
                 extent = margins[2] + model.height + margins[3]
                 items.append(PagingLine(stack_bottom, extent))
                 sources.append(StackedFloat(view, ctrl))
+                float_boxes.append(
+                    (model.horz_offset, model.horz_offset + model.width, stack_bottom, stack_bottom + extent)
+                )
                 stack_bottom += extent
-                floor = max(floor, stack_bottom)
+                if model.text_wrap == TextWrap.TOP_AND_BOTTOM:
+                    # 어울림 개체 옆에는 글이 흐르고 한글은 그 결과를 저장 줄에 남긴다(issue1921 13쪽 셀: 그림 둘 옆
+                    # 빈 줄 1432·2864…). 자리차지 개체만 뒤 줄을 밀어낸다.
+                    floor = max(floor, stack_bottom)
             if index == 0:
                 # 문단 기준 개체 위치는 문단 위 간격 앞이다(본문 objects.floating_position과 같다). kr_156489673 2쪽
                 # 셀 표: 줄 27392 = 앞 줄 끝 25392 + 위 간격 2000, 정답 표 위 = 25392 + 오프셋 3918 + 바깥 위 여백.
                 previous_end = flow_end if previous is not None else 0.0
                 para_top = max(top - view.para_shape.space_before // 2, previous_end)
+                for ctrl in _no_overlap_floats(view):
+                    if any(ctrl is other for other in stacked + below):
+                        continue
+                    model = ctrl.model
+                    margins = model.outer_margins or [0, 0, 0, 0]
+                    extent = margins[2] + model.height + _vertical_caption_extent(ctrl) + margins[3]
+                    left, right = model.horz_offset, model.horz_offset + model.width
+                    natural = start = para_top + model.vert_offset
+                    moved = True
+                    while moved:
+                        moved = False
+                        for box_left, box_right, box_top, box_bottom in float_boxes:
+                            if (
+                                left < box_right
+                                and box_left < right
+                                and box_top < start + extent
+                                and start < box_bottom
+                            ):
+                                start, moved = box_bottom, True
+                    if start != natural or chained:
+                        # 앞 겹침 불가 개체에 밀린 개체는 그 아래로 가고 뒤 개체도 이어 쌓여, 셀이 개체 앞에서 쪽을
+                        # 나눌 수 있다(실측: issue1921 11·12쪽 셀 그림 넷, 정답 위 끝 = 앞 그림 아래 515.9·693.1pt,
+                        # 넷째는 원래 자리가 쪽 아래라 12쪽 조각 위). 밀리지 않은 나란한 개체는 줄과 함께 둔다
+                        # (issue1949).
+                        chained = True
+                        items.append(PagingLine(start, extent))
+                        sources.append(StackedFloat(view, ctrl))
+                        if model.text_wrap == TextWrap.TOP_AND_BOTTOM:
+                            floor = max(floor, start + extent)
+                    float_boxes.append((left, right, start, start + extent))
             if index == len(view.segments) - 1:
                 for ctrl in below:
                     # 기준 문단 줄보다 아래에서 시작하는 개체는 따로 쌓아 셀이 개체 앞에서 쪽을 나눌 수 있게 한다
@@ -471,6 +520,17 @@ def _stacked_floats(view: ParagraphView) -> list[Node]:
         if a.horz_offset + a.width <= b.horz_offset or b.horz_offset + b.width <= a.horz_offset:
             return []
     return found if len(found) > 1 else []
+
+
+def _no_overlap_floats(view: ParagraphView) -> list[Node]:
+    """문단의 겹침 불가(attr bit 14 꺼짐) 어울림·자리차지 떠 있는 개체들."""
+    return [
+        ctrl
+        for _, ctrl in sorted(view.controls.items())
+        if _is_flow_float(ctrl)
+        and not ctrl.model.attr >> 14 & 1
+        and ctrl.model.text_wrap in (TextWrap.SQUARE, TextWrap.TOP_AND_BOTTOM)
+    ]
 
 
 def _floats_below_lines(view: ParagraphView) -> list[Node]:
