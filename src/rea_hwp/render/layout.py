@@ -300,6 +300,14 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     view = rejudged
             view = self.relative_sized_lines(view, geometry)
             view_reflowed = not view.segments
+            pushed_reflow = self.__dict__.pop("reflow_push", None)
+            if pushed_reflow is not None and view_reflowed:
+                self.reflow_push = pushed_reflow
+            elif pushed_reflow is not None and state is pushed_reflow[0]:
+                # 다시 짠 문단을 표 아래로 민 양은 뒤 저장 줄 문단에 넘기지 않는다. 저장 위치는 한글이 그 표를 피해 이미
+                # 계산한 값이다(실측: hwpspec 33쪽 「4.2.10. 문단 모양」만 줄 정보가 없고 뒤 「Tag ID」 줄은 저장 위치가
+                # 정답 241.44pt).
+                state.zone_top -= pushed_reflow[1]
             if view_reflowed:
                 if state is None:
                     state = self.new_page(geometry)
@@ -427,6 +435,14 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     if index == 0:
                         self.place_anchored_floats(state, geometry, view)
                     state = self.pushed_below_floats(state, geometry, segment)
+                elif view_reflowed and id(state) in self.__dict__.get("float_pages", ()):
+                    # 줄 정보 없이 다시 짠 문단이 떠 있는 표를 통째로 옮겨 만든 쪽에 놓이면 그 표를 피한다(실측: 80168
+                    # 93쪽 옮겨 온 표 아래 「③ 대안의 선택 및 근거」 171.84pt. 피하지 않으면 쪽 맨 위에서 표와 겹친다).
+                    before, before_top = state, state.zone_top
+                    state = self.pushed_below_floats(state, geometry, segment)
+                    if state is before and state.zone_top != before_top:
+                        _, total = self.__dict__.get("reflow_push") or (state, 0.0)
+                        self.reflow_push = (state, total + state.zone_top - before_top)
                 previous_vpos = segment.vertical_pos
                 previous_line_bottom = previous_bottom = segment.vertical_pos + segment.line_height
                 previous_line_end = previous_line_bottom + segment.line_spacing

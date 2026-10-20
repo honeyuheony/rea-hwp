@@ -131,3 +131,19 @@ def test_paging_engine_takes_table_with_nested_square_table():
 
 def _contains(node, target) -> bool:
     return any(child is target or _contains(child, target) for child in node.children)
+
+
+RHWP = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp"
+
+
+def _baseline_of(page, text: str) -> float:
+    """text로 시작하는 글줄의 기준선(pt)."""
+    return next(line.baseline / 100 for line in page.text_lines if line.text.replace(" ", "").startswith(text))
+
+
+@pytest.mark.skipif(not (RHWP / "80168_regulatory_analysis.hwp").exists(), reason="corpus not available")
+def test_reflowed_lines_avoid_table_moved_whole_to_next_page():
+    page = layout_document(HwpDocument.open(RHWP / "80168_regulatory_analysis.hwp"))[92]
+    # 한글 2022 PDF 93쪽: 통째로 옮겨 온 표(60.9~140.4pt) 아래 「③ 대안의 선택 및 근거」 171.84pt.
+    assert _baseline_of(page, "③대안의선택") == pytest.approx(171.84, abs=0.5)
+    assert _baseline_of(page, "3.규제목표") == pytest.approx(281.04, abs=0.5)
