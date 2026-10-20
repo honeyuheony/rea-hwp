@@ -466,9 +466,15 @@ def draw_table_frame(
     page: Page,
     styles: DocStyles,
     clip: tuple[float, float] | None = None,
+    background: bool = True,
 ) -> list[Line]:
-    """셀 배경을 칠하고 테두리 선을 돌려준다. clip은 표 세로 좌표 [시작, 끝) 구간, y는 그 시작이 놓일 위치다."""
+    """표·셀 배경을 칠하고 테두리 선을 돌려준다. clip은 표 세로 좌표 [시작, 끝) 구간, y는 그 시작이 놓일 위치다.
+
+    background가 거짓이면 표 자체 배경은 부르는 쪽이 이미 칠한 것으로 보고 건너뛴다.
+    """
     start, end = clip if clip is not None else (0.0, grid.height)
+    if background:
+        draw_table_background(grid.table, (x, y, grid.width, min(end, grid.height) - start), page, styles)
     boxes = []
     for cell in grid.cells:
         cx, cy, width, height = grid.cell_box(cell)
@@ -539,6 +545,18 @@ def fill_items(fill: BorderFill, box: tuple[float, float, float, float], styles:
     if fill.image and styles.image_source is not None:
         items.extend(image_fill(fill.image, box, styles.image_source))
     return items
+
+
+def draw_table_background(table: Table, box: tuple[float, float, float, float], page: Page, styles: DocStyles) -> None:
+    """표 자체 BorderFill(표 > 배경)의 채우기를 표 상자(왼쪽, 위, 폭, 높이)에 칸 배경보다 먼저 칠한다.
+
+    편람 293쪽 정답 PDF: 표 BorderFill 717(그림 채우기)의 1677×591 그림이 표 상자 전체에 칸 채우기보다 먼저
+    찍히고, 채우기 없는 칸에서 그 그림의 회색 띠·점선이 보인다(rhwp table_layout.rs 「표 배경 렌더링」과 같음).
+    """
+    fill = styles.border_fill(table.border_fill_id or 0)
+    if fill is None or box[3] <= 0 or not paint_visible(page, box, OBJECT_PAINT_GROW):
+        return
+    page.items.extend(fill_items(fill, box, styles))
 
 
 def draw_cell_boxes(boxes: list[tuple[Cell, float, float, float, float]], page: Page, styles: DocStyles) -> list[Line]:

@@ -51,6 +51,7 @@ from .tables import (
     cell_margins,
     cell_pieces,
     draw_cell_boxes,
+    draw_table_background,
     draw_table_frame,
     header_row_count,
     solve_rows,
@@ -1182,6 +1183,10 @@ class TableFlowMixin:
                     cell = grid.cells[box.cell]
                     cx, _, width, _ = grid.cell_box(cell)
                     frames.append((cell, x + cx, origin + box.y, width, box.height))
+                if frames:
+                    top = min(frame[2] for frame in frames)
+                    bottom = max(frame[2] + frame[4] for frame in frames)
+                    draw_table_background(grid.table, (x, top, grid.width, bottom - top), page.page, self.styles)
                 frame = draw_cell_boxes(frames, page.page, self.styles)
                 if outermost:
                     # 셀 안 각주는 그 쪽 표 조각 아래에 자리가 있어야 그 쪽에 놓인다(정책연구 78쪽 각주 107~110).
@@ -1296,7 +1301,12 @@ class TableFlowMixin:
             if (top < end or starting and top == end) and end < top + height:
                 continued.append(cell)
         kept = [cell for cell in grid.cells if not any(cell is other for other in continued)]
-        lines = draw_table_frame(dataclasses.replace(grid, cells=kept), left, origin, state.page, self.styles, clip)
+        draw_table_background(
+            grid.table, (left, origin, grid.width, max(end, visible) - start), state.page, self.styles
+        )
+        lines = draw_table_frame(
+            dataclasses.replace(grid, cells=kept), left, origin, state.page, self.styles, clip, background=False
+        )
         # 이어지는 셀은 제 높이가 짧아도 쪽 바닥까지 늘여 그린다(issue4514 9쪽 빈 칸에서 넓힌 규칙, 검증 안 됨).
         stretched = [y if y <= end else max(y, visible) for y in grid.row_y]
         return lines + draw_table_frame(
@@ -1306,6 +1316,7 @@ class TableFlowMixin:
             state.page,
             self.styles,
             (start, visible),
+            background=False,
         )
 
     def draw_nested_across(
