@@ -112,6 +112,8 @@ class HwpContainer:
         raw = self.raw_streams[name]
         if self.header.password_protected:
             raw = crypto.decrypt_stream(raw, self.password or "", self.header.encrypt_version)
+            # HwpApp FUN_10256b90: 암호가 있으면 항목의 압축 값과 상관없이 압축 모드(EnterCompressMode)로 연다.
+            return inflate(raw)
         if self.header.compressed if compressed is None else compressed:
             return inflate(raw)
         return raw

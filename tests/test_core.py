@@ -73,6 +73,12 @@ def test_password_document_decrypts_with_right_password_only():
         HwpContainer.open(PASSWORD_DOC)
 
 
+@pytest.mark.skipif(not PASSWORD_DOC.exists(), reason="password sample not available")
+def test_password_document_bin_data_is_inflated_even_when_marked_uncompressed():
+    container = HwpDocument.open(PASSWORD_DOC, "123456").container
+    assert container.bin_data("BinData/BIN0001.gif", False).startswith(b"GIF89a")
+
+
 @needs_corpus
 def test_legacy_des_password_document_decrypts_to_typed_records():
     document = HwpDocument.open(LEGACY_PASSWORD_DOC, "12345")
