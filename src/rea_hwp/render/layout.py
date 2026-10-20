@@ -1687,7 +1687,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             return None
         first_shape = view.shape_ids[0] if view.shape_ids else 0
         shape = self.styles.char_shapes[heads.head_shape_id(spec, first_shape, self.styles)]
-        if spec.bullet and not spec.text.isascii():
+        if spec.bullet and not spec.text.isascii() and spec.text != "\u00ad":
             # 한/글은 ASCII가 아닌 글머리표 폭을 글자 크기 1em으로 계산한다(rhwp list_marker_geometry_for).
             glyph_width = float(shape.base_size * len(spec.text))
         else:

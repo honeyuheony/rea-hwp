@@ -77,7 +77,9 @@ def _glyph(glyph: Glyph) -> str:
         style.append(f'fill="{glyph.color}"')
     attrs = " ".join(style)
     family = quoteattr(display_font(glyph.char, glyph.font_family))
-    text = escape(display_text(glyph.char))
+    # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
+    # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
+    text = escape(display_text(glyph.char).replace("\u00ad", "-"))
     if abs(glyph.scale_x - 1.0) > 0.001 or glyph.rotation:
         # 장평은 가로로만 줄이거나 늘린다. 원점을 기준으로 변환해 x 위치가 흔들리지 않게 한다.
         rotate = f" rotate({-glyph.rotation:g})" if glyph.rotation else ""
