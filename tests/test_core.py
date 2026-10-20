@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import struct
-from pathlib import Path
 
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp import crypto
 from rea_hwp.cli import main as cli_main
@@ -13,7 +13,7 @@ from rea_hwp.record import Record, RecordStream, build_tree, parse_records
 from rea_hwp.render.html import text_layer
 from rea_hwp.render.scene import TextLine
 
-CORPUS = Path.home() / "tools" / "hwp-corpus"
+CORPUS = CORPUS_ROOT
 SIMPLE_DOC = CORPUS / "oss" / "rhwp" / "basic__NewYear_s_Day.hwp"
 DISTRIBUTED_DOC = next(iter(sorted((CORPUS / "oss").rglob("*distribution*.hwp"))), None) if CORPUS.exists() else None
 PASSWORD_DOC = CORPUS / "oss" / "rhwp" / "hwp3-sample16-hwp5-2024-password-123456.hwp"

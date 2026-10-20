@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import struct
-from pathlib import Path
 
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import layout_document
@@ -70,14 +70,7 @@ def test_top_aligned_text_moves_baseline_below_reference_point():
     assert drawing.texts[0].y > 400
 
 
-CHART_DOC = (
-    Path.home()
-    / "tools"
-    / "hwp-corpus"
-    / "oss"
-    / "rhwp"
-    / ("task2070__1130000-201900011_D0150004-1-002_2017년기준 시장구조조사.hwp")
-)
+CHART_DOC = CORPUS_ROOT / "oss" / "rhwp" / ("task2070__1130000-201900011_D0150004-1-002_2017년기준 시장구조조사.hwp")
 
 
 @pytest.mark.skipif(not CHART_DOC.exists(), reason="corpus not available")
@@ -116,7 +109,7 @@ def test_escapement_turns_text_line_and_moves_top_alignment_sideways():
     assert text.x > 300
 
 
-OLE_DOC = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp" / "issue2559__1341000_research_report_footnotes.hwp"
+OLE_DOC = CORPUS_ROOT / "oss" / "rhwp" / "issue2559__1341000_research_report_footnotes.hwp"
 
 
 @pytest.mark.skipif(not OLE_DOC.exists(), reason="corpus not available")
@@ -142,7 +135,7 @@ def test_ole_slanted_label_glyphs_follow_hancom_pdf_positions():
         assert any(c == char and abs(gx - x) <= 1 and abs(gy - y) <= 1 for c, gx, gy in glyphs)
 
 
-CHART_ONLY_DOC = Path.home() / "tools" / "hwp-corpus" / "oss" / "hwplib" / "sample_hwp__basic__차트.hwp"
+CHART_ONLY_DOC = CORPUS_ROOT / "oss" / "hwplib" / "sample_hwp__basic__차트.hwp"
 
 
 @pytest.mark.skipif(not CHART_ONLY_DOC.exists(), reason="corpus not available")

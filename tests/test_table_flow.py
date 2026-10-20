@@ -1,7 +1,7 @@
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from corpus_paths import CORPUS_ROOT, USER_CORPUS_ROOT
 
 from rea_hwp import tags
 from rea_hwp.document import HwpDocument
@@ -88,14 +88,7 @@ def test_inline_table_is_never_split():
     assert rooms(12000.0) == (0.0, BIG_ROOM)
 
 
-SOFTWARE_DOC = (
-    Path.home()
-    / "tools"
-    / "hwp-corpus"
-    / "oss"
-    / "hwpjs"
-    / "legacy__rust__crates__hwp-core__tests__fixtures__software.hwp"
-)
+SOFTWARE_DOC = CORPUS_ROOT / "oss" / "hwpjs" / "legacy__rust__crates__hwp-core__tests__fixtures__software.hwp"
 
 
 @pytest.mark.skipif(not SOFTWARE_DOC.exists(), reason="corpus not available")
@@ -109,9 +102,7 @@ def test_inline_table_that_does_not_fit_moves_whole_to_next_page():
     assert second.startswith("SW내부설계")
 
 
-NESTED_SQUARE_DOC = (
-    Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp" / "issue5787__nested_square_table_horz_offset.hwp"
-)
+NESTED_SQUARE_DOC = CORPUS_ROOT / "oss" / "rhwp" / "issue5787__nested_square_table_horz_offset.hwp"
 
 
 @pytest.mark.skipif(not NESTED_SQUARE_DOC.exists(), reason="corpus not available")
@@ -134,7 +125,7 @@ def _contains(node, target) -> bool:
     return any(child is target or _contains(child, target) for child in node.children)
 
 
-RHWP = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp"
+RHWP = CORPUS_ROOT / "oss" / "rhwp"
 
 
 def _baseline_of(page, text: str) -> float:
@@ -221,7 +212,7 @@ def test_square_float_overflowing_last_column_moves_to_next_page_top():
     assert picture_tops(pages[155]) == pytest.approx([67.5], abs=0.5)
 
 
-USER_FORM = Path.home() / "tools" / "hwp-corpus-user" / "user-report-sensitive.hwp"
+USER_FORM = USER_CORPUS_ROOT / "user-report-sensitive.hwp"
 
 
 @pytest.mark.skipif(not USER_FORM.exists(), reason="user sample not available")
@@ -233,7 +224,7 @@ def test_distributed_line_with_single_inline_table_stays_left():
     assert first.x / 100 == pytest.approx(61.44, abs=0.3)
 
 
-USER_PARSING = Path.home() / "tools" / "hwp-corpus-user" / "user-parsing-test.hwp"
+USER_PARSING = USER_CORPUS_ROOT / "user-parsing-test.hwp"
 
 
 @pytest.mark.skipif(not USER_PARSING.exists(), reason="user sample not available")

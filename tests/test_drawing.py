@@ -1,9 +1,9 @@
 import base64
 import re
 import struct
-from pathlib import Path
 
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.shapes import ShapeLine
@@ -11,7 +11,7 @@ from rea_hwp.render.layout import layout_document
 from rea_hwp.render.objects import _curved_route
 from rea_hwp.render.scene import Glyph, Image
 
-RHWP = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp"
+RHWP = CORPUS_ROOT / "oss" / "rhwp"
 VERTICAL_DOC = RHWP / "hwpx__hancom-hwp__tbox-v-flow-01.hwp"
 MANUAL_DOC = RHWP / "2025 행정업무운영 편람(최종).hwp"
 GROUP_DOC = RHWP / "group-drawing-02.hwp"
@@ -76,7 +76,7 @@ def test_text_box_line_below_inner_height_is_not_drawn():
     assert sum(1 for item in page.items if isinstance(item, Glyph) and item.char == "d") == 3
 
 
-PUBLIC = Path.home() / "tools" / "hwp-corpus" / "public"
+PUBLIC = CORPUS_ROOT / "public"
 
 
 @pytest.mark.skipif(not (PUBLIC / "kr_156369052_189351321.hwp").exists(), reason="corpus not available")

@@ -1,7 +1,7 @@
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.paragraph import LineSeg
@@ -18,7 +18,7 @@ from rea_hwp.render.tables import (
     stored_pieces,
 )
 
-CORPUS = Path("/home/kwh1019/tools/hwp-corpus/oss")
+CORPUS = CORPUS_ROOT / "oss"
 FULL_LINE = LINE_FIRST_SEGMENT | 1 << 18
 
 

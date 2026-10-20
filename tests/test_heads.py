@@ -1,6 +1,5 @@
-from pathlib import Path
-
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.docinfo import CharShape
@@ -8,9 +7,7 @@ from rea_hwp.render.heads import HeadSpec, NumberingCounter, head_geometry
 from rea_hwp.render.layout import layout_document
 
 SPEC_DOC = (
-    Path.home()
-    / "tools"
-    / "hwp-corpus"
+    CORPUS_ROOT
     / "oss"
     / "hwp-rs"
     / "crates__hwp__tests__integration__hancom__files__한글문서파일형식_5.0_revision1.3.hwp"

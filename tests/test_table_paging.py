@@ -1,5 +1,6 @@
-from pathlib import Path
 from types import SimpleNamespace
+
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.paragraph import LineSeg
@@ -20,7 +21,7 @@ from rea_hwp.render.table_paging import (
 )
 from rea_hwp.render.tables import LINE_FIRST_SEGMENT
 
-CORPUS = Path("/home/kwh1019/tools/hwp-corpus/oss")
+CORPUS = CORPUS_ROOT / "oss"
 BIG = 10**7
 
 

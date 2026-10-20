@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import struct
-from pathlib import Path
 
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.models import docinfo
 from rea_hwp.models.base import RecordModel
 
-CORPUS_FILE = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp" / "2010-01-06.hwp"
+CORPUS_FILE = CORPUS_ROOT / "oss" / "rhwp" / "2010-01-06.hwp"
 
 
 def wstr(text: str) -> bytes:

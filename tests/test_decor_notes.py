@@ -1,6 +1,5 @@
-from pathlib import Path
-
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import layout_document
@@ -8,7 +7,7 @@ from rea_hwp.render.notes import divider_length
 from rea_hwp.render.scene import Image, Line
 from rea_hwp.render.svg import page_glyph_table
 
-CORPUS = Path("/home/kwh1019/tools/hwp-corpus/oss")
+CORPUS = CORPUS_ROOT / "oss"
 
 
 def corpus_pages(name: str):
@@ -132,7 +131,7 @@ def test_footnote_waits_for_room_below_own_paragraph_table():
     assert line_at(pages[94], "147)")[1] == pytest.approx(766.44, abs=0.5)
 
 
-PRESS_DOC = Path("/home/kwh1019/tools/hwp-corpus/public/kr_156489775_196613193.hwp")
+PRESS_DOC = CORPUS_ROOT / "public" / "kr_156489775_196613193.hwp"
 
 
 @pytest.mark.skipif(not PRESS_DOC.exists(), reason="corpus not available")

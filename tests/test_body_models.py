@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import struct
-from pathlib import Path
 
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp import models, tags
 from rea_hwp.document import HwpDocument
@@ -33,7 +33,7 @@ from rea_hwp.record import Record
 
 models.load_all()
 
-CORPUS = Path.home() / "tools" / "hwp-corpus"
+CORPUS = CORPUS_ROOT
 TABLE_FIXTURE = CORPUS / "oss" / "pyhwp" / "tests__hwp5_tests__fixtures__table.hwp"
 
 

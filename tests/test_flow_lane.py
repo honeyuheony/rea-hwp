@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp import tags
 from rea_hwp.document import HwpDocument
@@ -17,7 +18,7 @@ from rea_hwp.render.equation import measure_legacy
 from rea_hwp.render.layout import DocumentLayout, layout_document
 from rea_hwp.render.svg import display_text, page_glyph_table, page_to_svg
 
-CORPUS = Path.home() / "tools" / "hwp-corpus"
+CORPUS = CORPUS_ROOT
 needs_corpus = pytest.mark.skipif(not CORPUS.exists(), reason="corpus not available")
 
 

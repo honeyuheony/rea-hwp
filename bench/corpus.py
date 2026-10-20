@@ -1,4 +1,4 @@
-"""~/tools/hwp-corpus/manifest.csv에서 HWP 5.0 문서 목록과 짝 PDF, 암호를 읽는다."""
+"""REA_HWP_CORPUS 폴더의 manifest.csv에서 HWP 5.0 문서 목록과 짝 PDF, 암호를 읽는다."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-CORPUS_ROOT = Path(os.environ.get("REA_HWP_CORPUS", Path.home() / "tools" / "hwp-corpus"))
+if not os.environ.get("REA_HWP_CORPUS"):
+    raise SystemExit("REA_HWP_CORPUS에 말뭉치 폴더(manifest.csv가 있는 곳)를 지정해야 한다")
+CORPUS_ROOT = Path(os.environ["REA_HWP_CORPUS"])
 
 
 @dataclass(frozen=True)

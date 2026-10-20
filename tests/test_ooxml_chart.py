@@ -4,11 +4,12 @@ import math
 from pathlib import Path
 
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import layout_document
 
-CORPUS = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp"
+CORPUS = CORPUS_ROOT / "oss" / "rhwp"
 SLANTED_DOC = CORPUS / "issue5447__3차원묶은세로막대형-행추가.hwp"
 UPRIGHT_DOC = CORPUS / "chart__세로막대형__3차원묶은세로막대형.hwp"
 REPO_ROOT = Path(__file__).resolve().parent.parent

@@ -17,9 +17,25 @@ from pathlib import Path
 from corpus import CORPUS_ROOT, load_corpus
 from plain_copy import plain_streams, write_cfb
 
-#: 한글 COM은 사용자 Temp 아래 파일은 바로 열고, C:\Users\Public 아래 파일은 숨은 보안 창에서 멈췄다(2026-10-17).
-WINDOWS_WORK = Path("/mnt/c/Users/kuhys/AppData/Local/Temp/rea-hwp")
-WINDOWS_WORK_WIN = r"C:\Users\kuhys\AppData\Local\Temp\rea-hwp"
+
+def _windows_work() -> tuple[Path, str]:
+    """한글 COM 작업 폴더의 WSL 경로와 Windows 경로.
+
+    한글 COM은 사용자 Temp 아래 파일은 바로 열고, C:\\Users\\Public 아래 파일은 숨은 보안 창에서 멈췄다(2026-10-17).
+    그래서 REA_HWP_WINDOWS_WORK(Windows 경로)가 없으면 Windows 사용자 %TEMP% 아래 rea-hwp를 쓴다.
+    """
+    work_win = os.environ.get("REA_HWP_WINDOWS_WORK")
+    if not work_win:
+        # 리눅스 폴더에서 띄우면 cmd.exe가 UNC 경고를 시스템 코드 페이지로 stderr에 쓰므로 버린다.
+        temp = subprocess.run(
+            ["cmd.exe", "/c", "echo %TEMP%"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True
+        ).stdout
+        work_win = temp.strip() + "\\rea-hwp"
+    work = subprocess.run(["wslpath", "-u", work_win], capture_output=True, text=True, check=True).stdout.strip()
+    return Path(work), work_win
+
+
+WINDOWS_WORK, WINDOWS_WORK_WIN = _windows_work()
 OUTPUT_ROOT = CORPUS_ROOT / "ref2022"
 #: 한 문서 변환 제한 시간(초). 큰 공문서도 30초 안에 끝나는 것을 보고 여유를 둔 값이다(검증 안 됨: 일부 표본 기준).
 TIMEOUT_SECONDS = 180

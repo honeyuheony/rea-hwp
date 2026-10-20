@@ -1,13 +1,12 @@
-from pathlib import Path
-
 import pytest
+from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.forms import caption_text, form_properties
 from rea_hwp.render.layout import layout_document
 from rea_hwp.render.svg import page_glyph_table
 
-CORPUS = Path("/home/kwh1019/tools/hwp-corpus/oss")
+CORPUS = CORPUS_ROOT / "oss"
 
 
 def glyph(page, char: str, below: float = 0.0) -> tuple[float, float]:
