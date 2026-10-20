@@ -7,6 +7,7 @@ import dataclasses
 import itertools
 import re
 import unicodedata
+from dataclasses import dataclass
 
 from .. import tags
 from ..document import HwpDocument, Node
@@ -26,9 +27,10 @@ from ..models.controls import (
     TextWrap,
     VertRelTo,
 )
-from ..models.docinfo import CharShape
+from ..models.docinfo import BorderFill, CharShape, ParaShape
 from ..models.paragraph import PARA_BREAK, TAB, ControlChar, LineSeg, ParaLineSeg
 from . import heads, metrics, reflow
+from .borders import border_lines
 from .common import (
     CENTER,
     DEVICE_UNIT,
@@ -80,6 +82,79 @@ DISTRIBUTED_COLUMNS = 1
 LEADER_DOT = 3
 #: 표 나머지 아래 첫 줄을 「바로 아래」로 보는 거리(HU). 문단 간격 여유로 잡은 값이다(검증 안 됨).
 SPILL_FOLLOW_GAP = 600
+
+
+def _border_look(fill: BorderFill) -> tuple:
+    return (fill.left, fill.right, fill.top, fill.bottom, colorref(fill.background_color))
+
+
+@dataclass
+class ParagraphBorderRun:
+    """한 단·셀 조각 안에서 이어 그리는 문단 테두리 묶음. 항목은 처음에 넣어 두고 좌표만 고친다."""
+
+    page: Page
+    fill: BorderFill
+    x: float
+    width: float
+    top: float
+    bottom: float
+    fill_id: int
+    node: object
+    connect: bool
+    background: Rect | None
+    left: list[Line]
+    right: list[Line]
+    top_lines: list[Line]
+    bottom_lines: list[Line]
+
+    @classmethod
+    def start(
+        cls, page: Page, fill: BorderFill, x: float, width: float, top: float, opened: bool
+    ) -> ParagraphBorderRun:
+        color = colorref(fill.background_color)
+        background = Rect(x, top, width, 0.0, color) if color else None
+        right = x + width
+        run = cls(
+            page,
+            fill,
+            x,
+            width,
+            top,
+            top,
+            0,
+            None,
+            False,
+            background,
+            border_lines(fill.left, x, top, x, top),
+            border_lines(fill.right, right, top, right, top),
+            border_lines(fill.top, x, top, right, top) if opened else [],
+            border_lines(fill.bottom, x, top, right, top),
+        )
+        page.items.extend(
+            [*([background] if background else []), *run.left, *run.right, *run.top_lines, *run.bottom_lines]
+        )
+        return run
+
+    def extend(self, node: object, shape: ParaShape | None, bottom: float, closed: bool) -> None:
+        """아래 끝을 bottom으로 옮긴다. closed가 아니면 아래 변을 숨긴다(다음 줄·조각으로 이어짐)."""
+        self.node, self.bottom = node, bottom
+        if shape is not None:
+            self.fill_id = shape.border_fill_id
+            # 속성1 bit 28: 문단 테두리 연결(명세 표44).
+            self.connect = bool(shape.attr1 >> 28 & 1)
+        right = self.x + self.width
+        if self.background is not None:
+            self.background.height = bottom - self.top
+        for lines, fresh in (
+            (self.left, border_lines(self.fill.left, self.x, self.top, self.x, bottom)),
+            (self.right, border_lines(self.fill.right, right, self.top, right, bottom)),
+            (self.bottom_lines, border_lines(self.fill.bottom, self.x, bottom, right, bottom)),
+        ):
+            for line, new in zip(lines, fresh, strict=True):
+                line.y1, line.y2, line.width = new.y1, new.y2, new.width
+        if not closed:
+            for line in self.bottom_lines:
+                line.width = 0.0
 
 
 class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
@@ -1306,7 +1381,44 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         height = segment.line_height
         box = (left, line_top - 5 * height, area.x + area.width - left, 10 * height)
         with self.painting(state.page, box, LINE_PAINT_GROW, is_line=True):
+            self.extend_paragraph_border(state, view, index, area)
             self.draw_line(state, view, index, area)
+
+    def extend_paragraph_border(self, state: PageState, view: ParagraphView, index: int, area: Area) -> None:
+        """문단 테두리·배경(border_fill_id)을 줄마다 늘린다. 상자 항목은 묶음 첫 줄에서 글자보다 먼저 넣는다."""
+        runs: dict = self.__dict__.setdefault("paragraph_border_runs", {})
+        context = (area.width, self.__dict__.get("in_body", False))
+        run: ParagraphBorderRun | None = runs.get(context)
+        shape = view.para_shape
+        fill = self.styles.border_fill(shape.border_fill_id)
+        sides = (fill.left, fill.right, fill.top, fill.bottom) if fill is not None else ()
+        stroked = any(side is not None and side.line_type for side in sides)
+        if fill is None or not (stroked or colorref(fill.background_color)):
+            runs.pop(context, None)
+            return
+        segment = view.segments[index]
+        line_top = area.y + segment.vertical_pos
+        last_line = index == len(view.segments) - 1
+        # 선이 있거나 셀 안이면 마지막 줄 간격까지, 배경만 있는 본문 문단은 줄 아래까지(rhwp paragraph_layout.rs).
+        with_spacing = stroked or not self.__dict__.get("in_body", False)
+        bottom = line_top + segment.line_height + (segment.line_spacing if with_spacing else 0)
+        if last_line:
+            bottom += shape.border_spacing[3]
+        # 번호가 달라도 선·배경이 같은 BorderFill이면 한 상자로 잇는다(21_언어 1쪽 PDF: 빈 문단 7번과 읽기 글 4번).
+        same_look = run is not None and (
+            run.fill_id == shape.border_fill_id or _border_look(run.fill) == _border_look(fill)
+        )
+        chained = run is not None and same_look and (run.node is view.node or run.connect)
+        if chained and run.page is state.page and run.x == area.x and line_top >= run.top:
+            run.extend(view.node, shape, bottom, last_line)
+            return
+        if chained:
+            # 쪽·단이 바뀌어 이어지는 묶음: 앞 조각은 아래 변을, 새 조각은 위 변과 위 간격을 뺀다(exam_kor 16쪽 PDF).
+            run.extend(run.node, None, run.bottom, False)
+        opened = index == 0 and not chained
+        top = line_top - (shape.space_before // 2 + shape.border_spacing[2] if opened else 0)
+        runs[context] = ParagraphBorderRun.start(state.page, fill, area.x, area.width, top, opened)
+        runs[context].extend(view.node, shape, bottom, last_line)
 
     def draw_line(self, state: PageState, view: ParagraphView, index: int, area: Area) -> None:
         segment = view.segments[index]
