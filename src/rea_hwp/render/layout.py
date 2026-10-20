@@ -1352,7 +1352,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         distribute = alignment == DISTRIBUTE
         extras = metrics.justify_offsets(widths[:interior_end], kinds, slack, stretch, distribute)
         extras += [0.0] * trailing_count
-        centered = alignment == CENTER or (distribute and interior_end <= 1)
+        # 배분 정렬도 항목이 하나면 나눌 틈이 없어 왼쪽에 둔다(user-report-sensitive PDF: 글자처럼 취급한 표 한 개 줄).
+        centered = alignment == CENTER
         offset = max(0.0, slack) / 2 if centered else (max(0.0, slack) if alignment == RIGHT else 0.0)
         x = x_start + offset
         line_top = area.y + segment.vertical_pos

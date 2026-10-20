@@ -6,7 +6,7 @@ import pytest
 from rea_hwp import tags
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import DocumentLayout, layout_document
-from rea_hwp.render.scene import Image
+from rea_hwp.render.scene import Glyph, Image
 from rea_hwp.render.table_flow import (
     BIG_ROOM,
     CellLine,
@@ -219,3 +219,15 @@ def test_square_float_overflowing_last_column_moves_to_next_page_top():
     # 한글 2022 PDF: 155쪽 문단의 그림 64(어울림, 본문 영역 제한)는 156쪽 본문 위 + 바깥 위 여백 67.5pt에 놓인다.
     assert picture_tops(pages[154]) == []
     assert picture_tops(pages[155]) == pytest.approx([67.5], abs=0.5)
+
+
+USER_FORM = Path.home() / "tools" / "hwp-corpus-user" / "user-report-sensitive.hwp"
+
+
+@pytest.mark.skipif(not USER_FORM.exists(), reason="user sample not available")
+def test_distributed_line_with_single_inline_table_stays_left():
+    page = layout_document(HwpDocument.open(USER_FORM))[0]
+    glyphs = (item for item in page.items if isinstance(item, Glyph) and abs(item.y / 100 - 151.7) < 1)
+    first = next(glyph for glyph in glyphs if glyph.char == "보")
+    # 한글 2022 PDF: 배분 정렬 문단의 글자처럼 취급한 표 첫 칸 「보고일시」 61.44pt(가운데로 두면 69.48pt).
+    assert first.x / 100 == pytest.approx(61.44, abs=0.3)
