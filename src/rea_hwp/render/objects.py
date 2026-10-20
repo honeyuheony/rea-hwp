@@ -1279,6 +1279,16 @@ def _textart_fill(tail: bytes) -> tuple[str, str]:
 #: 선 종류(선 속성 하위 6비트, 0 없음·1 실선) → 점선 무늬(선 굵기 배수).
 #: 검증 안 됨: 명세 선 종류 이름(파선·점선·일점쇄선·이점쇄선·긴 파선)만 보고 고른 무늬다(채점과 무관).
 _DASH_PATTERNS = {2: (4, 2), 3: (1, 1), 4: (4, 2, 1, 2), 5: (4, 2, 1, 2, 1, 2), 6: (8, 2)}
+#: 여러 겹 선 종류별 (띠 가운데, 띠 폭)을 선 굵기 비율로. 가운데는 진행 방향 왼쪽(SVG 좌표에서 (dy, −dx))이 +다.
+#: 정답 PDF 실측(쪽 맞춤 비율 되돌림): 8 이중선 143E433F 1쪽 상자 2.83pt → 0.95·0.98·0.94pt(각 1/3),
+#: 9 가는-굵은 kr_156489762 1쪽 선 4.25pt → 왼쪽부터 가는 0.84·틈 1.26·굵은 2.10pt,
+#: 10 굵은-가는 3-09월_교육_통합_2022 4쪽 상자 4.25pt → 왼쪽(바깥)부터 굵은 2.09·틈 1.26·가는 0.84pt.
+#: 11 삼중선은 실물이 없어 단일선으로 둔다.
+_COMPOUND_BANDS = {
+    8: ((1 / 3, 1 / 3), (-1 / 3, 1 / 3)),
+    9: ((0.4, 0.2), (-0.25, 0.5)),
+    10: ((0.25, 0.5), (-0.4, 0.2)),
+}
 #: 타원 사분원을 3차 베지어로 그릴 때 제어점 거리 비율.
 _ELLIPSE_KAPPA = 0.5522847498
 #: 화살표 단위 길이의 최소값(HU). HncBaseDraw FUN_100435b0: 단위 = max(0x11b, 선 굵기).
@@ -1333,9 +1343,15 @@ def _shape_svg(component: Node, width: float, height: float) -> str | None:
     color = _colorref(model.line_color)
     has_arrows = bool(line_kind and line_width > 0 and not isinstance(geometry, ShapeEllipse))
     commands, arrows = [], ""
+    polylines: list[tuple[list[tuple[float, float]], bool]] | None = [] if line_kind in _COMPOUND_BANDS else None
     for start, segments, closed in subpaths:
         first = place(*start)
         placed = [tuple(place(*p) for p in segment) for segment in segments]
+        if polylines is not None:
+            if all(len(segment) == 1 for segment in placed):
+                polylines.append(([first, *(segment[0] for segment in placed)], closed))
+            else:
+                polylines = None
         if has_arrows and not closed:
             before_end = placed[-1][-2] if len(placed[-1]) == 3 else (placed[-2][-1] if len(placed) > 1 else first)
             for tip, before, shape_bit, size_bit in (
@@ -1361,15 +1377,56 @@ def _shape_svg(component: Node, width: float, height: float) -> str | None:
         if closed:
             commands.append("Z")
     stroke = ' stroke="none"'
-    if line_kind and line_width > 0:
+    bands = ""
+    if line_kind and line_width > 0 and polylines:
+        # 여러 겹 선: 중심선을 띠 가운데만큼 평행 이동한 경로를 띠 폭으로 긋는다.
+        for center, share in _COMPOUND_BANDS[line_kind]:
+            path = "".join(_offset_path(points, closed, center * line_width) for points, closed in polylines)
+            bands += (
+                f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{share * line_width:g}" '
+                'stroke-linejoin="miter" stroke-miterlimit="10"/>'
+            )
+    elif line_kind and line_width > 0:
         stroke = f' stroke="{color}" stroke-width="{line_width}"'
         if line_kind in _DASH_PATTERNS:
             stroke += f' stroke-dasharray="{",".join(str(n * line_width) for n in _DASH_PATTERNS[line_kind])}"'
     pad = _shape_pad(model, geometry)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{-pad} {-pad} {width + 2 * pad:g} {height + 2 * pad:g}" '
-        f'preserveAspectRatio="none">{definition}<path d="{"".join(commands)}" fill="{fill}"{stroke}/>{arrows}</svg>'
+        f'preserveAspectRatio="none">{definition}<path d="{"".join(commands)}" fill="{fill}"{stroke}/>'
+        f"{bands}{arrows}</svg>"
     )
+
+
+def _offset_path(points: list[tuple[float, float]], closed: bool, distance: float) -> str:
+    """꺾은선을 진행 방향 왼쪽((dy, −dx) 쪽)으로 distance만큼 평행 이동한 SVG 경로. 꼭짓점은 이웃 변의 교점이다."""
+    if closed and len(points) > 2 and points[0] == points[-1]:
+        points = points[:-1]
+    count = len(points)
+    lines = []
+    for index in range(count if closed else count - 1):
+        (x1, y1), (x2, y2) = points[index], points[(index + 1) % count]
+        length = math.hypot(x2 - x1, y2 - y1) or 1.0
+        nx, ny = (y2 - y1) / length * distance, -(x2 - x1) / length * distance
+        lines.append(((x1 + nx, y1 + ny), (x2 + nx, y2 + ny)))
+    if not lines:
+        return ""
+
+    def corner(before: tuple, after: tuple) -> tuple[float, float]:
+        (ax, ay), (bx, by) = before
+        (cx, cy), (dx, dy) = after
+        denominator = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx)
+        if abs(denominator) < 1e-9:
+            return bx, by
+        t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / denominator
+        return ax + t * (bx - ax), ay + t * (by - ay)
+
+    if closed:
+        moved = [corner(lines[index - 1], lines[index]) for index in range(len(lines))]
+    else:
+        moved = [lines[0][0], *(corner(lines[i - 1], lines[i]) for i in range(1, len(lines))), lines[-1][1]]
+    path = "M" + "L".join(f"{x:.1f} {y:.1f}" for x, y in moved)
+    return path + ("Z" if closed else "")
 
 
 def _shape_pad(model: object, geometry: object = None) -> float:
