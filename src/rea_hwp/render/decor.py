@@ -42,6 +42,9 @@ HEADER_ID = tags.HEADER_CTRL.to_bytes(4, "little")
 SECTION_FIRST_PAGE_HIDE = 0x3F
 #: 구역 정의 속성 bit 29·31·30: 양 쪽·홀수 쪽·짝수 쪽 바탕쪽이 있다. 바탕쪽 목록은 이 순서로 저장된다.
 BOTH, ODD, EVEN = 1 << 29, 1 << 31, 1 << 30
+#: 구역 끝 확장 바탕쪽 목록 머리 18바이트 값: 3은 구역 마지막 쪽, 4 이상은 구역 안 (값 − 3)번째 쪽. 한글 2022 HWPX
+#: 저장본 type·pageNumber와 대조(exam_kor·exam_science·exam_math). HwpApp 종류 표 0x107414e0: 3 LAST, 4 OPTIONAL.
+LAST_PAGE_MASTER = 3
 
 
 @dataclass
@@ -98,7 +101,7 @@ class DecorMixin:
         recorded = len(self.__dict__.get("paint_units", []))
         saved = self.page_numbers[-1]
         self.page_numbers[-1] = number
-        master = carry.masters.get(odd)
+        master = self.extended_master(state, section) or carry.masters.get(odd)
         if master is not None and not hide & 0x04:
             area = Area(geometry.body_left, geometry.body_top, geometry.body_width)
             with self.painting_list(MASTER_LIST):
@@ -121,6 +124,21 @@ class DecorMixin:
         if state.footnotes:
             self.draw_footnotes(state)
 
+    def extended_master(self, state: PageState, section: SectionState) -> list[Node] | None:
+        """이 쪽에 기본 바탕쪽 대신 쓸 확장 바탕쪽(마지막 쪽·지정 쪽) 문단. 정답 PDF에 기본 바탕쪽 글은 함께 없다."""
+        stream = next((nodes for known, _, nodes in self.decor_sections if known is section), None)
+        if not stream:
+            return None
+        extended = extended_master_pages(stream)
+        if not extended:
+            return None
+        pages = [index for index, owner in enumerate(self.page_sections) if owner is section]
+        position = pages.index(self.states.index(state))
+        numbered = extended.get(LAST_PAGE_MASTER + position + 1)
+        if numbered is not None:
+            return numbered
+        return extended.get(LAST_PAGE_MASTER) if position == len(pages) - 1 else None
+
     def section_def_of(self, state: PageState, section: SectionState) -> tuple[Node | None, bool]:
         """쪽이 속한 구역의 구역 정의와, 그 쪽이 구역 첫 쪽인지. 구역과 쪽을 맞출 수 없으면 None."""
         if not hasattr(self, "decor_sections"):
@@ -132,11 +150,12 @@ class DecorMixin:
             for page_section in self.page_sections:
                 if not any(page_section is known for known in order):
                     order.append(page_section)
+            streams = [stream.nodes for stream in self.document.sections]
             # 쪽이 하나도 없는 구역이 있으면 순서로 짝지을 수 없다.
-            self.decor_sections = list(zip(order, defs, strict=True)) if len(order) == len(defs) else []
+            self.decor_sections = list(zip(order, defs, streams, strict=True)) if len(order) == len(defs) else []
         index = self.states.index(state)
         first_page = index == 0 or self.page_sections[index - 1] is not section
-        found = next((node for known, node in self.decor_sections if known is section), None)
+        found = next((node for known, node, _ in self.decor_sections if known is section), None)
         return found, first_page
 
     def activate_header_footer(self, ctrl: Node) -> None:
@@ -305,3 +324,23 @@ def master_pages(section_def: Node) -> dict[int, list[Node]]:
             groups[-1].append(child)
     # 확장 바탕쪽(마지막 쪽·임의 쪽)이 뒤에 더 붙을 수 있다. 아직 그리지 않는다.
     return dict(zip(kinds, groups, strict=False))
+
+
+def extended_master_pages(nodes: list[Node]) -> dict[int, list[Node]]:
+    """구역 마지막 문단 뒤에 붙은 확장 바탕쪽 문단 목록을 목록 머리 18바이트 값별로 나눈다."""
+    last = next((node for node in reversed(nodes) if node.tag == tags.PARA_HEADER), None)
+    if last is None:
+        return {}
+    groups: dict[int, list[Node]] = {}
+    current: list[Node] | None = None
+    for child in last.children:
+        if child.tag == tags.LIST_HEADER:
+            payload = child.record.payload
+            # 폭·높이가 0인 목록 머리는 바탕쪽이 아니다(rhwp body_text.rs: 메모 목록).
+            if len(payload) < 20 or not any(payload[8:16]):
+                current = None
+                continue
+            current = groups.setdefault(int.from_bytes(payload[18:20], "little"), [])
+        elif child.tag == tags.PARA_HEADER and current is not None:
+            current.append(child)
+    return groups

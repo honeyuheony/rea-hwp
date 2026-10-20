@@ -103,3 +103,14 @@ def test_bottom_aligned_footer_counts_floating_object():
     page = corpus_pages("rhwp/issue7333__aaaaaa.hwp")[1]
     # 한글 2022 PDF 2쪽: 꼬리말 둘째 문단의 쪽 번호 기준선 770.04pt.
     assert page_glyphs(page, "2", 760)[1] == pytest.approx(770.04, abs=0.5)
+
+
+def test_extended_master_pages_replace_base_on_last_and_numbered_pages():
+    pages = corpus_pages("rhwp/exam_kor.hwp")
+    # 한글 2022 PDF 12쪽(1구역 마지막 쪽)·20쪽(3구역 넷째 쪽)의 확장 바탕쪽 「◦답안지의 해당란에」 첫 글자 원점.
+    for index, expected in ((11, (446.5, 1001.9)), (19, (446.5, 1041.1))):
+        assert "◦답안지의해당란에" in "".join(char for char, _, _ in page_glyph_table(pages[index]))
+        x, y = line_at(pages[index], "◦답안지의해당란에")
+        assert (x, y) == (pytest.approx(expected[0], abs=1), pytest.approx(expected[1], abs=1))
+    # 기본 바탕쪽을 덮어 그리지 않고 바꾼다: 「홀수형」이 한 번만 있다.
+    assert "".join(char for char, _, _ in page_glyph_table(pages[11])).count("홀수형") == 1
