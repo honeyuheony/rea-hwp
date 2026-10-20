@@ -156,3 +156,12 @@ def test_float_straddling_stored_cell_piece_starts_next_piece():
     assert len(pages) == 18
     assert _baseline_of(pages[16], "【예시") == pytest.approx(382.20, abs=0.5)
     assert _baseline_of(pages[17], "\U000f02b8보안분야") == pytest.approx(84.48, abs=0.5)
+
+
+@pytest.mark.skipif(not (RHWP / "float-stack-defer.hwp").exists(), reason="corpus not available")
+def test_stacked_table_that_cannot_start_below_anchor_line_moves_whole():
+    pages = layout_document(HwpDocument.open(RHWP / "float-stack-defer.hwp"))
+    # 한글 2022 PDF: 1쪽은 제목과 표 첫째, 2쪽은 표 둘째 전체(머리 「평가항목」 기준선 111.00pt).
+    assert len(pages) == 2
+    assert sum(line.text.replace(" ", "").startswith("평가항목") for line in pages[0].text_lines) == 1
+    assert _baseline_of(pages[1], "평가항목") == pytest.approx(111.00, abs=0.5)

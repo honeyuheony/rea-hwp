@@ -231,7 +231,10 @@ class ObjectsMixin:
             if (self.in_body or self.body_anchor) and model.text_wrap == TextWrap.SQUARE:
                 state.floats.append((state.column, *outer_box(model, left, top, box_width, box_height)))
             if self.in_body and model.text_wrap == TextWrap.TOP_AND_BOTTOM and model.flow_with_text:
-                state, top = self.stacked_top(state, left, box_width, top, box_height + margins[2] + margins[3])
+                line_top = area.y + view.segments[0].vertical_pos if view.segments else None
+                state, top = self.stacked_top(
+                    state, left, box_width, top, box_height + margins[2] + margins[3], line_top
+                )
             elif (self.in_body or self.body_anchor) and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
                 # FUN_102d5900은 본문 영역으로 제한한(attr 0x2000) 문단 기준 개체만 앞 개체 아래로 민다(issue1510 표 C는
                 # 표 B와 겹친다). 종이·쪽 기준이나 제한 없는 개체도 쪽 개체 목록에 들어가 뒤 개체가 피한다.
@@ -498,7 +501,7 @@ class ObjectsMixin:
         return min(bottom, para_top)
 
     def stacked_top(
-        self, state: PageState, left: float, width: float, top: float, height: float
+        self, state: PageState, left: float, width: float, top: float, height: float, line_top: float | None = None
     ) -> tuple[PageState, float]:
         """자리차지 개체끼리는 겹치지 않는다. 앞서 놓인 상자와 겹치면 그 아래로 민다. 돌려주는 값은 (쪽, 위 끝).
 
@@ -508,17 +511,21 @@ class ObjectsMixin:
         """
         registry = self.__dict__.setdefault("_stacked_boxes", {})
         boxes = registry.setdefault((id(state.page), state.column), [])
+        anchor, pushed = state, False
+        earlier = self.__dict__.get("earlier_boxes", set())
         moved = True
         while moved:
             moved = False
             # 겹침은 쪽 개체 목록 전체에서 찾는다(FUN_102d5900 0x102d5a5e): 두 단에 걸친 띠 아래로 다른 단 개체도 밀린다
             # (143E433F 오른쪽 단 차트가 왼쪽 단 문단 0의 종이 기준 띠 아래 283HU)
             page_boxes = [box for (page, _), listed in registry.items() if page == id(state.page) for box in listed]
-            for box_left, box_right, box_top, box_bottom, continued in page_boxes:
+            for box in page_boxes:
+                box_left, box_right, box_top, box_bottom, continued = box
                 if left < box_right and box_left < left + width and top < box_bottom and box_top < top + height:
                     moved = True
                     if continued is None:
-                        top = box_bottom
+                        # 같은 문단 앞 개체에 밀렸는가(earlier_boxes는 이 문단을 놓기 전부터 있던 상자).
+                        top, pushed = box_bottom, id(box) not in earlier
                         continue
                     state, top = continued
                     geometry = state.geometry
@@ -536,6 +543,25 @@ class ObjectsMixin:
                         top = state.geometry.body_top
                     boxes = registry.setdefault((id(state.page), state.column), [])
                     break
+        geometry = state.geometry
+        if (
+            pushed
+            and state is anchor
+            and line_top is not None
+            and top <= line_top < top + height
+            and top + height > geometry.body_top + geometry.body_height
+        ):
+            # 같은 문단 앞 개체에 밀려 쌓인 개체가 이 쪽에 다 들어가지 않는데 기준 문단 저장 줄이 그 자리에 있으면,
+            # 한글은 개체를 여기서 시작하지 않고 다음 쪽 맨 위에 둔 것이다(실측: float-stack-defer 문단 1 표 둘째, 정답
+            # 2쪽 90.86pt부터 통째로). 앞 문단 개체에 밀린 표는 그 자리에서 나뉜다(hwpspec 26·29·33쪽).
+            following = self.states.index(state) + 1
+            if following < len(self.states):
+                state = self.states[following]
+            else:
+                state = self.new_page(state.base_geometry)
+                self.__dict__.setdefault("float_pages", set()).add(id(state))
+            top = state.geometry.body_top
+            boxes = registry.setdefault((id(state.page), state.column), [])
         boxes.append((left, left + width, top, top + height, None))
         return state, top
 
