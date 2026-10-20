@@ -174,3 +174,12 @@ def test_floats_of_paragraph_overflowing_to_new_page_start_at_body_top():
     # 아래 표 「기록자」는 줄 표 아래라 한 번만 있고 그 위치는 머리 표보다 아래다.
     assert _baseline_of(page, "실험제목") == pytest.approx(43.92, abs=0.5)
     assert _baseline_of(page, "기록자") > 700
+
+
+@pytest.mark.skipif(not (RHWP / "exam_math_no.hwp").exists(), reason="corpus not available")
+def test_paragraph_without_line_info_starts_below_its_own_floats():
+    page = layout_document(HwpDocument.open(RHWP / "exam_math_no.hwp"))[8]
+    # 한글 2022 PDF 9쪽: 줄 정보 없는 구역 첫 문단 「23.」은 종이 기준 「5지선다형」 표 아래 239.88pt,
+    # 다음 문단 「①」(저장 줄 15006)은 270.36pt 그대로다.
+    assert _baseline_of(page, "23.") == pytest.approx(239.88, abs=1.0)
+    assert _baseline_of(page, "①") == pytest.approx(270.36, abs=0.5)

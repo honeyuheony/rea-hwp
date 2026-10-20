@@ -435,11 +435,20 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     if index == 0:
                         self.place_anchored_floats(state, geometry, view)
                     state = self.pushed_below_floats(state, geometry, segment)
-                elif view_reflowed and id(state) in self.__dict__.get("float_pages", ()):
+                elif view_reflowed and (
+                    _first_line_page_floats(view) or id(state) in self.__dict__.get("float_pages", ())
+                ):
                     # 줄 정보 없이 다시 짠 문단이 떠 있는 표를 통째로 옮겨 만든 쪽에 놓이면 그 표를 피한다(실측: 80168
                     # 93쪽 옮겨 온 표 아래 「③ 대안의 선택 및 근거」 171.84pt. 피하지 않으면 쪽 맨 위에서 표와 겹친다).
+                    # 다른 쪽에서는 자기 위아래 배치 개체만 먼저 놓고 피한다(실측: exam_math_no s1 p0 「23.」 기준선
+                    # 236pt = 종이 기준 「5지선다형」 표 바깥 상자 아래).
+                    ignored = None
+                    if id(state) not in self.__dict__.get("float_pages", ()):
+                        if index == 0:
+                            self.place_anchored_floats(state, geometry, view, _first_line_page_floats(view))
+                        ignored = self.earlier_boxes
                     before, before_top = state, state.zone_top
-                    state = self.pushed_below_floats(state, geometry, segment)
+                    state = self.pushed_below_floats(state, geometry, segment, ignored)
                     if state is before and state.zone_top != before_top:
                         _, total = self.__dict__.get("reflow_push") or (state, 0.0)
                         self.reflow_push = (state, total + state.zone_top - before_top)
@@ -576,14 +585,20 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         state.continued_by_table = False
         return state
 
-    def place_anchored_floats(self, state: PageState, geometry: SectionGeometry, view: ParagraphView) -> None:
-        """첫 줄에 묶인 위아래 배치 개체를 줄보다 먼저 문단 시작 자리 기준으로 놓는다(줄이 그 상자를 피하도록)."""
+    def place_anchored_floats(
+        self,
+        state: PageState,
+        geometry: SectionGeometry,
+        view: ParagraphView,
+        floats: list[tuple[int, Node]] | None = None,
+    ) -> None:
+        """첫 줄에 묶인 위아래 배치 개체(floats, 기본은 문단 기준인 것)를 줄보다 먼저 문단 시작 자리 기준으로 놓는다."""
         column_x, column_width = geometry.columns[state.column]
         area = Area(state.geometry.body_left + column_x, geometry.body_top + state.zone_top, column_width)
         placed = self.__dict__.setdefault("_preplaced", set())
         self.in_body = True
         try:
-            for char_index, ctrl in _anchored_floats(view):
+            for char_index, ctrl in _anchored_floats(view) if floats is None else floats:
                 self.current_state, self.table_bottom = None, None
                 self.place_control(state, view, ctrl, area.x, area.y, area.y, area, char_index)
                 placed.add(id(ctrl))
@@ -591,13 +606,22 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             self.in_body = False
             self.current_state = None
 
-    def pushed_below_floats(self, state: PageState, geometry: SectionGeometry, segment: LineSeg) -> PageState:
+    def pushed_below_floats(
+        self, state: PageState, geometry: SectionGeometry, segment: LineSeg, ignored: set[int] | None = None
+    ) -> PageState:
         """줄 상자가 이 쪽 위아래 배치 개체 상자와 겹치면 상자 아래로 내린다. 쪽에 들어가지 않으면 다음 쪽 맨 위로 간다.
 
         한글 세로 값 계산 실측(issue1510): 제목 줄 위 = 표 B 바깥 상자 아래 144.86pt, filler08 위 = 표 A 아래 330.86pt.
+        ignored는 피하지 않을 상자의 id다.
         """
         registry = self.__dict__.get("_stacked_boxes", {})
-        boxes = [box for (page, _), listed in registry.items() if page == id(state.page) for box in listed]
+        boxes = [
+            box
+            for (page, _), listed in registry.items()
+            if page == id(state.page)
+            for box in listed
+            if ignored is None or id(box) not in ignored
+        ]
         column_x, column_width = geometry.columns[state.column]
         left = state.geometry.body_left + column_x
         top = geometry.body_top + state.zone_top + segment.vertical_pos
@@ -1776,6 +1800,26 @@ def _anchored_floats(view: ParagraphView, line: int = 0) -> list[tuple[int, Node
         and not ctrl.model.treat_as_char
         and ctrl.model.text_wrap == TextWrap.TOP_AND_BOTTOM
         and ctrl.model.vert_rel_to == VertRelTo.PARA
+    ]
+
+
+def _first_line_page_floats(view: ParagraphView) -> list[tuple[int, Node]]:
+    """첫 줄에 놓인 종이·쪽 기준 위아래 배치 개체들의 (글자 순번, 컨트롤).
+
+    문단 기준 개체는 뒤 문단 시작을 그 아래로 잡는 장치(objects.flow_position)가 이미 있어 빼지 않으면 두 번 민다
+    (80168: 줄 정보 없는 문단의 표를 넣으면 157쪽이 171쪽).
+    """
+    if not view.segments:
+        return []
+    line_end = view.segments[1].text_start if len(view.segments) > 1 else 1 << 31
+    return [
+        (index, ctrl)
+        for index, ctrl in sorted(view.controls.items())
+        if view.positions[index] < line_end
+        and isinstance(ctrl.model, ObjectCtrlHeader)
+        and not ctrl.model.treat_as_char
+        and ctrl.model.text_wrap == TextWrap.TOP_AND_BOTTOM
+        and ctrl.model.vert_rel_to != VertRelTo.PARA
     ]
 
 
