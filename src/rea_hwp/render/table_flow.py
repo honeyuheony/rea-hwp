@@ -28,7 +28,7 @@ from .common import (
     SectionGeometry,
     column_layout,
 )
-from .scene import Image
+from .scene import Image, Line
 from .table_paging import (
     MIN_UNIT,
     MODE_LINES,
@@ -1013,10 +1013,13 @@ class TableFlowMixin:
                     header_top = origins[number] - header_height
                     if fragments[number][0] not in grid.row_y:
                         header_top -= grid.spacing
-                    draw_table_frame(grid, lefts[number], header_top, state.page, self.styles, (0.0, header_height))
+                    frame = draw_table_frame(
+                        grid, lefts[number], header_top, state.page, self.styles, (0.0, header_height)
+                    )
                     for line in cell_lines:
                         if line.carry == 0 and line.top < header_height:
                             self.place_cell_line(state, line, lefts[number], header_top + line.origin)
+                    state.page.items.extend(frame)
             host = HostFragments(
                 fragments,
                 states,
@@ -1032,9 +1035,10 @@ class TableFlowMixin:
                     state, origin = states[number], origins[number]
                     host.number = number
                     bottom = end if number == len(fragments) - 1 else start + page_bottom - origin
-                    self.draw_fragment_frame(grid, lefts[number], origin, state, (start, end), bottom)
+                    frame = self.draw_fragment_frame(grid, lefts[number], origin, state, (start, end), bottom)
                     for line, offset in assigned.get(number, []):
                         self.place_cell_line(state, line, lefts[number], origin + offset)
+                    state.page.items.extend(frame)
                     if split:
                         self.table_bottom = origin + (end - start)
                         self.table_bottom_margin = (model.outer_margins or [0, 0, 0, 0])[3]
@@ -1178,12 +1182,13 @@ class TableFlowMixin:
                     cell = grid.cells[box.cell]
                     cx, _, width, _ = grid.cell_box(cell)
                     frames.append((cell, x + cx, origin + box.y, width, box.height))
-                draw_cell_boxes(frames, page.page, self.styles)
+                frame = draw_cell_boxes(frames, page.page, self.styles)
                 if outermost:
                     # 셀 안 각주는 그 쪽 표 조각 아래에 자리가 있어야 그 쪽에 놓인다(정책연구 78쪽 각주 107~110).
                     self.note_floor = origin + fragment.bottom
                 for box in boxes:
                     self.place_box_lines(page, grid, grid.cells[box.cell], box, sources, x, origin)
+                page.page.items.extend(frame)
         finally:
             if outermost:
                 self.note_floor = None
@@ -1270,8 +1275,9 @@ class TableFlowMixin:
 
     def draw_fragment_frame(
         self, grid: TableGrid, left: float, origin: float, state: PageState, clip: tuple[float, float], visible: float
-    ) -> None:
-        """쪽 조각 테두리. 다음 쪽으로 이어지는 셀은 자른 곳이 아니라 보이는 아래 끝까지 그린다.
+    ) -> list[Line]:
+        """쪽 조각 칸 배경을 칠하고 테두리 선을 돌려준다(draw_cell_boxes).
+        다음 쪽으로 이어지는 셀은 자른 곳이 아니라 보이는 아래 끝까지 그린다.
 
         실측: issue4514 10쪽과 task2287 26~28쪽 조각 아래 선이 자른 곳이 아니라 쪽마다 같은 자리(781.91·536.01pt)다.
         셀 안에서도 나누는 표는 자른 곳에서 시작하는 행도 빈 조각으로 쪽 바닥까지 그린다(실측: issue4514 9쪽
@@ -1282,8 +1288,7 @@ class TableFlowMixin:
         if visible <= end:
             # 쪽 바닥을 넘는 조각(내용만 들어가 이 쪽에 둔 행)은 쪽 바닥에서 잘라 그린다
             # (실측: rowbreak-problem-pages 3쪽 행 8 아래 선 768.72pt, 행 끝은 771.67pt).
-            draw_table_frame(grid, left, origin, state.page, self.styles, (start, visible))
-            return
+            return draw_table_frame(grid, left, origin, state.page, self.styles, (start, visible))
         starting = grid.table.page_break != SPLIT_CELLS
         continued = []
         for cell in grid.cells:
@@ -1291,10 +1296,10 @@ class TableFlowMixin:
             if (top < end or starting and top == end) and end < top + height:
                 continued.append(cell)
         kept = [cell for cell in grid.cells if not any(cell is other for other in continued)]
-        draw_table_frame(dataclasses.replace(grid, cells=kept), left, origin, state.page, self.styles, clip)
+        lines = draw_table_frame(dataclasses.replace(grid, cells=kept), left, origin, state.page, self.styles, clip)
         # 이어지는 셀은 제 높이가 짧아도 쪽 바닥까지 늘여 그린다(issue4514 9쪽 빈 칸에서 넓힌 규칙, 검증 안 됨).
         stretched = [y if y <= end else max(y, visible) for y in grid.row_y]
-        draw_table_frame(
+        return lines + draw_table_frame(
             dataclasses.replace(grid, cells=continued, row_y=stretched),
             left,
             origin,
@@ -1348,9 +1353,10 @@ class TableFlowMixin:
                 inner.number = k
                 page = pages[k]
                 page_left = left + page.geometry.body_left - first_left
-                draw_table_frame(grid, page_left, ys[k], page.page, self.styles, (low, high))
+                frame = draw_table_frame(grid, page_left, ys[k], page.page, self.styles, (low, high))
                 for cell_line, offset in assigned.get(k, []):
                     self.place_cell_line(page, cell_line, page_left, ys[k] + offset)
+                page.page.items.extend(frame)
         finally:
             self.host_fragments = saved
         last = len(fragments) - 1
@@ -1415,9 +1421,10 @@ class TableFlowMixin:
                 state = host.states[number]
                 inner.number = index
                 page_left = left + state.geometry.body_left - first_left
-                draw_table_frame(grid, page_left, y, state.page, self.styles, (low, high))
+                frame = draw_table_frame(grid, page_left, y, state.page, self.styles, (low, high))
                 for line, offset in assigned.get(index, []):
                     self.place_cell_line(state, line, page_left, y + offset)
+                state.page.items.extend(frame)
         finally:
             self.host_fragments = saved
         first, last = pieces[0], pieces[-1]

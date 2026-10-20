@@ -11,7 +11,7 @@ from ..models.controls import CellListHeader, ColumnDefCtrl, Table
 from ..models.docinfo import BorderFill, ImageFill
 from .borders import border_lines, gradient_paint
 from .common import OBJECT_PAINT_GROW, paint_visible
-from .scene import Image, Page, Rect
+from .scene import Image, Line, Page, Rect
 from .styles import DocStyles, colorref
 
 #: LINE_SEG 태그 bit17: 줄의 첫 세그먼트.
@@ -466,8 +466,8 @@ def draw_table_frame(
     page: Page,
     styles: DocStyles,
     clip: tuple[float, float] | None = None,
-) -> None:
-    """셀 배경을 먼저 모두 칠한 뒤 테두리를 긋는다. clip은 표 세로 좌표 [시작, 끝) 구간, y는 그 시작이 놓일 위치다."""
+) -> list[Line]:
+    """셀 배경을 칠하고 테두리 선을 돌려준다. clip은 표 세로 좌표 [시작, 끝) 구간, y는 그 시작이 놓일 위치다."""
     start, end = clip if clip is not None else (0.0, grid.height)
     boxes = []
     for cell in grid.cells:
@@ -475,7 +475,7 @@ def draw_table_frame(
         top_s, bottom_s = max(cy, start), min(cy + height, end)
         if bottom_s > top_s:
             boxes.append((cell, x + cx, y + top_s - start, width, bottom_s - top_s))
-    draw_cell_boxes(boxes, page, styles)
+    return draw_cell_boxes(boxes, page, styles)
 
 
 #: 그림 채우기 유형(명세 표31) 6~14: 원래 크기로 두는 (가로, 세로) 위치 비율. 0 왼쪽·위, 0.5 가운데, 1 오른쪽·아래.
@@ -541,8 +541,12 @@ def fill_items(fill: BorderFill, box: tuple[float, float, float, float], styles:
     return items
 
 
-def draw_cell_boxes(boxes: list[tuple[Cell, float, float, float, float]], page: Page, styles: DocStyles) -> None:
-    """(셀, 왼쪽, 위, 폭, 높이) 상자마다 배경을 먼저 모두 칠한 뒤 테두리를 긋는다."""
+def draw_cell_boxes(boxes: list[tuple[Cell, float, float, float, float]], page: Page, styles: DocStyles) -> list[Line]:
+    """(셀, 왼쪽, 위, 폭, 높이) 상자마다 배경을 칠하고, 테두리 선은 쪽에 넣지 않고 돌려준다.
+
+    한글은 표 조각의 칸 내용을 모두 그린 뒤 그 조각의 테두리를 긋는다(kr_156489762 1쪽 정답 PDF 그리기 순서:
+    칸 그림 6번·칸 글자 7~207번 뒤 표 선 209~224번). 부르는 쪽이 칸 내용을 놓은 뒤 쪽에 붙인다.
+    """
     lines = []
     for cell, left, top, width, height in boxes:
         fill = styles.border_fill(cell.header.border_fill_id)
@@ -560,4 +564,4 @@ def draw_cell_boxes(boxes: list[tuple[Cell, float, float, float, float]], page: 
             lines += border_lines(fill.diagonal, left, bottom, right, top)
         if fill.backslash_shape:
             lines += border_lines(fill.diagonal, left, top, right, bottom)
-    page.items.extend(lines)
+    return lines
