@@ -29,6 +29,11 @@ MARLETT_SCALE = 1.05
 CHECK_FRAME, CHECK_MARK = "gfedc", "b"
 #: 라디오 단추 틀과 선택 표시.
 RADIO_FRAME, RADIO_MARK = "nmlkj", "i"
+#: Marlett 틀 글자별 색(고전 컨트롤 3D 색). 실측: form-01 정답 PDF 글자 색. 선택 표시(b·i)는 검정이다.
+MARLETT_COLORS = {
+    "g": "#ffffff", "f": "#e3e3e3", "e": "#696969", "d": "#ffffff", "c": "#a0a0a0",
+    "n": "#ffffff", "m": "#e3e3e3", "l": "#696969", "k": "#ffffff", "j": "#a0a0a0",
+}  # fmt: skip
 
 
 def form_properties(text: str) -> dict[str, str]:
@@ -83,7 +88,8 @@ def draw_form(layout, state: PageState, form: Node, left: float, top: float, wid
         marks = frame + (mark if props.get("Value", "0") not in ("0", "") else "")
         marlett = size * MARLETT_SCALE
         for char in marks:
-            state.page.items.append(Glyph(char, device_round(left), center + marlett / 2, marlett, "Marlett"))
+            color = MARLETT_COLORS.get(char, "#000000")
+            state.page.items.append(Glyph(char, device_round(left), center + marlett / 2, marlett, "Marlett", color))
         text = caption_text(props.get("Caption", ""))
         x = left + CHECK_CAPTION_OFFSET * size
     elif kind in ("edt", "cob"):

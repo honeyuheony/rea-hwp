@@ -554,4 +554,10 @@ def draw_cell_boxes(boxes: list[tuple[Cell, float, float, float, float]], page: 
         lines += border_lines(fill.right, right, top, right, bottom)
         lines += border_lines(fill.top, left, top, right, top)
         lines += border_lines(fill.bottom, left, bottom, right, bottom)
+        # 대각선(속성 bit 2~4 「/」, bit 5~7 「\」, 0이 아니면 긋는다; rhwp border_rendering.rs render_cell_diagonal).
+        # 검증 안 됨: 꺾은 대각선(bit 8~10)과 중심선(bit 13)은 곧은 대각선으로 그리거나 그리지 않는다.
+        if fill.slash_shape:
+            lines += border_lines(fill.diagonal, left, bottom, right, top)
+        if fill.backslash_shape:
+            lines += border_lines(fill.diagonal, left, top, right, bottom)
     page.items.extend(lines)
