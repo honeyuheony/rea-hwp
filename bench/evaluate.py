@@ -29,7 +29,12 @@ def score_layout(pages, reference_pages) -> dict:
     totals = {"pages": len(pages), "reference_pages": len(reference_pages)}
     totals |= {"reference_chars": 0, "within": 0, "matched": 0, "excluded": 0, "offsets": []}
     for index, reference_chars in enumerate(reference_pages):
-        rendered = [PlacedChar(c, x, y) for c, x, y in page_glyph_table(pages[index])] if index < len(pages) else []
+        # 정답 PDF처럼 효과 겹침(그림자 등 1pt 안 같은 글자)은 먼저 놓인 하나만 센다.
+        rendered = (
+            merge_effect_strikes([PlacedChar(c, x, y) for c, x, y in page_glyph_table(pages[index])])
+            if index < len(pages)
+            else []
+        )
         boxes = [tuple(v / 100 for v in box) for box in pages[index].excluded] if index < len(pages) else []
         score = score_page(reference_chars, rendered, boxes)
         totals["excluded"] += score.excluded
