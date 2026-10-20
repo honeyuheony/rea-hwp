@@ -122,3 +122,10 @@ def test_dutmal_draws_main_and_sub_text_over_and_under():
     assert line_at(page, "본문입니다") == pytest.approx((85.08, 112.8), abs=0.5)
     assert line_at(page, "위덧말") == pytest.approx((94.92, 103.3), abs=0.5)
     assert line_at(page, "아래덧말") == pytest.approx((151.08, 118.3), abs=0.5)
+
+
+def test_footnote_waits_for_room_below_own_paragraph_table():
+    pages = corpus_pages("rhwp/정책연구용역사업 중간진도보고서(살아있는 간장 기증자의 의학적 선별기준 연구).hwp")
+    # 한글 2022 PDF: 「표 28 … 147)」 문단의 표가 94쪽 바닥까지 차서 각주 147은 95쪽 아래 766.44pt.
+    assert not any(line.text.startswith("147)") for line in pages[93].text_lines)
+    assert line_at(pages[94], "147)")[1] == pytest.approx(766.44, abs=0.5)

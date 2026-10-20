@@ -856,6 +856,26 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             target.carried_footnotes += 1
         self.defer_footnotes(page_index + 1, rest)
 
+    def own_boxes_bottom(self, state: PageState) -> float:
+        """이 문단이 이 쪽에 쌓은 위아래 배치 상자의 아래 끝(없으면 0). 그 문단 각주는 이 아래에 자리가 있어야 한다.
+
+        실측: 중간진도보고서 94쪽 「표 28 … 147)」 문단의 표가 쪽 바닥까지 차서 각주 147은 정답 95쪽 아래.
+        """
+        if not self.in_body:
+            return 0.0
+        earlier = self.__dict__.get("earlier_boxes", set())
+        registry = self.__dict__.get("_stacked_boxes", {})
+        return max(
+            (
+                box[3]
+                for (page, _), listed in registry.items()
+                if page == id(state.page)
+                for box in listed
+                if id(box) not in earlier
+            ),
+            default=0.0,
+        )
+
     def footnote_reserve(self, state: PageState, pending: tuple = ()) -> float:
         """그 쪽에 모인 각주와 pending이 본문 바닥에서 차지할 높이(구분선 여백 포함, notes.draw_footnotes와 같은 식)."""
         notes = [*state.footnotes, *(FootnotePiece(ctrl) for ctrl in pending)]
@@ -1633,7 +1653,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 count = len(self.footnote_pieces(ctrl, state.geometry.body_width))
                 pieces = [FootnotePiece(ctrl, k) for k in range(count)]
                 page_index = next(i for i, other in enumerate(self.states) if other is state)
-                floor = max(baseline, self.__dict__.get("note_floor") or baseline)
+                floor = max(baseline, self.__dict__.get("note_floor") or baseline, self.own_boxes_bottom(state))
                 if self.footnote_split_pending(state) or floor > (
                     state.geometry.body_top + state.geometry.body_height - self.footnote_reserve(state, (ctrl,))
                 ):
