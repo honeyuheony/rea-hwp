@@ -31,7 +31,7 @@ from ..models.controls import (
 from ..models.docinfo import BorderFill, BorderLine, CharShape, ParaShape
 from ..models.paragraph import PARA_BREAK, TAB, ControlChar, LineSeg, ParaLineSeg
 from . import heads, metrics, reflow
-from .borders import border_lines
+from .borders import border_lines, width_hu
 from .common import (
     CENTER,
     DEVICE_UNIT,
@@ -1517,6 +1517,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         underline: list = []
         strike: list = []
         shade: list = []
+        char_border: list = []
         guide_text = _guide_text_chars(view)
         for order, (char_index, width) in enumerate(zip(items, widths, strict=True)):
             item = view.chars[char_index]
@@ -1533,6 +1534,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     self.flush_shade(state, shade, line_top, segment.line_height)
                 if colorref(shape.shade_color) and order < interior_end:
                     self.extend_shade(state, shade, shape, device_round(x), width)
+                if char_border and char_border[0] != shape.border_fill_id:
+                    self.flush_char_border(state, char_border, line_top, segment.text_height)
+                if order < interior_end and self.char_border_fill(shape) is not None:
+                    self.extend_char_border(char_border, shape, device_round(x), width)
                 if shadow_run and (shape is not run_shape or _joins_previous_jamo(view, char_index)):
                     _flush_shadow_run(state.page, shadow_run)
                 if (
@@ -1570,6 +1575,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             self.flush_underline(state, underline, baseline)
             self.flush_strike(state, strike, line_top + segment.text_height / 2)
             self.flush_shade(state, shade, line_top, segment.line_height)
+            self.flush_char_border(state, char_border, line_top, segment.text_height)
             if char_index in view.controls:
                 self.place_control(state, view, view.controls[char_index], x, line_top, baseline, area, char_index)
             elif item.code == TAB and tab_fill(item) == LEADER_DOT:
@@ -1580,6 +1586,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         self.flush_underline(state, underline, baseline)
         self.flush_strike(state, strike, line_top + segment.text_height / 2)
         self.flush_shade(state, shade, line_top, segment.line_height)
+        self.flush_char_border(state, char_border, line_top, segment.text_height)
         self.line_pieces = outer_pieces
         text = "".join(pieces)
         if text.strip():
@@ -1778,6 +1785,42 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         for dy, ratio in UNDERLINE_STROKES.get(shape.strike_shape, ((0.5, 1.0),)):
             y = middle + (dy - 0.5) * width
             state.page.items.append(Line(start, y, end, y, width * ratio, color, dash_text))
+
+    def char_border_fill(self, shape: CharShape) -> BorderFill | None:
+        """글자 테두리(CharShape.border_fill_id)에 선이 하나라도 있으면 그 BorderFill, 없으면 None."""
+        fill = self.styles.border_fill(shape.border_fill_id or 0)
+        if fill is None or not any(side.line_type for side in fill.borders):
+            return None
+        return fill
+
+    def extend_char_border(self, run: list, shape: CharShape, x: float, width: float) -> None:
+        """run = [BorderFill 번호, 시작 x, 끝 x]. 글자 모양이 달라도 같은 BorderFill이면 한 상자로 잇는다."""
+        if run:
+            run[2] = x + width
+        else:
+            run.extend((shape.border_fill_id, x, x + width))
+
+    def flush_char_border(self, state: PageState, run: list, line_top: float, text_height: float) -> None:
+        if not run:
+            return
+        fill_id, start, end = run
+        run.clear()
+        fill = self.styles.border_fill(fill_id)
+        if fill is None:
+            return
+        # 글자 테두리는 구간 첫 글자 원점부터 끝 글자 전진폭 끝까지, 위아래는 줄 글자 높이 바깥으로 선 굵기
+        # 절반을 띄워 긋는다(21_언어 1쪽 ③ 정답 PDF: 쪽 맞춤 비율을 되돌린 위·아래 선 가운데가 기준선
+        # −9.49·+1.79pt = 11pt 글자 높이 ±0.12pt, 왼쪽·오른쪽은 글자 원점 −0.18pt·전진폭 끝 −0.06pt).
+        half = max((width_hu(side.width) for side in fill.borders if side.line_type), default=0.0) / 2
+        top, bottom = line_top - half, line_top + text_height + half
+        state.page.items.extend(
+            [
+                *border_lines(fill.top, start, top, end, top),
+                *border_lines(fill.bottom, start, bottom, end, bottom),
+                *border_lines(fill.left, start, top, start, bottom),
+                *border_lines(fill.right, end, top, end, bottom),
+            ]
+        )
 
     def extend_shade(self, state: PageState, run: list, shape: CharShape, x: float, width: float) -> None:
         """run = [글자 모양, 시작 x, 끝 x, 음영을 끼워 넣을 쪽 항목 위치]. 글자보다 먼저(아래에) 그린다."""
