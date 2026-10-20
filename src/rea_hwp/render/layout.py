@@ -13,6 +13,7 @@ from ..document import HwpDocument, Node
 from ..models.controls import (
     AutoNumberCtrl,
     ColumnDefCtrl,
+    DutmalCtrl,
     FieldCtrl,
     HeaderFooterCtrl,
     NewNumberCtrl,
@@ -71,6 +72,8 @@ CIRCLE_GLYPH = "\u25ef"
 #: 한글 전용 문자 영역(보조 사용자 정의 영역 A). 글자 겹침에 쓰면 PDF에 U+F000 한 글자로 찍힌다.
 PRIVATE_USE_PLANE = 0xF0000
 PUA_GLYPH = "\uf000"
+#: 덧말 크기 비율이 0일 때 쓰는 기본값(%).
+DUTMAL_SIZE_RATIO = 50
 #: 단 종류(명세 표: 단 정의 속성 bit0-1): 1 배분 다단.
 DISTRIBUTED_COLUMNS = 1
 #: 탭 채움 종류(명세 표25): 3 점선.
@@ -1410,6 +1413,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 # 글자 겹침은 겹친 글자 중 가장 넓은 글자 폭을 차지한다(수출입 현황 3쪽 PDF: 17pt 네모 숫자 한 칸 17pt).
                 shape = self.styles.char_shapes[view.shape_ids[char_index]]
                 return max((self.text_width(char, shape) for char in ctrl.model.text or ""), default=0)
+            if ctrl is not None and isinstance(ctrl.model, DutmalCtrl):
+                return self.dutmal_box(view, char_index, ctrl.model)[0]
             if ctrl is not None and isinstance(ctrl.model, ObjectCtrlHeader) and ctrl.model.treat_as_char:
                 model = self.object_model(ctrl)
                 margins = model.outer_margins or [0, 0, 0, 0]
@@ -1562,6 +1567,45 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             self.place_text(state, text, shape, x, baseline)
         elif isinstance(model, OverlapCtrl):
             self.place_overlap(state, model, self.styles.char_shapes[view.shape_ids[char_index]], x, baseline)
+        elif isinstance(model, DutmalCtrl):
+            self.place_dutmal(state, view, char_index, model, x, baseline)
+
+    def dutmal_box(self, view: ParagraphView, char_index: int, model: DutmalCtrl) -> tuple[float, CharShape, CharShape]:
+        """덧말 한 칸의 (폭, 본문 글자 모양, 덧말 글자 모양). 폭은 본문과 덧말 가운데 넓은 쪽이다."""
+        shape = self.styles.char_shapes[view.shape_ids[char_index]]
+        sub = type(shape)(values=dict(shape.values), tail=shape.tail)
+        # 크기 비율 0은 기본값 50%다(덧말 견본 두 문서 PDF: 10pt 본문의 덧말 5pt).
+        sub.values["base_size"] = round(shape.base_size * (model.size_ratio or DUTMAL_SIZE_RATIO) / 100)
+        width = max(self.text_width(model.main_text or "", shape), self.text_width(model.sub_text or "", sub))
+        return width, shape, sub
+
+    def place_dutmal(
+        self, state: PageState, view: ParagraphView, char_index: int, model: DutmalCtrl, x: float, baseline: float
+    ) -> None:
+        """덧말. 한글 2022 PDF 실측(hwplib·hwp-rs 덧말 견본, 10pt 본문·5pt 덧말·가운데 정렬).
+
+        본문은 그 자리 글자 모양으로 칸 가운데에 찍는다. 덧말 기준선은 위(위치 0)면 본문 위끝(크기 × 0.85)에서
+        덧말 크기 × 0.2 더 위, 아래(위치 1)면 본문 아래끝(크기 × 0.15)에서 덧말 크기 × 0.8 더 아래다(위 9.5pt·
+        아래 5.5pt). 저장 줄도 위 덧말 높이만큼 글자 높이를 늘린다(1000 + 500, 기준선 1350). 정렬은 왼쪽(1)·
+        오른쪽(2)만 따로 두고 나머지는 실측이 있는 가운데로 놓는다.
+        """
+        width, shape, sub = self.dutmal_box(view, char_index, model)
+        main_text, sub_text = model.main_text or "", model.sub_text or ""
+        self.place_text(state, main_text, shape, x + (width - self.text_width(main_text, shape)) / 2, baseline)
+        sub_width = self.text_width(sub_text, sub)
+        offset = {1: 0.0, 2: width - sub_width}.get(model.align, (width - sub_width) / 2)
+        if model.position == 1:
+            sub_baseline = baseline + shape.base_size * (1 - TAC_ASCENT) + sub.base_size * 0.8
+        else:
+            sub_baseline = baseline - shape.base_size * TAC_ASCENT - sub.base_size * 0.2
+        sub_x = x + offset
+        for char in sub_text:
+            slot = self.measurer.slot(char, sub)
+            if char.strip():
+                self.append_glyph(state, char, sub, slot, device_round(sub_x), sub_baseline)
+            sub_x += self.measurer.advance(char, sub, slot)
+        if sub_text.strip():
+            state.page.text_lines.append(TextLine(sub_text, x + offset, sub_baseline, sub_width, sub.base_size))
 
     def place_overlap(self, state: PageState, model: OverlapCtrl, shape: CharShape, x: float, baseline: float) -> None:
         """글자 겹침. 한글 2022 PDF 실측(글자겹침 견본·kr_156369074·수출입 현황·table-vpos-01·k-water-rfp).

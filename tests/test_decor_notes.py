@@ -114,3 +114,11 @@ def test_extended_master_pages_replace_base_on_last_and_numbered_pages():
         assert (x, y) == (pytest.approx(expected[0], abs=1), pytest.approx(expected[1], abs=1))
     # 기본 바탕쪽을 덮어 그리지 않고 바꾼다: 「홀수형」이 한 번만 있다.
     assert "".join(char for char, _, _ in page_glyph_table(pages[11])).count("홀수형") == 1
+
+
+def test_dutmal_draws_main_and_sub_text_over_and_under():
+    page = corpus_pages("hwp-rs/crates__hwp__tests__integration__project__files__dutmal.hwp")[0]
+    # 한글 2022 PDF: 본문 85.08·112.8pt, 위 덧말 94.92·103.3pt, 아래 덧말 151.08·118.3pt.
+    assert line_at(page, "본문입니다") == pytest.approx((85.08, 112.8), abs=0.5)
+    assert line_at(page, "위덧말") == pytest.approx((94.92, 103.3), abs=0.5)
+    assert line_at(page, "아래덧말") == pytest.approx((151.08, 118.3), abs=0.5)
