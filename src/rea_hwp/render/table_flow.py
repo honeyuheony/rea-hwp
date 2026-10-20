@@ -293,21 +293,18 @@ def paging_eligible(
     return True
 
 
-def inline_stays_whole(
-    height: float, first_available: float, next_available: float, at_page_top: bool, below_body: float, unsplit: bool
-) -> bool:
-    """글자처럼 취급한 표를 나누지 않고 그 자리에 통째로 그리는가.
+def inline_table_rooms(
+    height: float, first_available: float, next_available: float, at_page_top: bool
+) -> tuple[float, float]:
+    """글자처럼 취급한 표의 (첫 조각, 다음 조각) 가용 높이. 표는 줄의 일부라 나누지 않는다.
 
-    줄과 함께 놓이므로 남은 높이에 들어가면 나누지 않는다(엔진 행 판정은 줄 간격 여유까지 따져 더 일찍 옮긴다:
-    kr_156369238 7쪽 표 14738 < 남은 14772). 쪽 맨 위에서 아래 여백(below_body) 안으로 조금 넘치는 표와, 나누지 않는
-    표가 새 쪽에도 안 들어가거나 이미 쪽 맨 위면 그 자리에서 넘쳐 그린다(옛 경로 table_fragments와 같은 규칙,
-    kr_156489570 53쪽 나누지 않는 표 183635HU). 엔진에 넣을 때 전체 평가 +437, 떨어진 문서 없음.
+    남은 높이에 들어가거나 이미 쪽 맨 위면 그 자리에 통째로 그린다(한글 2022 실험: law_18453497 첫 표 마지막 행을
+    15000HU 늘려 용지 밖까지 넘쳐도 한 쪽). 새 쪽에도 안 들어가면 그 자리에서 넘쳐 그린다(kr_156489570 53쪽 나누지
+    않는 표 183635HU, 나눔 설정 표는 검증 안 됨). 나머지는 통째로 다음 쪽 맨 위로 옮긴다(software.hwp 「SW 내부 설계」).
     """
-    if height <= first_available:
-        return True
-    if at_page_top and height - first_available <= below_body:
-        return True
-    return unsplit and (height > next_available or at_page_top)
+    if height <= first_available or at_page_top or height > next_available:
+        return BIG_ROOM, next_available
+    return 0.0, BIG_ROOM
 
 
 @dataclass
@@ -952,15 +949,10 @@ class TableFlowMixin:
         table, sources = paging_table(grid, views, self.nested_input, self.__dict__.setdefault("stacked_floats", set()))
         first_available = geometry.body_top + geometry.body_height - top - outer[1] - tail
         next_available = geometry.body_height - outer[0] - outer[1] - tail
-        if model.treat_as_char and inline_stays_whole(
-            grid.height,
-            first_available,
-            next_available,
-            at_page_top,
-            geometry.paper_height - geometry.body_top - geometry.body_height,
-            grid.table.page_break == NO_SPLIT,
-        ):
-            first_available = BIG_ROOM
+        if model.treat_as_char:
+            first_available, next_available = inline_table_rooms(
+                grid.height, first_available, next_available, at_page_top
+            )
         # 표를 놓기 전에 그 쪽에 모인 각주 자리는 뺀다. 셀 줄의 각주까지 조각마다 빼면 긴 각주가 많은 쪽에서 나빠진다
         # (중간진도보고서 175쪽~, 한글은 각주를 쪽 사이에서 나눈다).
         paging = paginate_table(

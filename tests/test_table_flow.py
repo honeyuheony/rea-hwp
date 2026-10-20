@@ -5,12 +5,13 @@ import pytest
 
 from rea_hwp import tags
 from rea_hwp.document import HwpDocument
-from rea_hwp.render.layout import DocumentLayout
+from rea_hwp.render.layout import DocumentLayout, layout_document
 from rea_hwp.render.table_flow import (
+    BIG_ROOM,
     CellLine,
     TableFlowMixin,
     assign_fragments,
-    inline_stays_whole,
+    inline_table_rooms,
     paging_eligible,
 )
 from rea_hwp.render.tables import cell_margins, stored_pieces
@@ -75,16 +76,36 @@ def test_paging_engine_takes_spaced_and_unsplit_tables():
     assert not eligible(protect=True)
 
 
-def test_inline_table_is_split_only_when_it_cannot_stay_whole():
-    def whole(height, first=10000.0, top=False, unsplit=False):
-        return inline_stays_whole(height, first, 60000.0, top, 5000.0, unsplit)
+def test_inline_table_is_never_split():
+    # 옛 기대(쪽 맨 위에서 많이 넘치면 나눔)는 한글 2022 실험과 다르다: 쪽 맨 위 표는 넘쳐도 통째로 그린다.
+    def rooms(height, first=10000.0, top=False):
+        return inline_table_rooms(height, first, 60000.0, top)
 
-    assert whole(9999.0)
-    assert not whole(12000.0)
-    assert whole(12000.0, top=True)
-    assert not whole(20000.0, top=True)
-    assert whole(70000.0, unsplit=True)
-    assert not whole(30000.0, unsplit=True)
+    assert rooms(9999.0) == (BIG_ROOM, 60000.0)
+    assert rooms(20000.0, top=True) == (BIG_ROOM, 60000.0)
+    assert rooms(70000.0) == (BIG_ROOM, 60000.0)
+    assert rooms(12000.0) == (0.0, BIG_ROOM)
+
+
+SOFTWARE_DOC = (
+    Path.home()
+    / "tools"
+    / "hwp-corpus"
+    / "oss"
+    / "hwpjs"
+    / "legacy__rust__crates__hwp-core__tests__fixtures__software.hwp"
+)
+
+
+@pytest.mark.skipif(not SOFTWARE_DOC.exists(), reason="corpus not available")
+def test_inline_table_that_does_not_fit_moves_whole_to_next_page():
+    pages = layout_document(HwpDocument.open(SOFTWARE_DOC))
+
+    # 한글 2022 PDF: 1쪽은 「4. 작품 설계」로 끝나고 표 머리 「SW 내부 설계」는 2쪽 첫 글이다.
+    first = "".join(g.char for g in pages[0].glyphs if g.char.strip())
+    second = "".join(g.char for g in pages[1].glyphs if g.char.strip())
+    assert first.endswith("4.작품설계")
+    assert second.startswith("SW내부설계")
 
 
 NESTED_SQUARE_DOC = (

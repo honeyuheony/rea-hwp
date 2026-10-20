@@ -874,6 +874,13 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 return True
             overlaps_overflow = previous_line_bottom > room and vpos > 2 * previous_vpos - previous_line_bottom
             return vpos + segment.line_height <= room and not overlaps_overflow
+        if (
+            previous_vpos < vpos < previous_next_line
+            and previous_next_line + segment.line_height > room >= vpos + segment.line_height
+        ):
+            # 앞 줄 다음 자리에 들어가지 않는 줄을 한글은 새 쪽에 놓고 그 쪽 기준 위치를 저장한다(law_18543285: 0에 놓인
+            # 71379 표 줄 다음 74025 표 줄이 1200). 이어지는 줄은 음수 줄 간격이어도 다음 자리에 저장된다.
+            return True
         if vpos != 0 or previous_vpos != 0:
             return False
         # 앞 줄과 같이 0인 줄: 다단에서는 단마다 첫 줄이 0이다(multicolumns-layout 3단). 1단에서는 앞 줄 아래에

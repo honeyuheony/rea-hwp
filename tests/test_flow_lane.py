@@ -56,6 +56,15 @@ def test_large_rewind_in_section_cumulative_positions_starts_new_page():
     assert _restarts((498535, 499535, 499535), _segment(432959))
 
 
+def test_line_stored_inside_previous_line_that_cannot_follow_starts_new_page():
+    # law_18543285: 0에 놓인 표 줄(71379) 다음 표 줄(74025)이 1200에 저장됐다. 정답은 둘째 쪽.
+    assert _restarts((0, 71379, 71379, 71979), _segment(1200, height=74025), body_height=75686)
+
+
+def test_negative_spacing_overlap_that_follows_previous_line_stays():
+    assert not _restarts((10000, 11000, 11000, 10800), _segment(10800))
+
+
 def test_equal_zero_rewinds_only_when_line_cannot_follow():
     assert not _restarts((0, 1000, 1000), _segment(0))
     assert _restarts((0, 59000, 59000), _segment(0, height=2000))
@@ -107,6 +116,8 @@ def _open(relative: str):
         ("oss/rhwp/p122.hwp", 3),
         ("oss/rhwp/issue5699__37787_regulatory_impact.hwp", 49),
         ("oss/rhwp/issue2004_cell_image_stack.hwp", 8),
+        ("public/law_18543285.hwp", 2),
+        ("public/law_18453497.hwp", 2),
     ],
 )
 def test_page_count_matches_hancom(relative: str, pages: int):
