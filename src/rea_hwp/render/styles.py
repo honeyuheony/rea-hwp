@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ..document import HwpDocument
@@ -39,6 +40,8 @@ class DocStyles:
     bullets: list[Bullet] = field(default_factory=list)
     styles: list[Style] = field(default_factory=list)
     bin_data: list[BinData] = field(default_factory=list)
+    #: BinData 번호 → (data URI, 픽셀 크기). 셀 그림 채우기에 쓰며 레이아웃이 채운다.
+    image_source: Callable[[int], tuple[str, tuple[int, int] | None] | None] | None = None
 
     @classmethod
     def from_document(cls, document: HwpDocument) -> DocStyles:

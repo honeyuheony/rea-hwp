@@ -161,6 +161,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
     def __init__(self, document: HwpDocument) -> None:
         self.document = document
         self.styles = DocStyles.from_document(document)
+        self.styles.image_source = self.image_fill_source
         self.char_unit = reflow.document_char_unit(
             self.styles.char_shapes, self.styles.styles[0].char_shape_id if self.styles.styles else None
         )

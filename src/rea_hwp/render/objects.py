@@ -989,6 +989,13 @@ class ObjectsMixin:
                 return self.document.container.bin_data(name, compressed)
         return None
 
+    def image_fill_source(self, bin_data_id: int) -> tuple[str, tuple[int, int] | None] | None:
+        href = self.image_href(bin_data_id)
+        if href is None:
+            return None
+        data = base64.b64decode(href.split(",", 1)[1])
+        return href, pixel_size(data)
+
     def image_href(self, bin_data_id: int) -> str | None:
         if bin_data_id in self.image_cache:
             return self.image_cache[bin_data_id]

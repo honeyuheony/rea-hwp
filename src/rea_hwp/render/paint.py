@@ -12,6 +12,8 @@ from .scene import Page
 #: 글 목록 열쇠: 바탕쪽과 머리말·꼬리말. 쪽 차례는 바탕쪽 → 글 뒤로 개체 → 머리말·꼬리말·쪽 번호 → 본문(FUN_10188740).
 MASTER_LIST = "master"
 BAND_LIST = "band"
+#: 쪽 테두리·배경. 바탕쪽보다 먼저(맨 아래에) 그린다.
+PAGE_LIST = "page"
 
 
 @dataclass(eq=False)
@@ -68,11 +70,13 @@ def _pieces(children: list[PaintUnit], start: int, end: int, source: list, lines
 
 def _arrange(roots: list[PaintUnit], source: list, lines: bool) -> list:
     groups = _groups(roots, 0, len(source), source, lines)
+    backdrop = [group for group in groups if group.key == PAGE_LIST]
     master = [group for group in groups if group.key == MASTER_LIST]
     bands = [group for group in groups if group.key == BAND_LIST]
-    body = [group for group in groups if group.key not in (MASTER_LIST, BAND_LIST)]
+    body = [group for group in groups if group.key not in (PAGE_LIST, MASTER_LIST, BAND_LIST)]
     floats = sorted(entry for group in body for entry in group.floats)
-    arranged = [item for group in master for item in group.compose()]
+    arranged = [item for group in backdrop for item in group.compose()]
+    arranged += [item for group in master for item in group.compose()]
     arranged += [item for layer, *_, content in floats if layer < 0 for item in content]
     arranged += [item for group in bands for item in group.compose()]
     arranged += [item for group in body for item in group.body]
@@ -100,14 +104,16 @@ def _groups(children: list[PaintUnit], start: int, end: int, source: list, lines
     for piece in _pieces(children, start, end, source, lines):
         if isinstance(piece, PaintUnit):
             body, floats = _emit(piece, source, lines)
+            after_backdrop = bool(groups) and groups[-1].key == PAGE_LIST and piece.list_key != PAGE_LIST
             if piece.layer is None and (not groups or groups[-1].key != piece.list_key):
                 groups.append(_ListGroup(piece.list_key))
-            elif not groups:
+            elif not groups or after_backdrop:
                 groups.append(_ListGroup(piece.list_key))
             groups[-1].body += body
             groups[-1].floats += floats
         else:
-            if not groups:
+            # 쪽 테두리·배경 묶음 뒤 항목·떠 있는 개체는 그 묶음에 넣지 않는다(그 묶음은 맨 아래에 따로 그린다).
+            if not groups or groups[-1].key == PAGE_LIST:
                 groups.append(_ListGroup(None))
             groups[-1].body += piece
     return groups

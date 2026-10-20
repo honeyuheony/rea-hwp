@@ -82,11 +82,25 @@ def _line(line: Line) -> str:
     )
 
 
-def _rect(rect: Rect) -> str:
+def _rect(rect: Rect, index: int) -> str:
     fill = rect.fill or "none"
+    definition = ""
+    if rect.gradient is not None:
+        gradient = rect.gradient
+        stops = "".join(f'<stop offset="{offset:g}" stop-color="{color}"/>' for offset, color in gradient.stops)
+        if gradient.radial:
+            center = f'cx="{_pt(gradient.x1)}" cy="{_pt(gradient.y1)}"'
+            shape = f'radialGradient id="grad{index}" {center} r="{_pt(gradient.x2)}"'
+        else:
+            shape = (
+                f'linearGradient id="grad{index}" x1="{_pt(gradient.x1)}" y1="{_pt(gradient.y1)}" '
+                f'x2="{_pt(gradient.x2)}" y2="{_pt(gradient.y2)}"'
+            )
+        definition = f'<defs><{shape} gradientUnits="userSpaceOnUse">{stops}</{shape.split()[0]}></defs>'
+        fill = f"url(#grad{index})"
     stroke = f' stroke="{rect.stroke}" stroke-width="{_pt(rect.stroke_width)}"' if rect.stroke else ""
     return (
-        f'<rect x="{_pt(rect.x)}" y="{_pt(rect.y)}" width="{_pt(rect.width)}" height="{_pt(rect.height)}" '
+        f'{definition}<rect x="{_pt(rect.x)}" y="{_pt(rect.y)}" width="{_pt(rect.width)}" height="{_pt(rect.height)}" '
         f'fill="{fill}"{stroke}/>'
     )
 
@@ -123,7 +137,7 @@ def page_to_svg(page: Page) -> str:
         elif isinstance(item, Line):
             parts.append(_line(item))
         elif isinstance(item, Rect):
-            parts.append(_rect(item))
+            parts.append(_rect(item, index))
         elif isinstance(item, Image):
             parts.append(_image(item, index))
     parts.append("</svg>")

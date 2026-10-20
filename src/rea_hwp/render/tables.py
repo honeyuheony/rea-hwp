@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from .. import tags
 from ..document import Node
 from ..models.controls import CellListHeader, ColumnDefCtrl, Table
-from .borders import border_lines
+from ..models.docinfo import BorderFill, ImageFill
+from .borders import border_lines, gradient_paint
 from .common import OBJECT_PAINT_GROW, paint_visible
-from .scene import Page, Rect
+from .scene import Image, Page, Rect
 from .styles import DocStyles, colorref
 
 #: LINE_SEG 태그 bit17: 줄의 첫 세그먼트.
@@ -477,6 +478,69 @@ def draw_table_frame(
     draw_cell_boxes(boxes, page, styles)
 
 
+#: 그림 채우기 유형(명세 표31) 6~14: 원래 크기로 두는 (가로, 세로) 위치 비율. 0 왼쪽·위, 0.5 가운데, 1 오른쪽·아래.
+_IMAGE_ANCHORS = {
+    6: (0.5, 0.5), 7: (0.5, 0.0), 8: (0.5, 1.0), 9: (0.0, 0.5), 10: (0.0, 0.0),
+    11: (0.0, 1.0), 12: (1.0, 0.5), 13: (1.0, 0.0), 14: (1.0, 1.0),
+}  # fmt: skip
+#: 그림 채우기 원래 크기 단위(픽셀당 HU, 96dpi). rhwp svg.rs 배치와 같은 기준이다.
+_IMAGE_UNITS_PER_PIXEL = 75
+
+
+def image_fill(
+    image: ImageFill,
+    box: tuple[float, float, float, float],
+    source: Callable[[int], tuple[str, tuple[int, int] | None] | None],
+) -> list[Image]:
+    """셀 그림 채우기. 5 크기에 맞추어, 15 비율 유지 맞춤, 6~14 원래 크기를 칸으로 잘라 둔다(rhwp svg.rs).
+
+    검증 안 됨: 바둑판(0~4)은 칸 크기로 늘려 그린다.
+    """
+    found = source(image.bin_id)
+    if found is None:
+        return []
+    href, size = found
+    left, top, width, height = box
+    if size is None or image.mode not in _IMAGE_ANCHORS and image.mode != 15:
+        return [Image(left, top, width, height, href)]
+    natural_w, natural_h = size[0] * _IMAGE_UNITS_PER_PIXEL, size[1] * _IMAGE_UNITS_PER_PIXEL
+    if image.mode == 15:
+        scale = min(width / natural_w, height / natural_h)
+        fit_w, fit_h = natural_w * scale, natural_h * scale
+        return [Image(left + (width - fit_w) / 2, top + (height - fit_h) / 2, fit_w, fit_h, href)]
+    anchor_x, anchor_y = _IMAGE_ANCHORS[image.mode]
+    x, y = left + (width - natural_w) * anchor_x, top + (height - natural_h) * anchor_y
+    shown_left, shown_top = max(x, left), max(y, top)
+    shown_right, shown_bottom = min(x + natural_w, left + width), min(y + natural_h, top + height)
+    if shown_right <= shown_left or shown_bottom <= shown_top:
+        return []
+    crop = (
+        (shown_left - x) / natural_w,
+        (shown_top - y) / natural_h,
+        (shown_right - x) / natural_w,
+        (shown_bottom - y) / natural_h,
+    )
+    whole = crop == (0.0, 0.0, 1.0, 1.0)
+    return [
+        Image(shown_left, shown_top, shown_right - shown_left, shown_bottom - shown_top, href, None if whole else crop)
+    ]
+
+
+def fill_items(fill: BorderFill, box: tuple[float, float, float, float], styles: DocStyles) -> list[Rect | Image]:
+    """BorderFill의 단색 → 그러데이션 → 그림 채우기를 상자(왼쪽, 위, 폭, 높이)에 그릴 항목."""
+    left, top, width, height = box
+    items: list[Rect | Image] = []
+    color = colorref(fill.background_color)
+    if color:
+        items.append(Rect(left, top, width, height, fill=color))
+    gradient = gradient_paint(fill.gradient, left, top, width, height) if fill.gradient else None
+    if gradient is not None:
+        items.append(Rect(left, top, width, height, gradient=gradient))
+    if fill.image and styles.image_source is not None:
+        items.extend(image_fill(fill.image, box, styles.image_source))
+    return items
+
+
 def draw_cell_boxes(boxes: list[tuple[Cell, float, float, float, float]], page: Page, styles: DocStyles) -> None:
     """(셀, 왼쪽, 위, 폭, 높이) 상자마다 배경을 먼저 모두 칠한 뒤 테두리를 긋는다."""
     lines = []
@@ -485,9 +549,7 @@ def draw_cell_boxes(boxes: list[tuple[Cell, float, float, float, float]], page: 
         if fill is None or not paint_visible(page, (left, top, width, height), OBJECT_PAINT_GROW):
             continue
         right, bottom = left + width, top + height
-        color = colorref(fill.background_color)
-        if color:
-            page.items.append(Rect(left, top, width, bottom - top, fill=color))
+        page.items.extend(fill_items(fill, (left, top, width, height), styles))
         lines += border_lines(fill.left, left, top, left, bottom)
         lines += border_lines(fill.right, right, top, right, bottom)
         lines += border_lines(fill.top, left, top, right, top)

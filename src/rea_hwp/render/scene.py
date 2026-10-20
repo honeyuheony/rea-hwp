@@ -37,6 +37,19 @@ class Line:
 
 
 @dataclass
+class Gradient:
+    """쪽 좌표로 정한 그러데이션. radial이면 (x1, y1)이 중심, x2가 반지름이다."""
+
+    radial: bool
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    #: (0~1 위치, #rrggbb) 목록.
+    stops: list[tuple[float, str]]
+
+
+@dataclass
 class Rect:
     x: float
     y: float
@@ -45,6 +58,8 @@ class Rect:
     fill: str | None = None
     stroke: str | None = None
     stroke_width: float = 0.0
+    #: 있으면 fill 대신 이 그러데이션으로 칠한다.
+    gradient: Gradient | None = None
 
 
 @dataclass

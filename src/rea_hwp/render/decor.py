@@ -10,9 +10,11 @@ from ..document import Node
 from ..models.controls import MasterPageListHeader, ObjectCtrlHeader, PageNumberPosCtrl, SectionDefCtrl, VertRelTo
 from ..models.docinfo import CharShape
 from . import metrics
+from .borders import border_lines
 from .common import DEVICE_UNIT, Area, PageState, ParagraphView, SectionState, _list_paragraphs
 from .numbering import format_number
-from .paint import BAND_LIST, MASTER_LIST
+from .paint import BAND_LIST, MASTER_LIST, PAGE_LIST
+from .tables import fill_items
 
 #: 쪽 번호 글꼴의 아랫부분(winDescent/unitsPerEm). 아래쪽 쪽 번호 기준선은 꼬리말 영역 아래끝에서 이만큼 올라간다.
 #: 값은 한글 2022 설치 글꼴 파일의 OS/2 표에서 읽었다.
@@ -99,6 +101,9 @@ class DecorMixin:
         body_items = state.page.items
         state.page.items = []
         recorded = len(self.__dict__.get("paint_units", []))
+        if section_def is not None:
+            with self.painting_list(PAGE_LIST), self.painting(state.page, None, 0):
+                self.draw_page_border(state, section_def, first_page, hide)
         saved = self.page_numbers[-1]
         self.page_numbers[-1] = number
         master = self.extended_master(state, section) or carry.masters.get(odd)
@@ -123,6 +128,56 @@ class DecorMixin:
         self.shift_paint_units(state.page, recorded, decor_count)
         if state.footnotes:
             self.draw_footnotes(state)
+
+    def draw_page_border(self, state: PageState, section_def: Node, first_page: bool, hide: int) -> None:
+        """쪽 테두리·배경(구역 정의 아래 첫 PAGE_BORDER_FILL)을 바탕쪽보다 먼저 그린다.
+
+        검증 안 됨: 짝수·홀수 쪽 기록(둘째·셋째)은 쓰지 않는다(rhwp도 첫 기록만 쓴다).
+        """
+        record = section_def.find(tags.PAGE_BORDER_FILL)
+        fill = self.styles.border_fill(record.model.border_fill_id) if record is not None else None
+        if fill is None:
+            return
+        model: SectionDefCtrl = section_def.model
+        show_border = not (hide & 0x08) and (first_page or not model.border_first_page_only)
+        show_fill = not (hide & 0x10) and (first_page or not model.fill_first_page_only)
+        geometry = state.geometry
+        left_gap, right_gap, top_gap, bottom_gap = record.model.margins
+        # 속성 bit 0: 0 종이 기준(종이 끝에서 안쪽으로 여백), 1 쪽 기준(본문 영역에서 바깥으로 여백). 한컴 대화상자와
+        # rhwp body_text.rs가 이렇게 읽고, 3-09월_교육(0)·request·hwp3-sample16(1) 정답 PDF 선 위치가 0.2pt 안에서 맞다.
+        if record.model.attr & 1:
+            box = (
+                geometry.body_left - left_gap,
+                geometry.body_top - top_gap,
+                geometry.body_width + left_gap + right_gap,
+                geometry.body_height + top_gap + bottom_gap,
+            )
+        else:
+            box = (
+                left_gap,
+                top_gap,
+                geometry.paper_width - left_gap - right_gap,
+                geometry.paper_height - top_gap - bottom_gap,
+            )
+        if show_fill:
+            # 채울 영역(속성 bit 3~4): 0 종이, 1 쪽(본문), 2 테두리 안.
+            area = record.model.fill_area
+            fill_box = {
+                0: (0, 0, geometry.paper_width, geometry.paper_height),
+                1: (geometry.body_left, geometry.body_top, geometry.body_width, geometry.body_height),
+            }.get(area, box)
+            state.page.items.extend(fill_items(fill, fill_box, self.styles))
+        if show_border:
+            left, top, width, height = box
+            right, bottom = left + width, top + height
+            state.page.items.extend(
+                [
+                    *border_lines(fill.top, left, top, right, top),
+                    *border_lines(fill.bottom, left, bottom, right, bottom),
+                    *border_lines(fill.left, left, top, left, bottom),
+                    *border_lines(fill.right, right, top, right, bottom),
+                ]
+            )
 
     def extended_master(self, state: PageState, section: SectionState) -> list[Node] | None:
         """이 쪽에 기본 바탕쪽 대신 쓸 확장 바탕쪽(마지막 쪽·지정 쪽) 문단. 정답 PDF에 기본 바탕쪽 글은 함께 없다."""
