@@ -36,6 +36,8 @@ class PageScore:
     offsets: list[float] = field(default_factory=list)
     #: 범위 밖 개체 영역에 들어 있어 분모에서 뺀 정답 글자 수.
     excluded: int = 0
+    #: 어느 정답 글자와도 짝을 맺지 못한 렌더 글자의 번호.
+    unpaired_rendered: list[int] = field(default_factory=list)
 
 
 #: 한글 PDF는 글자를 600dpi 장치 점(0.12pt) 단위로 찍는다.
@@ -85,6 +87,15 @@ def pdf_pages(path: str) -> list[list[PlacedChar]]:
                             placed.append(PlacedChar(char["c"], x, y, span["font"]))
             pages.append(merge_effect_strikes(placed))
     return pages
+
+
+def pdf_image_boxes(path: str) -> list[list[tuple[float, float, float, float]]]:
+    """쪽마다 비트맵 그림 상자(x, y, 폭, 높이 pt). 한글은 일부 개체(도식·글맵시 등)를 글자 대신 비트맵으로 저장한다."""
+    with pymupdf.open(path) as document:
+        return [
+            [(x0, y0, x1 - x0, y1 - y0) for x0, y0, x1, y1 in (info["bbox"] for info in page.get_image_info())]
+            for page in document
+        ]
 
 
 def merge_effect_strikes(chars: list[PlacedChar]) -> list[PlacedChar]:
@@ -140,6 +151,8 @@ def score_page(
         if best is not None and math.dist((rendered[best].x, rendered[best].y), (char.x, char.y)) <= TOLERANCE_PT:
             candidates.remove(best)
             pairs.append((a, best))
+    paired_rendered = {b for _, b in pairs}
+    score.unpaired_rendered = [b for b in range(len(rendered)) if b not in paired_rendered]
     for a, b in pairs:
         distance = math.dist((reference[a].x, reference[a].y), (rendered[b].x, rendered[b].y))
         score.matched += 1

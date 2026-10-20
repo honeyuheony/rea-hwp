@@ -13,7 +13,17 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from accuracy import TOLERANCE_PT, PlacedChar, merge_effect_strikes, order_match, pdf_pages, score_page
+from accuracy import (
+    TOLERANCE_PT,
+    PlacedChar,
+    _inside,
+    letters,
+    merge_effect_strikes,
+    order_match,
+    pdf_image_boxes,
+    pdf_pages,
+    score_page,
+)
 from corpus import CORPUS_ROOT, load_corpus
 from equation_oracle import graft_equation_layout
 from hancom_resave import RESAVE_ROOT
@@ -25,9 +35,11 @@ from rea_hwp.render.svg import HU_PER_PT, page_glyph_table, symbol_text
 REFERENCE_ROOT = CORPUS_ROOT / "ref2022"
 
 
-def score_layout(pages, reference_pages) -> dict:
+def score_layout(pages, reference_pages, bitmap_boxes=None) -> dict:
+    """bitmap_boxes는 정답 PDF 쪽마다 비트맵 그림 상자다. 그 안의 짝 없는 렌더 글자는 손실과 따로 센다."""
     totals = {"pages": len(pages), "reference_pages": len(reference_pages)}
     totals |= {"reference_chars": 0, "within": 0, "matched": 0, "excluded": 0, "offsets": []}
+    totals |= {"bitmap_rendered": 0, "bitmap_letters": 0}
     for index, reference_chars in enumerate(reference_pages):
         # 정답 PDF처럼 효과 겹침(그림자 등 1pt 안 같은 글자)은 먼저 놓인 하나만 센다.
         rendered = (
@@ -37,6 +49,10 @@ def score_layout(pages, reference_pages) -> dict:
         )
         boxes = [tuple(v / 100 for v in box) for box in pages[index].excluded] if index < len(pages) else []
         score = score_page(reference_chars, rendered, boxes)
+        if bitmap_boxes and index < len(bitmap_boxes):
+            in_bitmap = [rendered[b] for b in score.unpaired_rendered if _inside(rendered[b], bitmap_boxes[index])]
+            totals["bitmap_rendered"] += len(in_bitmap)
+            totals["bitmap_letters"] += len(letters([c.char for c in in_bitmap]))
         totals["excluded"] += score.excluded
         totals["reference_chars"] += score.reference_chars
         totals["within"] += score.within
@@ -83,7 +99,7 @@ def evaluate(entry) -> dict:
     except Exception as error:  # 렌더링 실패는 실패로 센다(검사불가 아님).
         return {"status": "render-error", "reason": f"{type(error).__name__}: {error}"}
     reference_pages = pdf_pages(str(reference))
-    totals = score_layout(pages, reference_pages)
+    totals = score_layout(pages, reference_pages, pdf_image_boxes(str(reference)))
     offsets = totals.pop("offsets")
     result = {
         "status": "ok",
@@ -179,6 +195,13 @@ def main() -> int:
             f"order recall (letters, reading order): {order_matched}/{order_reference} = "
             f"{order_matched / order_reference:.3%}  precision: {order_matched}/{order_rendered} = "
             f"{order_matched / order_rendered:.3%}  unscorable: {len(checked) - len(ordered)}"
+        )
+        bitmap_letters = sum(r.get("bitmap_letters", 0) for r in ordered)
+        bitmap_rendered = sum(r.get("bitmap_rendered", 0) for r in checked)
+        print(
+            f"rendered only inside reference bitmaps (Hangul saved those areas as images, counted apart from loss): "
+            f"{bitmap_rendered} chars, {bitmap_letters} letters; precision without them: {order_matched}/"
+            f"{order_rendered - bitmap_letters} = {order_matched / (order_rendered - bitmap_letters):.3%}"
         )
     oracles = [r["equation_oracle"] for r in checked if "equation_oracle" in r]
     applied = [o for o in oracles if "within" in o]
