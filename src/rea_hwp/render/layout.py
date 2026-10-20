@@ -1558,10 +1558,11 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     self.append_glyph(state, item.char, shape, slot, device_round(x), baseline)
                 if underline and underline[0] is not shape:
                     self.flush_underline(state, underline, baseline)
-                # 줄 끝 공백에는 밑줄을 긋지 않는다(issue2007 2쪽 PDF: 공백으로 끝난 줄도 마지막 글자에서 끝남).
+                # 자동으로 나뉜 줄 끝 공백에는 밑줄을 긋지 않는다(issue2007 2쪽 PDF: 공백으로 끝난 줄도 마지막 글자에서
+                # 끝남). 문단 마지막 줄은 끝 공백까지 긋는다(편람 63쪽 PDF: 「제목」 뒤 공백 밑줄 165.31~460.8pt).
                 if (
                     shape.underline_type == UNDERLINE_BELOW
-                    and order < interior_end
+                    and (order < interior_end or is_last_line)
                     and not _joins_previous_jamo(view, char_index)
                 ):
                     self.extend_underline(underline, item.char, shape, device_round(x))
