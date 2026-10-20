@@ -725,6 +725,11 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     following += 1
                 reuse = True
             state = self.states[following] if reuse else self.new_page(geometry)
+            if reuse and not forced and self.no_room_below_table_remainder(state, geometry, segment):
+                # 저장 위치가 그 쪽 표 나머지와 겹치고 나머지 아래에도 들어가지 않으면 다음 쪽이다(위 표 나머지 쪽
+                # 분기와 같은 판정. 실측: rowbreak-problem 17쪽 바닥까지 찬 표 뒤 「보안 분야」 위치 0, 정답 18쪽 위).
+                following += 1
+                state = self.states[following] if following < len(self.states) else self.new_page(geometry)
             if not forced and segment.vertical_pos + segment.line_height > geometry.body_height:
                 # 구역 누적 좌표: 되돌아간 줄 위치를 새 쪽 맨 위로 삼는다.
                 state.zone_top = state.zone_bottom = -segment.vertical_pos
@@ -734,6 +739,17 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 # (footnote-01 p38: 앞 문단 끝 7680 다음 15000)은 그대로 둔다.
                 state.zone_top = state.zone_bottom = -segment.vertical_pos
         return state
+
+    def no_room_below_table_remainder(self, state: PageState, geometry: SectionGeometry, segment: LineSeg) -> bool:
+        """줄 저장 위치가 이 쪽 위를 차지한 표 나머지(위 끝 −inf 상자) 안이고, 나머지 아래에 각주 자리를 빼면 줄이
+        들어가지 않는가."""
+        registry = self.__dict__.get("_stacked_boxes", {})
+        top = geometry.body_top + state.zone_top + segment.vertical_pos
+        room = geometry.body_top + geometry.body_height - self.footnote_reserve(state)
+        return any(
+            box_top == float("-inf") and top < box_bottom and box_bottom + segment.line_height >= room
+            for box_left, box_right, box_top, box_bottom, _ in registry.get((id(state.page), state.column), [])
+        )
 
     def relative_sized_lines(self, view: ParagraphView, geometry: SectionGeometry) -> ParagraphView:
         """종이·쪽 기준 상대 높이인 글자처럼 취급 개체가 든 줄을 그 개체 높이로 늘린다.

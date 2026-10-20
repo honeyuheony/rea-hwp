@@ -357,6 +357,11 @@ def cell_items(
                     if paragraph != number:
                         restart += reflow.paragraph_gap(last_view.para_shape, view.para_shape)
                     offset = restart - segment.vertical_pos
+                    for item, source in zip(items, sources, strict=True):
+                        # 저장 쪽 조각 경계에 걸친 개체는 다음 조각 맨 위(vertical_pos 0)에 놓인다(실측:
+                        # rowbreak-problem 17쪽 글상자 74.9pt = 조각 위, 뒤 줄은 저장 위치 그대로. 개체 자리면 +9.67pt).
+                        if isinstance(source, StackedFloat) and item.top < offset < item.top + item.height:
+                            item.top = offset
             top = segment.vertical_pos + offset
             if index == 0:
                 after = []

@@ -147,3 +147,12 @@ def test_reflowed_lines_avoid_table_moved_whole_to_next_page():
     # 한글 2022 PDF 93쪽: 통째로 옮겨 온 표(60.9~140.4pt) 아래 「③ 대안의 선택 및 근거」 171.84pt.
     assert _baseline_of(page, "③대안의선택") == pytest.approx(171.84, abs=0.5)
     assert _baseline_of(page, "3.규제목표") == pytest.approx(281.04, abs=0.5)
+
+
+@pytest.mark.skipif(not (RHWP / "rowbreak-problem-pages.hwp").exists(), reason="corpus not available")
+def test_float_straddling_stored_cell_piece_starts_next_piece():
+    pages = layout_document(HwpDocument.open(RHWP / "rowbreak-problem-pages.hwp"))
+    # 한글 2022 PDF: 17쪽 「예시」 상자 머리 382.20pt, 표는 17쪽에서 끝나고 「보안 분야」는 18쪽 84.48pt.
+    assert len(pages) == 18
+    assert _baseline_of(pages[16], "【예시") == pytest.approx(382.20, abs=0.5)
+    assert _baseline_of(pages[17], "\U000f02b8보안분야") == pytest.approx(84.48, abs=0.5)
