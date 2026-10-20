@@ -552,6 +552,15 @@ def _floats_below_lines(view: ParagraphView) -> list[Node]:
     ]
 
 
+def _wraps_square_object(view: ParagraphView) -> bool:
+    return any(
+        isinstance(ctrl.model, ObjectCtrlHeader)
+        and not ctrl.model.treat_as_char
+        and ctrl.model.text_wrap == TextWrap.SQUARE
+        for ctrl in view.controls.values()
+    )
+
+
 def _is_flow_float(ctrl: Node) -> bool:
     model = ctrl.model
     return (
@@ -710,9 +719,12 @@ class TableFlowMixin:
                 stored = restarted
             overfull = len(stored) == 1 and stored[0] + margins[2] + margins[3] > stored_height(cell)
             # 쪽 조각이 낡은 셀(실측: task2287 123쪽 행 35 조각 [4000, 1000], 정답은 끝 줄을 이어 한 쪽에 둠).
+            # 다시 나누기는 개체를 피하지 않는다. 어울림 개체가 좁힌 저장 줄은 버리지 않는다(user-parsing-test 3쪽:
+            # 그림 옆 줄 폭 29051, 셀 저장 높이 282라 넘친 셀로 보면 그림 밑까지 한 줄로 이어짐).
             if (
                 recompose
                 and any(lines)
+                and not any(_wraps_square_object(view) for view in views[id(cell)])
                 and (overfull or len(stored) > 1 and self.stale_cell_split(views[id(cell)], width, stored))
             ):
                 fresh = self.recomposed_views(views[id(cell)], width)

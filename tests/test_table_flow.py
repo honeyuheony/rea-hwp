@@ -231,3 +231,15 @@ def test_distributed_line_with_single_inline_table_stays_left():
     first = next(glyph for glyph in glyphs if glyph.char == "보")
     # 한글 2022 PDF: 배분 정렬 문단의 글자처럼 취급한 표 첫 칸 「보고일시」 61.44pt(가운데로 두면 69.48pt).
     assert first.x / 100 == pytest.approx(61.44, abs=0.3)
+
+
+USER_PARSING = Path.home() / "tools" / "hwp-corpus-user" / "user-parsing-test.hwp"
+
+
+@pytest.mark.skipif(not USER_PARSING.exists(), reason="user sample not available")
+def test_overfull_cell_keeps_lines_narrowed_by_square_wrap_picture():
+    page = layout_document(HwpDocument.open(USER_PARSING))[2]
+    glyphs = [item for item in page.items if isinstance(item, Glyph) and abs(item.y / 100 - 426.6) < 1]
+    # 한글 2022 PDF 3쪽: 그림 옆에서 줄을 바꿔 둘째 줄 「제목ㆍ위치가」가 94.44pt에서 시작한다.
+    assert glyphs[0].char == "제"
+    assert glyphs[0].x / 100 == pytest.approx(94.44, abs=0.3)
