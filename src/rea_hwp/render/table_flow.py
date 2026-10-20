@@ -398,6 +398,7 @@ def cell_items(
                     # rowbreak-problem 7쪽 표 8 행 2: 다음 문단 20301 = 둘째 줄 아래 6380 + 283 + 13331 + 283 + 24).
                     # 첫 줄이 앞 문단 끝에서 표 차지 높이만큼 밀려 저장됐으면 표는 줄 위에 있다(inner-table-01 31301).
                     extent = max(0, model.vert_offset) + margins[2] + model.height + margins[3]
+                    extent += _vertical_caption_extent(ctrl)
                     pushed = segment.vertical_pos - last_end >= extent - 1
                     data = nested(ctrl)
                     if pushed:
@@ -511,7 +512,9 @@ def cell_items(
                     if index > 0:
                         # 줄이 여럿인 기준 문단은 줄을 끊지 않는다(한 줄 문단은 표가 그 줄 자리에서 시작한다).
                         block_top = max(block_top, top + segment.line_height)
-                    block_top += margins[2]
+                    # 위 캡션은 표 위에 놓여 표를 그만큼 내린다(issue5875 7쪽 셀 <표 2>: 다음 문단 31437 = 기준 줄
+                    # 21711 + 바깥 여백 140 + 캡션 1767 + 표 7679 + 바깥 여백 140, 정답 캡션 기준선이 기준 줄 아래).
+                    block_top += margins[2] + _vertical_caption_extent(ctrl, (CAPTION_TOP,))
                     block = PagingBlock(block_top, data.table, margins[2], margins[3], data)
                     items.append(block)
                     sources.append(None)
@@ -652,14 +655,14 @@ def vertical_offset(model: ObjectCtrlHeader) -> int:
     return model.vert_offset
 
 
-def _vertical_caption_extent(ctrl: Node) -> float:
+def _vertical_caption_extent(ctrl: Node, directions: tuple[int, ...] = (CAPTION_TOP, CAPTION_BOTTOM)) -> float:
     """위·아래 캡션이 개체 높이에 더하는 길이(저장 줄 기준 글 높이 + 캡션 간격). 캡션이 없거나 옆이면 0."""
     children = ctrl.children
     found = next(
         (i for i, c in enumerate(children) if c.tag == tags.LIST_HEADER and isinstance(c.model, CaptionListHeader)),
         None,
     )
-    if found is None or children[found].model.direction not in (2, 3):
+    if found is None or children[found].model.direction not in directions:
         return 0.0
     content = 0.0
     for child in children[found + 1 :]:
