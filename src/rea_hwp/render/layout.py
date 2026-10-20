@@ -218,6 +218,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         previous_vpos: int | None = None
         #: 앞 줄(위아래 배치 개체 포함)이 차지한 아래 끝의 저장 세로 위치.
         previous_bottom = previous_line_bottom = previous_line_end = 0
+        #: 앞 줄 다음 줄이 시작할 저장 세로 위치(_line_end, 글자 높이 기준).
+        previous_next_line = 0
         #: 본문 바닥을 넘어 이어진 빈 줄들의 첫 세로 위치. 다음 글자 줄을 밀 때 함께 민다.
         overflow_blank_vpos: int | None = None
         #: 이 단에서 다시 짠 문단이 길어지거나 짧아져 뒤 줄을 옮긴 양. 다음 단 저장 위치는 단 맨 위 기준이라 버린다.
@@ -331,7 +333,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             self.earlier_boxes = {id(box) for listed in registry.values() for box in listed}
             for index, segment in enumerate(view.segments):
                 rewound = previous_vpos is not None and self.restarts_column(
-                    state, geometry, (previous_vpos, previous_line_bottom, previous_bottom), segment
+                    state, geometry, (previous_vpos, previous_line_bottom, previous_bottom, previous_next_line), segment
                 )
                 forced = index == 0 and previous_vpos is not None and page_break
                 if (
@@ -423,6 +425,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 previous_vpos = segment.vertical_pos
                 previous_line_bottom = previous_bottom = segment.vertical_pos + segment.line_height
                 previous_line_end = previous_line_bottom + segment.line_spacing
+                previous_next_line = _line_end(segment)
                 column_x, column_width = geometry.columns[state.column]
                 area = Area(state.geometry.body_left + column_x, geometry.body_top + state.zone_top, column_width)
                 line_view, grown = view, None if view_reflowed else self.head_sized_line(view, index)
@@ -482,6 +485,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 previous_vpos = old.vertical_pos
                 previous_line_bottom = previous_bottom = old.vertical_pos + old.line_height
                 previous_line_end = previous_line_bottom + old.line_spacing
+                previous_next_line = _line_end(old)
                 view = stored_view
             flow_end = reflow.flow_end(view, objects=not stale_vertical)
             previous_bottom = max(previous_bottom, flow_end)
@@ -849,13 +853,13 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         return _line_has_ink(view, index, floats=False)
 
     def restarts_column(
-        self, state: PageState | None, geometry: SectionGeometry, previous: tuple[int, int, int], segment: LineSeg
+        self, state: PageState | None, geometry: SectionGeometry, previous: tuple[int, int, int, int], segment: LineSeg
     ) -> bool:
         """저장 세로 위치가 앞 줄보다 되돌아간 이 줄이 다음 단·쪽 맨 위의 줄인가.
 
-        previous는 앞 줄의 (세로 위치, 줄 아래, 위아래 배치 개체까지 포함한 문단 아래)다.
+        previous는 앞 줄의 (세로 위치, 줄 아래, 위아래 배치 개체까지 포함한 문단 아래, 다음 줄 자리 _line_end)다.
         """
-        previous_vpos, previous_line_bottom, previous_bottom = previous
+        previous_vpos, previous_line_bottom, previous_bottom, previous_next_line = previous
         vpos = segment.vertical_pos
         room = geometry.body_height - (max(state.zone_top, 0) if state is not None else 0)
         if vpos < previous_vpos:

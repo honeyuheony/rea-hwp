@@ -34,8 +34,10 @@ def _state(zone_top: float = 0.0) -> PageState:
     return PageState(page=None, geometry=None, base_geometry=None, zone_top=zone_top)
 
 
-def _restarts(previous: tuple[int, int, int], segment: LineSeg, columns: int = 1) -> bool:
-    return DocumentLayout.restarts_column(None, _state(), _geometry(columns), previous, segment)
+def _restarts(previous: tuple[int, ...], segment: LineSeg, columns: int = 1, body_height: int = 60000) -> bool:
+    # 앞 줄 다음 자리를 주지 않은 사례는 앞 줄 줄 간격이 0이다.
+    previous = previous if len(previous) == 4 else (*previous, previous[1])
+    return DocumentLayout.restarts_column(None, _state(), _geometry(columns, body_height), previous, segment)
 
 
 def test_rewind_to_column_top_starts_next_column():
