@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import struct
 import zlib
-
-import numpy as np
+from collections.abc import Iterable
 
 _TIFF_SIGNATURES = (b"II*\x00", b"MM\x00*")
 _PCX_MANUFACTURER = 10
@@ -21,6 +20,7 @@ _TYPE_FORMATS = {1: "B", 3: "H", 4: "I"}
 
 # PNG 색 형식: 회색, RGB, 팔레트, 회색+알파, RGBA
 _PNG_GRAY, _PNG_RGB, _PNG_PALETTE, _PNG_GRAY_ALPHA, _PNG_RGBA = 0, 2, 3, 4, 6
+_INVERT = bytes(255 - value for value in range(256))
 
 
 def png_from_raster(data: bytes) -> bytes | None:
@@ -88,18 +88,20 @@ def _tiff_to_png(data: bytes) -> bytes | None:
         strip = data[offset : offset + length]
         strips.append(_lzw_decode(strip) if compression == 5 else strip)
     row_bytes = (width * samples * bits + 7) // 8
-    pixels = np.frombuffer(b"".join(strips), dtype=np.uint8)[: row_bytes * height].reshape(height, row_bytes)
-    if bits == 8 and fields.get(_PREDICTOR, [1])[0] == 2:
-        # 수평 차분: 같은 표본끼리 왼쪽 값을 더해 되돌린다(uint8 누적합은 256으로 돈다).
-        pixels = pixels.reshape(height, width, samples).cumsum(axis=1, dtype=np.uint8).reshape(height, row_bytes)
-    if photometric == 0:
-        # WhiteIsZero: PNG 회색은 0이 검정이라 뒤집는다(알파 표본은 그대로).
-        pixels = pixels.copy()
-        if bits == 1:
-            pixels ^= 0xFF
-        else:
-            pixels.reshape(height, width, samples)[:, :, 0] ^= 0xFF
-    return _png(width, height, bits, color_types[photometric, samples], pixels)
+    pixels = b"".join(strips)
+    if len(pixels) < row_bytes * height:
+        raise ValueError(f"TIFF strips hold {len(pixels)} bytes, expected {row_bytes * height}")
+    rows = [bytearray(pixels[row * row_bytes : (row + 1) * row_bytes]) for row in range(height)]
+    for row in rows:
+        if bits == 8 and fields.get(_PREDICTOR, [1])[0] == 2:
+            # 수평 차분: 같은 표본끼리 왼쪽 값을 더해 되돌린다(256으로 돈다).
+            for index in range(samples, row_bytes):
+                row[index] = (row[index] + row[index - samples]) & 0xFF
+        if photometric == 0:
+            # WhiteIsZero: PNG 회색은 0이 검정이라 뒤집는다(알파 표본은 그대로).
+            step = 1 if bits == 1 else samples
+            row[::step] = row[::step].translate(_INVERT)
+    return _png(width, height, bits, color_types[photometric, samples], rows)
 
 
 def _lzw_decode(code_bytes: bytes) -> bytes:
@@ -152,23 +154,34 @@ def _pcx_to_png(data: bytes) -> bytes | None:
             decoded.append(byte)
     if len(decoded) < total:
         return None
-    rows = np.frombuffer(bytes(decoded[:total]), dtype=np.uint8).reshape(height, planes, line_bytes)
+
+    def plane(row: int, index: int) -> bytes:
+        start = (row * planes + index) * line_bytes
+        return bytes(decoded[start : start + line_bytes])
 
     if bits == 1 and planes == 1:
         # 두 색은 머리의 16색 팔레트 앞 두 칸(48바이트 EGA 팔레트, 16번째 바이트부터).
         palette = data[16:22]
-        return _png(width, height, 1, _PNG_PALETTE, rows[:, 0, : (width + 7) // 8], palette)
+        rows = [plane(row, 0)[: (width + 7) // 8] for row in range(height)]
+        return _png(width, height, 1, _PNG_PALETTE, rows, palette)
     if bits == 8 and planes == 1 and len(data) >= 769 and data[-769] == 12:
-        return _png(width, height, 8, _PNG_PALETTE, rows[:, 0, :width], data[-768:])
+        return _png(width, height, 8, _PNG_PALETTE, [plane(row, 0)[:width] for row in range(height)], data[-768:])
     if bits == 8 and planes == 3:
-        rgb = rows[:, :, :width].transpose(0, 2, 1).reshape(height, width * 3)
-        return _png(width, height, 8, _PNG_RGB, rgb)
+        rgb_rows = []
+        for row in range(height):
+            rgb = bytearray(width * 3)
+            for index in range(3):
+                rgb[index::3] = plane(row, index)[:width]
+            rgb_rows.append(bytes(rgb))
+        return _png(width, height, 8, _PNG_RGB, rgb_rows)
     return None
 
 
-def _png(width: int, height: int, bits: int, color_type: int, rows: np.ndarray, palette: bytes | None = None) -> bytes:
+def _png(
+    width: int, height: int, bits: int, color_type: int, rows: Iterable[bytes | bytearray], palette: bytes | None = None
+) -> bytes:
     """행마다 필터 0을 붙여 deflate로 묶은 PNG."""
-    filtered = np.hstack([np.zeros((height, 1), dtype=np.uint8), np.ascontiguousarray(rows, dtype=np.uint8)])
+    filtered = b"".join(b"\x00" + row for row in rows)
 
     def chunk(kind: bytes, body: bytes) -> bytes:
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
@@ -177,5 +190,5 @@ def _png(width: int, height: int, bits: int, color_type: int, rows: np.ndarray, 
     parts = [b"\x89PNG\r\n\x1a\n", chunk(b"IHDR", header)]
     if palette is not None:
         parts.append(chunk(b"PLTE", palette))
-    parts += [chunk(b"IDAT", zlib.compress(filtered.tobytes(), 6)), chunk(b"IEND", b"")]
+    parts += [chunk(b"IDAT", zlib.compress(filtered, 6)), chunk(b"IEND", b"")]
     return b"".join(parts)

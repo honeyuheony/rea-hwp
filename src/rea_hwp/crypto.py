@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import struct
 
-import numpy as np
-from Crypto.Cipher import AES, DES
+from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
+from cryptography.hazmat.primitives.ciphers import Cipher, CipherAlgorithm, algorithms, modes
 
 from .record import parse_records
 from .tags import DISTRIBUTE_DOC_DATA
@@ -19,6 +19,8 @@ SUPPORTED_ENCRYPT_VERSION = 4
 LEGACY_ENCRYPT_VERSIONS = (0, 1, 2)
 LEGACY_KEY_BYTES = 7
 _CFB1_CHUNK_BYTES = 1 << 16
+#: 비트 위치 j마다 ECB 출력 첫 바이트의 맨 위 비트를 평문 바이트의 (7 - j)번 비트 자리로 옮기는 표.
+_KEYSTREAM_BIT_TABLES = [bytes((value >> 7) << (7 - bit) for value in range(256)) for bit in range(8)]
 
 
 class HwpDecryptError(ValueError):
@@ -66,7 +68,7 @@ def decrypt_distribute_stream(stream: bytes) -> bytes:
     key, _ = distribute_key(head[0].payload)
     body = stream[DISTRIBUTE_HEADER_SIZE:]
     aligned = len(body) - len(body) % 16
-    return AES.new(key, AES.MODE_ECB).decrypt(body[:aligned]) + body[aligned:]
+    return _ecb(algorithms.AES(key)).decryptor().update(body[:aligned]) + body[aligned:]
 
 
 def password_key(password: str) -> bytes:
@@ -104,7 +106,9 @@ def legacy_password_key(password: str) -> bytes:
 def decrypt_legacy_password_stream(stream: bytes, password: str) -> bytes:
     """DES-ECB 복호화. 8바이트에 못 미치는 꼬리는 한글처럼 그대로 둔다."""
     aligned = len(stream) - len(stream) % 8
-    return DES.new(legacy_password_key(password), DES.MODE_ECB).decrypt(stream[:aligned]) + stream[aligned:]
+    # 같은 8바이트 키를 세 번 이은 TripleDES는 단일 DES와 같다.
+    decryptor = _ecb(TripleDES(legacy_password_key(password) * 3)).decryptor()
+    return decryptor.update(stream[:aligned]) + stream[aligned:]
 
 
 def decrypt_stream(stream: bytes, password: str, encrypt_version: int) -> bytes:
@@ -115,16 +119,24 @@ def decrypt_stream(stream: bytes, password: str, encrypt_version: int) -> bytes:
 
 def decrypt_password_stream(stream: bytes, password: str) -> bytes:
     """AES-128 CFB-1(IV 0) 복호화. 암호문을 알기 때문에 레지스터를 미리 만들어 ECB로 한 번에 돌린다."""
-    ecb = AES.new(password_key(password), AES.MODE_ECB)
-    cipher_bits = np.unpackbits(np.frombuffer(bytes(16) + stream, dtype=np.uint8))
+    encryptor = _ecb(algorithms.AES(password_key(password))).encryptor()
+    padded = bytes(16) + stream
     plain = bytearray()
     for start in range(0, len(stream), _CFB1_CHUNK_BYTES):
         end = min(start + _CFB1_CHUNK_BYTES, len(stream))
-        bit_start = start * 8
-        bit_count = (end - start) * 8
-        windows = np.lib.stride_tricks.sliding_window_view(cipher_bits[bit_start : bit_start + bit_count + 127], 128)
-        registers = np.packbits(windows, axis=1).tobytes()
-        keystream = np.frombuffer(ecb.encrypt(registers), dtype=np.uint8)[::16] >> 7
-        own_bits = cipher_bits[128 + bit_start : 128 + bit_start + bit_count]
-        plain += np.packbits(own_bits ^ keystream).tobytes()
+        window = padded[start : end + 17]
+        window_value = int.from_bytes(window, "big")
+        keystream = 0
+        for bit in range(8):
+            # 바이트 k의 j번 비트를 푸는 레지스터는 그 비트 앞 128비트, 곧 (8 - j)비트 민 값의 [k + 1, k + 17) 바이트다.
+            shifted = (window_value >> (8 - bit)).to_bytes(len(window), "big")
+            registers = b"".join(shifted[index + 1 : index + 17] for index in range(end - start))
+            tops = encryptor.update(registers)[::16].translate(_KEYSTREAM_BIT_TABLES[bit])
+            keystream |= int.from_bytes(tops, "big")
+        cipher_value = int.from_bytes(stream[start:end], "big")
+        plain += (cipher_value ^ keystream).to_bytes(end - start, "big")
     return bytes(plain)
+
+
+def _ecb(algorithm: CipherAlgorithm) -> Cipher:
+    return Cipher(algorithm, modes.ECB())

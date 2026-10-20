@@ -5,9 +5,8 @@ description = "Lossless HWP 5.0 parser and page-accurate web renderer"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "numpy>=2.5.4",
+    "cryptography>=50.0.0",
     "olefile>=0.47",
-    "pycryptodome>=4.0.0",
 ]
 
 [project.scripts]
