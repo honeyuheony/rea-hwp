@@ -62,7 +62,7 @@ from .notes import NotesMixin, piece_height
 from .numbering import format_number
 from .objects import ObjectsMixin, outer_box
 from .paint import PaintUnit, arrange_pages
-from .scene import Glyph, Page, TextLine
+from .scene import Glyph, Line, Page, TextLine
 from .styles import DocStyles, colorref
 from .table_flow import TableFlowMixin, is_block_table
 
@@ -1380,6 +1380,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         # FUN_1030c200, 구간 경계 FUN_10175e50: 글자 모양이 바뀌거나 컨트롤 문자를 만나면 끊고 공백에서는 끊지 않는다).
         shadow_run: list[tuple[list[Glyph], Glyph]] = []
         run_shape: CharShape | None = None
+        underline: list = []
         guide_text = _guide_text_chars(view)
         for order, (char_index, width) in enumerate(zip(items, widths, strict=True)):
             item = view.chars[char_index]
@@ -1410,9 +1411,19 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 elif item.char.strip():
                     slot = self.measurer.slot(item.char, shape)
                     self.append_glyph(state, item.char, shape, slot, device_round(x), baseline)
+                if underline and underline[0] is not shape:
+                    self.flush_underline(state, underline, baseline)
+                # 줄 끝 공백에는 밑줄을 긋지 않는다(issue2007 2쪽 PDF: 공백으로 끝난 줄도 마지막 글자에서 끝남).
+                if (
+                    shape.underline_type == UNDERLINE_BELOW
+                    and order < interior_end
+                    and not _joins_previous_jamo(view, char_index)
+                ):
+                    self.extend_underline(underline, item.char, shape, device_round(x))
                 x += width + extras[order]
                 continue
             _flush_shadow_run(state.page, shadow_run)
+            self.flush_underline(state, underline, baseline)
             if char_index in view.controls:
                 self.place_control(state, view, view.controls[char_index], x, line_top, baseline, area, char_index)
             elif item.code == TAB and tab_fill(item) == LEADER_DOT:
@@ -1420,6 +1431,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 self.place_leader(state, shape, x, width + extras[order], baseline)
             x += width + extras[order]
         _flush_shadow_run(state.page, shadow_run)
+        self.flush_underline(state, underline, baseline)
         self.line_pieces = outer_pieces
         text = "".join(pieces)
         if text.strip():
@@ -1578,6 +1590,31 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         glyph = self.make_glyph(char, shape, slot, x, baseline)
         state.page.items.extend(self.shadow_strikes(glyph, shape))
         state.page.items.append(glyph)
+
+    def extend_underline(self, run: list, char: str, shape: CharShape, x: float) -> None:
+        """run = [글자 모양, 시작 x, 끝 x]. 끝은 마지막 글자 x + 자간을 뺀 글자 폭이다."""
+        slot = self.measurer.slot(char, shape)
+        end = x + self.measurer.advance(char, shape, slot) - self.trailing_spacing(char, shape)
+        if run:
+            run[2] = end
+        else:
+            run.extend((shape, x, end))
+
+    def flush_underline(self, state: PageState, run: list, baseline: float) -> None:
+        if not run:
+            return
+        shape, start, end = run
+        run.clear()
+        # 굵기는 글자 크기의 1/25을 장치 칸으로 반올림, 선 위 끝은 기준선 아래 0.15em(코퍼스 정답 PDF 119문서 실측:
+        # 8~20pt 굵기 0.36~0.84pt, 선 가운데 10pt 1.68·14pt 2.40·20pt 3.36pt, 쪽 맞춤 비율 0.998907을 되돌린 값).
+        width = max(DEVICE_UNIT, device_round(shape.base_size / 25))
+        top = baseline + shape.base_size * 0.15
+        color = colorref(shape.underline_color) or "#000000"
+        dash = UNDERLINE_DASH.get(shape.underline_shape)
+        dash_text = " ".join(f"{part * width / 100:.2f}" for part in dash) if dash else None
+        for dy, ratio in UNDERLINE_STROKES.get(shape.underline_shape, ((0.5, 1.0),)):
+            y = top + dy * width
+            state.page.items.append(Line(start, y, end, y, width * ratio, color, dash_text))
 
     def shadow_strikes(self, glyph: Glyph, shape: CharShape) -> list[Glyph]:
         """본 글자보다 먼저(아래에) 찍는 그림자 글자들. 그림자가 없으면 빈 목록."""
@@ -2055,6 +2092,26 @@ def _flush_shadow_run(page: Page, run: list[tuple[list[Glyph], Glyph]]) -> None:
 
 def layout_document(document: HwpDocument) -> list[Page]:
     return DocumentLayout(document).run()
+
+
+#: 글자 모양 밑줄 종류(attr bit 2~3): 1 글자 아래. 2는 한컴이 밑줄 없이 채우는 값(모양 15와 함께)이다.
+UNDERLINE_BELOW = 1
+#: 밑줄 모양(표25 선 종류) → 점선 길이(굵기 배수). underline-styles 10pt PDF 실측(큰 점선 6은 원 대신 짧은 선).
+UNDERLINE_DASH = {
+    1: (8, 4.67),
+    2: (1.67, 2.67),
+    3: (16, 4.67, 1.67, 4.67),
+    4: (16, 4.67, 1.67, 4.67, 1.67, 4.67),
+    5: (16, 4.67),
+    6: (1.67, 2.67),
+}
+#: 여러 겹 밑줄 → (선 위 끝에서 선 가운데까지, 선 굵기) 굵기 배수. 같은 PDF 10pt 실측, 다른 크기는 검증 안 됨.
+UNDERLINE_STROKES = {
+    7: ((0.33, 0.67), (2.33, 0.67)),
+    8: ((0.67, 1.33), (4.0, 3.0)),
+    9: ((1.5, 3.0), (5.17, 1.33)),
+    10: ((0.33, 0.67), (2.67, 3.0), (5.3, 0.67)),
+}
 
 
 #: 세로쓰기에서 세워 찍을 때 바꿔 찍는 문장 부호(tbox-v-flow-01 PDF 실측).
