@@ -3,6 +3,7 @@ name = "rea-hwp"
 version = "0.1.0"
 description = "Lossless HWP 5.0 parser and page-accurate web renderer"
 readme = "README.md"
+license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12"
 dependencies = [

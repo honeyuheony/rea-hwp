@@ -1,5 +1,24 @@
-Copyright (c) 2026 김우헌. All rights reserved.
+MIT License
 
-이 저장소의 사용 허락 조건(라이선스 종류)은 아직 정하지 않았다. 정하기 전까지는 저작권자의
-허락 없이 복제·수정·배포할 수 없다. 이 저장소에 들어 있는 제3자 코드의 저작권 고지와 사용
-허락 조건은 NOTICE에 있으며, 그 부분에는 NOTICE에 적은 원래 조건(MIT)이 그대로 적용된다.
+Copyright (c) 2026 김우헌
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Third-party code in this repository keeps its own copyright notices and terms,
+listed in NOTICE.
