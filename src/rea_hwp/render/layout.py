@@ -1514,6 +1514,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         shadow_run: list[tuple[list[Glyph], Glyph]] = []
         run_shape: CharShape | None = None
         underline: list = []
+        strike: list = []
         shade: list = []
         guide_text = _guide_text_chars(view)
         for order, (char_index, width) in enumerate(zip(items, widths, strict=True)):
@@ -1558,10 +1559,15 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     and not _joins_previous_jamo(view, char_index)
                 ):
                     self.extend_underline(underline, item.char, shape, device_round(x))
+                if strike and strike[0] is not shape:
+                    self.flush_strike(state, strike, line_top + segment.text_height / 2)
+                if shape.strike and order < interior_end and not _joins_previous_jamo(view, char_index):
+                    self.extend_underline(strike, item.char, shape, device_round(x))
                 x += width + extras[order]
                 continue
             _flush_shadow_run(state.page, shadow_run)
             self.flush_underline(state, underline, baseline)
+            self.flush_strike(state, strike, line_top + segment.text_height / 2)
             self.flush_shade(state, shade, line_top, segment.line_height)
             if char_index in view.controls:
                 self.place_control(state, view, view.controls[char_index], x, line_top, baseline, area, char_index)
@@ -1571,6 +1577,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             x += width + extras[order]
         _flush_shadow_run(state.page, shadow_run)
         self.flush_underline(state, underline, baseline)
+        self.flush_strike(state, strike, line_top + segment.text_height / 2)
         self.flush_shade(state, shade, line_top, segment.line_height)
         self.line_pieces = outer_pieces
         text = "".join(pieces)
@@ -1754,6 +1761,21 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         dash_text = " ".join(f"{part * width / 100:.2f}" for part in dash) if dash else None
         for dy, ratio in UNDERLINE_STROKES.get(shape.underline_shape, ((0.5, 1.0),)):
             y = top + dy * width
+            state.page.items.append(Line(start, y, end, y, width * ratio, color, dash_text))
+
+    def flush_strike(self, state: PageState, run: list, middle: float) -> None:
+        """취소선은 줄 글자 높이의 가운데에 밑줄과 같은 굵기로 긋는다(issue5788 3쪽 9.5pt·task2287 8쪽 12pt PDF:
+        선 가운데가 기준선 위 3.83pt·4.20pt, 굵기 0.36·0.48pt). 모양별 점선은 밑줄 표를 쓴다."""
+        if not run:
+            return
+        shape, start, end = run
+        run.clear()
+        width = max(DEVICE_UNIT, device_round(shape.base_size / 25))
+        color = colorref(shape.strike_color) or "#000000"
+        dash = UNDERLINE_DASH.get(shape.strike_shape)
+        dash_text = " ".join(f"{part * width / 100:.2f}" for part in dash) if dash else None
+        for dy, ratio in UNDERLINE_STROKES.get(shape.strike_shape, ((0.5, 1.0),)):
+            y = middle + (dy - 0.5) * width
             state.page.items.append(Line(start, y, end, y, width * ratio, color, dash_text))
 
     def extend_shade(self, state: PageState, run: list, shape: CharShape, x: float, width: float) -> None:
