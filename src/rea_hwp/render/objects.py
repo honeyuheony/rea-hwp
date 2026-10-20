@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import functools
+import itertools
 import math
 import os
 import struct
@@ -659,7 +660,8 @@ class ObjectsMixin:
             svg = _shape_svg(component, width, height)
             if svg is not None:
                 href = f"data:image/svg+xml;base64,{base64.b64encode(svg.encode('utf-8')).decode('ascii')}"
-                pad = _shape_pad(component.model)
+                line = component.find(tags.SHAPE_COMPONENT_LINE)
+                pad = _shape_pad(component.model, line.model if line is not None else None)
                 state.page.items.append(Image(left - pad, top - pad, width + 2 * pad, height + 2 * pad, href))
         picture = component.find(tags.SHAPE_COMPONENT_PICTURE)
         if picture is not None and isinstance(picture.model, ShapePicture):
@@ -1333,15 +1335,15 @@ def _shape_svg(component: Node, width: float, height: float) -> str | None:
         stroke = f' stroke="{color}" stroke-width="{line_width}"'
         if line_kind in _DASH_PATTERNS:
             stroke += f' stroke-dasharray="{",".join(str(n * line_width) for n in _DASH_PATTERNS[line_kind])}"'
-    pad = _shape_pad(model)
+    pad = _shape_pad(model, geometry)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{-pad} {-pad} {width + 2 * pad:g} {height + 2 * pad:g}" '
         f'preserveAspectRatio="none">{definition}<path d="{"".join(commands)}" fill="{fill}"{stroke}/>{arrows}</svg>'
     )
 
 
-def _shape_pad(model: object) -> float:
-    """도형 SVG가 개체 상자 밖으로 그리는 폭: 선 굵기, 화살표가 있으면 가장 긴 화살표 길이까지."""
+def _shape_pad(model: object, geometry: object = None) -> float:
+    """도형 SVG가 개체 상자 밖으로 그리는 폭: 선 굵기, 화살표 길이, 상자 밖으로 휘는 연결선 경로."""
     line_width = max(getattr(model, "line_width", 0) or 0, 0)
     attr = getattr(model, "line_attr", 0) or 0
     reach = 0.0
@@ -1349,7 +1351,19 @@ def _shape_pad(model: object) -> float:
         if (attr >> shape_bit) & 0x3F:
             length, width = _arrow_size((attr >> size_bit) & 0xF, line_width)
             reach = max(reach, length, width)
-    return line_width + reach
+    return line_width + reach + _route_overflow(model, geometry)
+
+
+def _route_overflow(model: object, geometry: object) -> float:
+    """연결선 꺾임점이 상자(원래 크기)를 벗어난 거리(현재 크기 축척). kr_156489775 10쪽: 상자 폭 657, 꺾임점 2729."""
+    points = geometry.connector_points if isinstance(geometry, ShapeLine) else None
+    if not points:
+        return 0.0
+    width, height = getattr(model, "original_width", 0) or 0, getattr(model, "original_height", 0) or 0
+    scale_x = abs(getattr(model, "current_width", 0) or 0) / width if width else 1.0
+    scale_y = abs(getattr(model, "current_height", 0) or 0) / height if height else 1.0
+    xs, ys = [x for x, _ in points], [y for _, y in points]
+    return max(0.0, -min(xs) * scale_x, (max(xs) - width) * scale_x, -min(ys) * scale_y, (max(ys) - height) * scale_y)
 
 
 def _arrow_size(size: int, line_width: float) -> tuple[float, float]:
@@ -1396,10 +1410,37 @@ def _toward(point: tuple[float, float], target: tuple[float, float], distance: f
 Subpath = tuple[tuple[float, float], list[tuple[tuple[float, float], ...]], bool]
 
 
+#: 연결선 종류(ShapeLine attr): 0~2 직선, 3~5 꺾은선, 6~8 곡선(각각 화살표 없음·한쪽·양쪽).
+CONNECTOR_ELBOW, CONNECTOR_CURVED = 3, 6
+
+
+def _curved_route(points: list[tuple[int, int]]) -> list[tuple[tuple[float, float], ...]]:
+    """곡선 연결선: 꺾이는 점마다 앞뒤 구간 가운데(양 끝은 시작·끝점)를 잇는 사분원 근사 3차 베지어.
+
+    실측: kr_156489775 10쪽 PDF 파란(4점)·빨간(5점) 연결선, 제어점 = 끝점 + 0.553 × (꺾이는 점 − 끝점).
+    """
+    corners = points[1:-1]
+    if not corners:
+        return [(points[-1],)]
+    ends = [points[0]]
+    ends += [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in itertools.pairwise(corners)]
+    ends.append(points[-1])
+    k = _ELLIPSE_KAPPA
+    segments = []
+    for (ax, ay), (cx, cy), (bx, by) in zip(ends[:-1], corners, ends[1:], strict=True):
+        segments.append(((ax + k * (cx - ax), ay + k * (cy - ay)), (bx + k * (cx - bx), by + k * (cy - by)), (bx, by)))
+    return segments
+
+
 def _shape_subpaths(geometry: object) -> list[Subpath]:
     """도형 레코드의 윤곽(원래 좌표). 구간은 끝점 하나(직선)이거나 제어점 둘과 끝점(3차 베지어)이다."""
     if isinstance(geometry, ShapeLine):
-        return [((geometry.start_x, geometry.start_y), [((geometry.end_x, geometry.end_y),)], False)]
+        points = geometry.connector_points
+        if points is None or geometry.attr < CONNECTOR_ELBOW:
+            return [((geometry.start_x, geometry.start_y), [((geometry.end_x, geometry.end_y),)], False)]
+        if geometry.attr < CONNECTOR_CURVED:
+            return [(points[0], [(p,) for p in points[1:]], False)]
+        return [(points[0], _curved_route(points), False)]
     if isinstance(geometry, ShapePolygon):
         points = geometry.points or []
         if len(points) < 2:

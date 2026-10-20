@@ -1,11 +1,14 @@
 import base64
 import re
+import struct
 from pathlib import Path
 
 import pytest
 
 from rea_hwp.document import HwpDocument
+from rea_hwp.models.shapes import ShapeLine
 from rea_hwp.render.layout import layout_document
+from rea_hwp.render.objects import _curved_route
 from rea_hwp.render.scene import Glyph, Image
 
 RHWP = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp"
@@ -82,3 +85,24 @@ def test_picture_draws_only_its_cropped_part():
     arrow = next(item for item in page.items if isinstance(item, Image) and abs(item.x / 100 - 284.5) < 1)
     # 한글 2022 PDF 2쪽: 1229×513 그림 가운데 잘라 쓰기(43931, 13136)~(49350, 20021) = 픽셀 × 75 영역만 보인다.
     assert arrow.crop == pytest.approx((43931 / 92175, 13136 / 38475, 49350 / 92175, 20021 / 38475))
+
+
+def test_curved_connector_bends_quarter_ellipses_through_segment_midpoints():
+    points = [(0, 7143), (2729, 7143), (2729, 0), (657, 0)]
+    first, second = _curved_route(points)
+    # 한글 2022 PDF(kr_156489775 10쪽 파란 연결선): 첫 곡선은 꺾인 세로 구간 가운데 (2729, 3571.5)에서 끝나고
+    # 제어점은 (1511, 7143)·(2729, 5546) 근처, 둘째 곡선은 끝점 (657, 0)에서 끝난다.
+    assert first[2] == (2729, 3571.5)
+    assert first[0] == pytest.approx((1511, 7143), abs=10)
+    assert first[1] == pytest.approx((2729, 5546), abs=10)
+    assert second[2] == (657, 0)
+
+
+def test_connector_points_follow_subject_ids_in_line_tail():
+    tail = (
+        struct.pack("<IIIII", 0, 0, 0x2EB6AFF6, 1, 2)
+        + struct.pack("<iiH", 0, 7143, 3)
+        + struct.pack("<iiH", 657, 0, 26)
+    )
+    line = ShapeLine(values={"start_x": 0, "start_y": 7143, "end_x": 657, "end_y": 0, "attr": 7}, tail=tail)
+    assert line.connector_points == [(0, 7143), (657, 0)]

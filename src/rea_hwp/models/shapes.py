@@ -161,6 +161,16 @@ class ShapeLine(RecordModel):
         ("attr", "u32"),
     ]
 
+    @property
+    def connector_points(self) -> list[Point] | None:
+        """연결선의 꺾임점(시작·끝 포함). tail = 시작 대상(id, 순번), 끝 대상(id, 순번), 점 수, 점마다 x·y·종류(u16)."""
+        if len(self.tail) < 20:
+            return None
+        (count,) = struct.unpack_from("<I", self.tail, 16)
+        if count < 2 or len(self.tail) < 20 + 10 * count:
+            return None
+        return [struct.unpack_from("<ii", self.tail, 20 + 10 * index) for index in range(count)]
+
 
 @register(tags.SHAPE_COMPONENT_RECTANGLE)
 @dataclass
