@@ -1359,8 +1359,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         # 기준선 간격이 0으로 저장된 줄(미주 첫 줄 등)은 글자 높이의 0.85를 쓴다(rhwp paragraph_layout.rs와 같은 보정).
         # 글자 높이의 정확히 절반으로 저장된 기준선(다른 프로그램이 만든 LINE_SEG)도 한글은 0.85로 다시 잡는다
         # (hwp-multi-001 1쪽 「총투자」 셀: 저장 500/1000, 정답 PDF 853; kr_156489577 14쪽 셀 550/1100 → 정답 약 935).
+        # 홀수 높이는 절반을 내림해 저장한다(exam_science 3쪽 표 줄 11965/23931, 정답 상자 위 끝 = 줄 위 끝).
         stored = segment.baseline_gap
-        half = stored > 0 and stored * 2 == segment.text_height
+        half = stored > 0 and stored == segment.text_height // 2
         baseline_gap = stored if stored > 0 and not half else round(segment.text_height * TAC_ASCENT)
         baseline = line_top + baseline_gap
         line_start = x

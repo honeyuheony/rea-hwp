@@ -183,3 +183,10 @@ def test_paragraph_without_line_info_starts_below_its_own_floats():
     # 다음 문단 「①」(저장 줄 15006)은 270.36pt 그대로다.
     assert _baseline_of(page, "23.") == pytest.approx(239.88, abs=1.0)
     assert _baseline_of(page, "①") == pytest.approx(270.36, abs=0.5)
+
+
+@pytest.mark.skipif(not (RHWP / "exam_science.hwp").exists(), reason="corpus not available")
+def test_inline_table_on_line_with_floored_half_baseline_starts_at_line_top():
+    page = layout_document(HwpDocument.open(RHWP / "exam_science.hwp"))[2]
+    # 한글 2022 PDF 3쪽: 기준선이 높이 23931의 내림한 절반 11965로 저장된 표 줄, 첫 셀 줄 「[실험 과정]」 154.20pt.
+    assert _baseline_of(page, "[실험과정]") == pytest.approx(154.20, abs=0.5)
