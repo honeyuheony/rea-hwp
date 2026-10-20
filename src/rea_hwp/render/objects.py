@@ -37,6 +37,7 @@ from .chart import ChartDrawing, draw_vtchart, vtchart_contents
 from .common import (
     ALIGN_CENTER,
     ALIGN_END,
+    LINE_PAINT_GROW,
     OBJECT_PAINT_GROW,
     REL_COLUMN_OR_PARA,
     REL_PAGE,
@@ -630,8 +631,12 @@ class ObjectsMixin:
             inner_width = width - margins[0] - margins[1]
             views = self.paragraph_views(paragraphs, inner_width, textbox=True)
             area = Area(left + margins[0], top + margins[2], inner_width)
+            inner_height = height - margins[2] - margins[3]
             with self.painting_list(("text box", id(component))):
-                self.place_linked_text(state, views, area, (height - margins[2] - margins[3], header.vert_align))
+                if header.text_direction:
+                    self.place_vertical_text(state, views, area, inner_height, header)
+                else:
+                    self.place_linked_text(state, views, area, (inner_height, header.vert_align))
         # 중첩 묶음 자식도 맨 바깥 묶음 기준이다(편람 9쪽: 세 단계 묶음 이동 행렬이 모두 25159, 정답 x 268pt).
         origin = origin or (left, top)
         for child in component.children:
@@ -641,6 +646,24 @@ class ObjectsMixin:
                 if box is None:
                     box = (sub.offset_x, sub.offset_y, sub.current_width, sub.current_height)
                 self.draw_component(state, child, origin[0] + box[0], origin[1] + box[1], box[2], box[3], origin)
+
+    def place_vertical_text(
+        self, state: PageState, views: list[ParagraphView], area: Area, inner_height: float, header: TextBoxListHeader
+    ) -> None:
+        """세로쓰기 글상자: 줄은 오른쪽부터 왼쪽으로 늘어선 열이고 vertical_pos는 오른쪽 끝에서 잰 거리다.
+
+        세로 정렬은 열 묶음의 가로 위치다(tbox-v-flow-01 PDF: 가운데 정렬, 첫 열 오른쪽 = 안쪽 오른쪽 − 남는 폭/2).
+        """
+        content = max((s.vertical_pos + s.line_height for view in views for s in view.segments), default=0)
+        slack = max(0.0, area.width - content)
+        # 검증 안 됨: 위(0)는 오른쪽, 아래(2)는 왼쪽 끝으로 본다(실측은 가운데뿐).
+        right = area.x + area.width - {1: slack / 2, 2: slack}.get(header.vert_align, 0.0)
+        for view in views:
+            for index, segment in enumerate(view.segments):
+                column_right = right - segment.vertical_pos
+                box = (column_right - segment.line_height, area.y, segment.line_height, inner_height)
+                with self.painting(state.page, box, LINE_PAINT_GROW, is_line=True):
+                    self.draw_vertical_line(state, view, index, column_right, area.y, header.text_direction == 1)
 
     def place_linked_text(
         self, state: PageState, views: list[ParagraphView], area: Area, alignment: tuple[float, int]

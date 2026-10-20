@@ -5,7 +5,7 @@ import pytest
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import layout_document
-from rea_hwp.render.scene import Image
+from rea_hwp.render.scene import Glyph, Image
 
 RHWP = Path.home() / "tools" / "hwp-corpus" / "oss" / "rhwp"
 VERTICAL_DOC = RHWP / "hwpx__hancom-hwp__tbox-v-flow-01.hwp"
@@ -19,6 +19,20 @@ def _svg_images(page) -> list[str]:
         for item in page.items
         if isinstance(item, Image) and item.href.startswith(prefix)
     ]
+
+
+def _origin(page, char: str) -> tuple[float, float]:
+    glyph = next(item for item in page.items if isinstance(item, Glyph) and item.char == char)
+    return glyph.x / 100, glyph.y / 100
+
+
+@pytest.mark.skipif(not VERTICAL_DOC.exists(), reason="corpus not available")
+def test_vertical_text_box_writes_columns_right_to_left():
+    page = layout_document(HwpDocument.open(VERTICAL_DOC))[0]
+    # 한글 2022 PDF: 첫 열 「죽」 (258.12, 114.00), 둘째 열 「한」 (242.16, 114.00), 「,」는 「、」 (246.96, 214.08).
+    assert _origin(page, "죽") == pytest.approx((258.12, 114.00), abs=0.5)
+    assert _origin(page, "한") == pytest.approx((242.16, 114.00), abs=0.5)
+    assert _origin(page, "、") == pytest.approx((246.96, 214.08), abs=0.5)
 
 
 @pytest.mark.skipif(not VERTICAL_DOC.exists(), reason="corpus not available")

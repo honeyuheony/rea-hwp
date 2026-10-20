@@ -1348,6 +1348,58 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         if text.strip():
             state.page.text_lines.append(TextLine(text.rstrip(), line_start, baseline, x - line_start, max(sizes)))
 
+    def draw_vertical_line(
+        self, state: PageState, view: ParagraphView, index: int, right: float, top: float, rotate_latin: bool
+    ) -> None:
+        """세로쓰기 줄 하나를 오른쪽 끝 right에서 줄 높이만큼 왼쪽으로 쓴 열에 위 top부터 아래로 놓는다.
+
+        tbox-v-flow-01 PDF 실측(10pt): 글자는 세워 1em씩, 공백은 0.5em씩 내려가고 기준선은 칸 위 0.85em이다.
+        rotate_latin(글 방향 1, 영문 눕힘)이면 전각이 아닌 글자를 시계 방향으로 눕혀 가로 폭만큼 내려간다
+        (sample-5017 셀 「table2」: 정답 글줄 방향 (0, 1), 글자 간격이 가로 폭).
+        """
+        segment = view.segments[index]
+        first, last = view.line_range(index)
+        column_left = right - segment.line_height
+        placements: list[tuple[int, float]] = []
+        for char_index in range(first, last):
+            item = view.chars[char_index]
+            if isinstance(item, TextChar) and item.char in ("\r", "\n"):
+                continue
+            if not isinstance(item, TextChar):
+                placements.append((char_index, self.item_width(view, char_index)))
+                continue
+            em = self.styles.char_shapes[item.shape_id].base_size
+            if rotate_latin and not _is_wide(item.char):
+                placements.append((char_index, self.item_width(view, char_index)))
+            else:
+                # 검증 안 됨: 공백 말고 반각 글자(세운 라틴·숫자)도 0.5em으로 본다.
+                placements.append((char_index, em if _is_wide(item.char) else em / 2))
+        natural = sum(advance for _, advance in placements)
+        slack = max(0.0, segment.segment_width - natural)
+        alignment = view.para_shape.alignment
+        y = top + (slack / 2 if alignment == CENTER else slack if alignment == RIGHT else 0.0)
+        for char_index, advance in placements:
+            item = view.chars[char_index]
+            if isinstance(item, TextChar) and item.char.strip():
+                shape = self.styles.char_shapes[item.shape_id]
+                em = shape.base_size
+                char = item.char
+                if rotate_latin and not _is_wide(char):
+                    slot = self.measurer.slot(char, shape)
+                    glyph = self.make_glyph(char, shape, slot, right - segment.baseline_gap, y)
+                    state.page.items.append(dataclasses.replace(glyph, rotation=-90.0))
+                elif char in _VERTICAL_PUNCTUATION:
+                    # 같은 PDF: 「,」「.」는 「、」「。」로 바뀌어 앞 글자 칸 바로 아래 칸의 오른쪽 위(x +0.48em,
+                    # 기준선 칸 위 +0.35em)에 찍힌다.
+                    char = _VERTICAL_PUNCTUATION[char]
+                    slot = self.measurer.slot(char, shape)
+                    self.append_glyph(state, char, shape, slot, column_left + 0.48 * em, y + 0.35 * em)
+                else:
+                    # 검증 안 됨: 줄 높이가 글자 크기와 다르면 열 가운데에 놓는다(실측 문서는 둘이 같다).
+                    x = column_left + (segment.line_height - em) / 2
+                    self.append_glyph(state, char, shape, self.measurer.slot(char, shape), x, y + TAC_ASCENT * em)
+            y += advance
+
     def place_leader(self, state: PageState, shape: CharShape, x: float, width: float, baseline: float) -> None:
         """점선 채움 탭을 「·」 글자로 채운다. 글자 크기의 1/4 간격으로 셀 수 있는 만큼에서 둘을 빼고,
         탭 시작 한 칸 뒤부터 탭 끝 두 칸 앞까지 고르게 놓는다(편람 4쪽 12pt·kps-ai 2쪽 13pt PDF 실측)."""
@@ -1900,3 +1952,11 @@ def _flush_shadow_run(page: Page, run: list[tuple[list[Glyph], Glyph]]) -> None:
 
 def layout_document(document: HwpDocument) -> list[Page]:
     return DocumentLayout(document).run()
+
+
+#: 세로쓰기에서 세워 찍을 때 바꿔 찍는 문장 부호(tbox-v-flow-01 PDF 실측).
+_VERTICAL_PUNCTUATION = {",": "\u3001", ".": "\u3002"}
+
+
+def _is_wide(char: str) -> bool:
+    return unicodedata.east_asian_width(char) in ("W", "F")
