@@ -844,12 +844,28 @@ class ObjectsMixin:
         drawing = self.metafile(picture.bin_data_id)
         if drawing is not None:
             self.draw_metafile(state, drawing, left, top, width, height)
-            return
-        href = self.image_href(picture.bin_data_id)
-        if href is not None:
-            data = self.bin_bytes(picture.bin_data_id)
-            crop = _crop_fraction(picture, pixel_size(data) if data is not None else None)
-            state.page.items.append(Image(left, top, width, height, href, crop))
+        else:
+            href = self.image_href(picture.bin_data_id)
+            if href is not None:
+                data = self.bin_bytes(picture.bin_data_id)
+                crop = _crop_fraction(picture, pixel_size(data) if data is not None else None)
+                state.page.items.append(Image(left, top, width, height, href, crop))
+        kind = picture.border_attr & 0x3F
+        if kind and picture.border_width > 0:
+            # 그림 테두리는 그림을 찍은 뒤 그림 경계 바깥으로 굵기 절반만 보인다(task2093 13쪽 정답 PDF: 그림 39번 뒤
+            # 고리 40번, 굵기 141HU → 그림 경계 73.76pt 바깥 73.04pt까지 0.72pt).
+            # 점선 종류도 실선으로 긋는다(검증 안 됨).
+            band = picture.border_width / 2
+            state.page.items.append(
+                Rect(
+                    left - band / 2,
+                    top - band / 2,
+                    width + band,
+                    height + band,
+                    stroke=_colorref(picture.border_color),
+                    stroke_width=band,
+                )
+            )
 
     def draw_metafile(
         self, state: PageState, drawing: WmfDrawing, left: float, top: float, width: float, height: float
