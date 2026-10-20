@@ -228,6 +228,11 @@ class ObjectsMixin:
                 state = dataclasses.replace(state, column=state.column + 1)
                 left, _ = self.floating_position(model, state, view, area, box_width, box_height, full_height)
                 top = state.geometry.body_top + state.zone_top
+            elif self.overflows_last_column(model, ctrl, state, top, box_height + margins[2] + margins[3]):
+                # 정답 PDF 실측: 마지막 단 바닥을 넘는 어울림·글 앞뒤 개체는 다음 쪽 본문 맨 위에 놓인다(중간진도보고서
+                # 126·155쪽 그림 → 다음 쪽 67.5pt = 본문 위 + 바깥 위 여백, hwp3-sample4 25쪽, task1725 210쪽).
+                state = self.following_page(state)
+                top = state.geometry.body_top + max(state.zone_top, 0)
             if (self.in_body or self.body_anchor) and model.text_wrap == TextWrap.SQUARE:
                 state.floats.append((state.column, *outer_box(model, left, top, box_width, box_height)))
             if self.in_body and model.text_wrap == TextWrap.TOP_AND_BOTTOM and model.flow_with_text:
@@ -321,6 +326,30 @@ class ObjectsMixin:
             and not (column_def is not None and column_def.kind == PARALLEL_COLUMNS)
             and top + outer_height > geometry.body_top + geometry.body_height
         )
+
+    def overflows_last_column(
+        self, model: ObjectCtrlHeader, ctrl: Node, state: PageState, top: float, outer_height: float
+    ) -> bool:
+        """문단 기준·본문 영역 제한 개체(표·위아래 배치 제외)가 옮겨 갈 다음 단이 없는 단의 아래를 넘는가."""
+        geometry = state.geometry
+        return (
+            self.in_body
+            and ctrl.record.payload[:4] != tags.TABLE_CTRL.to_bytes(4, "little")
+            and model.vert_rel_to == REL_COLUMN_OR_PARA
+            and model.flow_with_text
+            and model.text_wrap != TextWrap.TOP_AND_BOTTOM
+            and state.column + 1 >= len(geometry.columns)
+            and top + outer_height > geometry.body_top + geometry.body_height
+        )
+
+    def following_page(self, state: PageState) -> PageState:
+        """다음 쪽 상태. 없으면 만들고, 뒤 문단의 되감기가 그 쪽을 잇도록 float_pages에 넣는다(stacked_top과 같다)."""
+        following = self.states.index(state) + 1
+        if following < len(self.states):
+            return self.states[following]
+        page = self.new_page(state.base_geometry)
+        self.__dict__.setdefault("float_pages", set()).add(id(page))
+        return page
 
     def object_caption(self, ctrl: Node, width: float, margin_left: int) -> Caption | None:
         children = ctrl.children

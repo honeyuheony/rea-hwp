@@ -204,3 +204,18 @@ def test_no_overlap_cell_pictures_stack_below_earlier_ones():
     assert tops(pages[10])[-2:] == pytest.approx([515.9, 693.1], abs=1.0)
     assert tops(pages[11])[0] == pytest.approx(59.6, abs=1.0)
     assert tops(pages[12]) == []
+
+
+INTERIM_DOC = RHWP / "정책연구용역사업 중간진도보고서(살아있는 간장 기증자의 의학적 선별기준 연구).hwp"
+
+
+@pytest.mark.skipif(not INTERIM_DOC.exists(), reason="corpus not available")
+def test_square_float_overflowing_last_column_moves_to_next_page_top():
+    pages = layout_document(HwpDocument.open(INTERIM_DOC))
+
+    def picture_tops(page) -> list[float]:
+        return [item.y / 100 for item in page.items if isinstance(item, Image) and item.height > 2000]
+
+    # 한글 2022 PDF: 155쪽 문단의 그림 64(어울림, 본문 영역 제한)는 156쪽 본문 위 + 바깥 위 여백 67.5pt에 놓인다.
+    assert picture_tops(pages[154]) == []
+    assert picture_tops(pages[155]) == pytest.approx([67.5], abs=0.5)
