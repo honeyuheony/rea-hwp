@@ -422,8 +422,9 @@ class ObjectsMixin:
             # 단 기준 오른쪽 맞춤 개체도 그 끝에 맞는다(143E433F 2단 22961: 저장 줄이 개체 왼쪽 13325 =
             # 22960 − 바깥 폭 9635까지).
             column_width -= column_width % RANGE_GRID
+        band = self.__dict__.get("band_box")
         horizontal = {
-            REL_PAPER: (0.0, geometry.paper_width),
+            REL_PAPER: (band[0], band[2]) if band else (0.0, geometry.paper_width),
             REL_PAGE: (geometry.body_left, geometry.body_width),
             # 셀 안에서는 단 기준이 셀 글 영역이다(실측: issue4889 셀 안 55행 표 왼쪽 선 63.69pt).
             REL_COLUMN_OR_PARA: (geometry.body_left + column_x, column_width) if self.in_body else (area.x, area.width),
@@ -478,7 +479,7 @@ class ObjectsMixin:
             # 새 쪽 첫 문단이 되면 위 간격 없이 저장된다(hwpspec s2 p181 31쪽 14091).
             para_top -= view.para_shape.space_before // 2
         vertical = {
-            REL_PAPER: (0.0, geometry.paper_height),
+            REL_PAPER: (band[1], band[3]) if band else (0.0, geometry.paper_height),
             REL_PAGE: (geometry.body_top, geometry.body_height),
             REL_COLUMN_OR_PARA: (para_top, geometry.body_height),
         }

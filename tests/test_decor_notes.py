@@ -5,6 +5,7 @@ import pytest
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import layout_document
 from rea_hwp.render.notes import divider_length
+from rea_hwp.render.scene import Image
 from rea_hwp.render.svg import page_glyph_table
 
 CORPUS = Path("/home/kwh1019/tools/hwp-corpus/oss")
@@ -129,3 +130,14 @@ def test_footnote_waits_for_room_below_own_paragraph_table():
     # 한글 2022 PDF: 「표 28 … 147)」 문단의 표가 94쪽 바닥까지 차서 각주 147은 95쪽 아래 766.44pt.
     assert not any(line.text.startswith("147)") for line in pages[93].text_lines)
     assert line_at(pages[94], "147)")[1] == pytest.approx(766.44, abs=0.5)
+
+
+PRESS_DOC = Path("/home/kwh1019/tools/hwp-corpus/public/kr_156489775_196613193.hwp")
+
+
+@pytest.mark.skipif(not PRESS_DOC.exists(), reason="corpus not available")
+def test_paper_relative_header_picture_is_placed_in_header_area():
+    page = layout_document(HwpDocument.open(PRESS_DOC))[0]
+    # 머리말 그림(종이 기준, 오프셋 −280·672): 한글 2022 PDF 1쪽 (53.9, 35.1)pt = 왼쪽 여백·머리말 위만큼 옮긴 자리.
+    banner = next(item for item in page.items if isinstance(item, Image) and abs(item.width - 48726) < 150)
+    assert (banner.x / 100, banner.y / 100) == pytest.approx((53.9, 35.1), abs=0.5)

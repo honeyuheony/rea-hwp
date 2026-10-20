@@ -176,9 +176,15 @@ class DecorMixin:
         content = max((max(view.content_height, floating_bottom(view)) for view in views), default=0)
         slack = max(0, height - content) * {1: 0.5, 2: 1}.get(align, 0)
         area = Area(width_area.x, top + slack, width_area.width)
-        for view in views:
-            for index in range(len(view.segments)):
-                self.place_line(state, view, index, area)
+        # 영역 안 종이 기준 개체는 이 영역 기준으로 놓인다(정답 PDF 실측: kr_156489775 등 머리말 그림 7개 문서가
+        # 왼쪽 여백·머리말 위만큼, issue7333 꼬리말 그림은 꼬리말 위만큼 옮겨져 있다).
+        self.band_box = (width_area.x, top, width_area.width, height)
+        try:
+            for view in views:
+                for index in range(len(view.segments)):
+                    self.place_line(state, view, index, area)
+        finally:
+            self.band_box = None
 
     def draw_page_number(self, state: PageState, pos: PageNumberPosCtrl, number: int) -> None:
         position = pos.position
