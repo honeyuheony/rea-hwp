@@ -471,11 +471,12 @@ class ObjectsMixin:
         """첫 줄이 개체 아래로 밀린 문단의 원래 위치: 같은 쪽·단에서 앞 줄이 끝난 곳."""
         if self.flow_cursor is None:
             # 문서 첫 문단은 앞 줄이 없어 쪽(단 영역) 맨 위에서 시작한다(pic-in-table-with-toggle 표 위 선 102.01pt).
-            return min(para_top, state.geometry.body_top + state.zone_top)
+            return min(para_top, state.geometry.body_top + max(state.zone_top, 0))
         cursor_state, column, bottom = self.flow_cursor
         if cursor_state is not state:
             # 쪽 첫 문단이면 쪽(단 영역) 맨 위에서 시작한다(issue6946 s2 p0: 구역 첫 문단의 표 두 개 뒤 줄 65959).
-            return min(para_top, state.geometry.body_top + state.zone_top)
+            # 넘쳐서 만든 쪽의 zone_top은 −첫 줄 세로 위치라 음수다(labnote s0 p12 76450, 정답 표 위 선 31pt).
+            return min(para_top, state.geometry.body_top + max(state.zone_top, 0))
         if column != state.column or bottom >= para_top:
             return para_top
         # 앞 문단 위아래 배치 개체에 걸린 자리는 그 아래에서 시작한다(kr_156489673 s0 p1: 앞 줄 끝 9638이 p0 표

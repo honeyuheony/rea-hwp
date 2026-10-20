@@ -165,3 +165,12 @@ def test_stacked_table_that_cannot_start_below_anchor_line_moves_whole():
     assert len(pages) == 2
     assert sum(line.text.replace(" ", "").startswith("평가항목") for line in pages[0].text_lines) == 1
     assert _baseline_of(pages[1], "평가항목") == pytest.approx(111.00, abs=0.5)
+
+
+@pytest.mark.skipif(not (RHWP / "rnote__labnote-001.hwp").exists(), reason="corpus not available")
+def test_floats_of_paragraph_overflowing_to_new_page_start_at_body_top():
+    page = layout_document(HwpDocument.open(RHWP / "rnote__labnote-001.hwp"))[1]
+    # 한글 2022 PDF 2쪽: 넘어온 문단(저장 줄 76450)의 표 셋이 쪽 위부터 쌓인다. 머리 표 「실험제목」 43.92pt,
+    # 아래 표 「기록자」는 줄 표 아래라 한 번만 있고 그 위치는 머리 표보다 아래다.
+    assert _baseline_of(page, "실험제목") == pytest.approx(43.92, abs=0.5)
+    assert _baseline_of(page, "기록자") > 700
