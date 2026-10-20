@@ -1,4 +1,5 @@
 import base64
+import re
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,21 @@ def test_rectangle_solid_fill_is_drawn():
     page = layout_document(HwpDocument.open(MANUAL_DOC))[84]
     # 바탕쪽 「제1절」 상자: 채우기 종류 1(단색) 0x646464, 선 종류 0(없음).
     assert any('fill="#646464" stroke="none"' in svg for svg in _svg_images(page))
+
+
+@pytest.mark.skipif(not GROUP_DOC.exists(), reason="corpus not available")
+def test_line_start_arrow_is_filled_triangle_of_engine_size():
+    page = layout_document(HwpDocument.open(GROUP_DOC))[0]
+    # 직선 attr 0xd1000401: 시작 모양 1, 시작 크기 4(길이 4단위·폭 4단위), 굵기 32 < 단위 283HU.
+    triangles = [
+        [tuple(map(float, pair.split())) for pair in re.findall(r"[ML]([-\d.]+ [-\d.]+)", match)]
+        for svg in _svg_images(page)
+        for match in re.findall(r'<path d="(M[^"]*Z)" fill="#000000"/>', svg)
+    ]
+    assert len(triangles) == 4
+    for tip, wing, other in triangles:
+        assert abs(wing[0] - tip[0]) == pytest.approx(4 * 283, abs=1)
+        assert abs(wing[1] - other[1]) == pytest.approx(4 * 283, abs=1)
 
 
 @pytest.mark.skipif(not GROUP_DOC.exists(), reason="corpus not available")

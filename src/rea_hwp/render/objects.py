@@ -629,7 +629,7 @@ class ObjectsMixin:
             svg = _shape_svg(component, width, height)
             if svg is not None:
                 href = f"data:image/svg+xml;base64,{base64.b64encode(svg.encode('utf-8')).decode('ascii')}"
-                pad = max(getattr(component.model, "line_width", 0) or 0, 0)
+                pad = _shape_pad(component.model)
                 state.page.items.append(Image(left - pad, top - pad, width + 2 * pad, height + 2 * pad, href))
         picture = component.find(tags.SHAPE_COMPONENT_PICTURE)
         if picture is not None and isinstance(picture.model, ShapePicture):
@@ -1195,6 +1195,8 @@ def _textart_fill(tail: bytes) -> tuple[str, str]:
 _DASH_PATTERNS = {2: (4, 2), 3: (1, 1), 4: (4, 2, 1, 2), 5: (4, 2, 1, 2, 1, 2), 6: (8, 2)}
 #: 타원 사분원을 3차 베지어로 그릴 때 제어점 거리 비율.
 _ELLIPSE_KAPPA = 0.5522847498
+#: 화살표 단위 길이의 최소값(HU). HncBaseDraw FUN_100435b0: 단위 = max(0x11b, 선 굵기).
+_ARROW_MIN_UNIT = 0x11B
 
 
 def _shape_svg(component: Node, width: float, height: float) -> str | None:
@@ -1235,27 +1237,106 @@ def _shape_svg(component: Node, width: float, height: float) -> str | None:
     scale_x = width / span_x if span_x else 1.0
     scale_y = height / span_y if span_y else 1.0
 
-    def point(x: float, y: float) -> str:
+    def place(x: float, y: float) -> tuple[float, float]:
         px, py = _apply(matrix, x, y)
-        return f"{(px - left) * scale_x:.1f} {(py - top) * scale_y:.1f}"
+        return (px - left) * scale_x, (py - top) * scale_y
 
-    commands = []
+    def text(point: tuple[float, float]) -> str:
+        return f"{point[0]:.1f} {point[1]:.1f}"
+
+    color = _colorref(model.line_color)
+    has_arrows = bool(line_kind and line_width > 0 and not isinstance(geometry, ShapeEllipse))
+    commands, arrows = [], ""
     for start, segments, closed in subpaths:
-        commands.append("M" + point(*start))
-        for segment in segments:
-            commands.append(("C" if len(segment) == 3 else "L") + " ".join(point(*p) for p in segment))
+        first = place(*start)
+        placed = [tuple(place(*p) for p in segment) for segment in segments]
+        if has_arrows and not closed:
+            before_end = placed[-1][-2] if len(placed[-1]) == 3 else (placed[-2][-1] if len(placed) > 1 else first)
+            for tip, before, shape_bit, size_bit in (
+                (first, placed[0][0], 10, 22),
+                (placed[-1][-1], before_end, 16, 26),
+            ):
+                svg, inset = _arrow_svg(
+                    tip,
+                    before,
+                    (model.line_attr >> shape_bit) & 0x3F,
+                    (model.line_attr >> size_bit) & 0xF,
+                    line_width,
+                    color,
+                )
+                arrows += svg
+                if shape_bit == 10 and len(placed[0]) == 1:
+                    first = _toward(first, before, inset)
+                elif shape_bit == 16 and len(placed[-1]) == 1:
+                    placed[-1] = (_toward(placed[-1][0], before, inset),)
+        commands.append("M" + text(first))
+        for segment in placed:
+            commands.append(("C" if len(segment) == 3 else "L") + " ".join(text(p) for p in segment))
         if closed:
             commands.append("Z")
     stroke = ' stroke="none"'
     if line_kind and line_width > 0:
-        stroke = f' stroke="{_colorref(model.line_color)}" stroke-width="{line_width}"'
+        stroke = f' stroke="{color}" stroke-width="{line_width}"'
         if line_kind in _DASH_PATTERNS:
             stroke += f' stroke-dasharray="{",".join(str(n * line_width) for n in _DASH_PATTERNS[line_kind])}"'
-    pad = max(line_width, 0)
+    pad = _shape_pad(model)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{-pad} {-pad} {width + 2 * pad:g} {height + 2 * pad:g}" '
-        f'preserveAspectRatio="none">{definition}<path d="{"".join(commands)}" fill="{fill}"{stroke}/></svg>'
+        f'preserveAspectRatio="none">{definition}<path d="{"".join(commands)}" fill="{fill}"{stroke}/>{arrows}</svg>'
     )
+
+
+def _shape_pad(model: object) -> float:
+    """도형 SVG가 개체 상자 밖으로 그리는 폭: 선 굵기, 화살표가 있으면 가장 긴 화살표 길이까지."""
+    line_width = max(getattr(model, "line_width", 0) or 0, 0)
+    attr = getattr(model, "line_attr", 0) or 0
+    reach = 0.0
+    for shape_bit, size_bit in ((10, 22), (16, 26)):
+        if (attr >> shape_bit) & 0x3F:
+            length, width = _arrow_size((attr >> size_bit) & 0xF, line_width)
+            reach = max(reach, length, width)
+    return line_width + reach
+
+
+def _arrow_size(size: int, line_width: float) -> tuple[float, float]:
+    """화살표 크기 코드(명세 표 82, 0~8)의 (길이, 폭) HU. HncBaseDraw FUN_10042b90의 단위 배수다."""
+    unit = max(_ARROW_MIN_UNIT, line_width)
+    return (size // 3 * 2 + 2) * unit, 2 * (size % 3 + 1) * unit
+
+
+def _arrow_svg(
+    tip: tuple[float, float], before: tuple[float, float], shape: int, size: int, line_width: float, color: str
+) -> tuple[str, float]:
+    """선 끝 tip에 붙는 화살표와 선을 줄일 길이. 모양은 엔진(FUN_10042b90) case와 같은 값만 그린다.
+
+    정답 PDF로 확인한 것: 1 채운 삼각형(group-drawing-02), 2 열린 V자(편람 116쪽), 3 오목 깊이가 길이 1/3인 채운
+    화살(편람 161쪽, 상수 3.0). 1·3은 선이 화살 길이 절반만큼 짧다(밑변 들임 상수 0.5, KTX 굵은 선 11.26pt).
+    명세 4~8(마름모·원·사각)은 말뭉치에 없어 엔진 대응을 확인하지 못해 그리지 않는다.
+    """
+    dx, dy = tip[0] - before[0], tip[1] - before[1]
+    span = (dx * dx + dy * dy) ** 0.5
+    if shape not in (1, 2, 3) or span == 0:
+        return "", 0.0
+    ux, uy = dx / span, dy / span
+    length, width = _arrow_size(size, line_width)
+
+    def point(back: float, side: float) -> str:
+        return f"{tip[0] - ux * back - uy * side:.1f} {tip[1] - uy * back + ux * side:.1f}"
+
+    wing = (point(length, width / 2), point(length, -width / 2))
+    if shape == 2:
+        svg = f'<path d="M{wing[0]}L{point(0, 0)}L{wing[1]}" fill="none" stroke="{color}" stroke-width="{line_width}"/>'
+        return svg, 0.0
+    notch = f"L{point(length * 2 / 3, 0)}" if shape == 3 else ""
+    return f'<path d="M{point(0, 0)}L{wing[0]}{notch}L{wing[1]}Z" fill="{color}"/>', min(length / 2, span)
+
+
+def _toward(point: tuple[float, float], target: tuple[float, float], distance: float) -> tuple[float, float]:
+    dx, dy = target[0] - point[0], target[1] - point[1]
+    span = (dx * dx + dy * dy) ** 0.5
+    if span == 0:
+        return point
+    return point[0] + dx * distance / span, point[1] + dy * distance / span
 
 
 Subpath = tuple[tuple[float, float], list[tuple[tuple[float, float], ...]], bool]
