@@ -31,9 +31,26 @@ def display_font(char: str, family: str) -> str:
     """
     table = _pua_table()
     fallback = table["symbol_fallbacks"].get(f"{ord(char):X}") if len(char) == 1 else None
-    if fallback is None or ord(char) in table["symbol_coverage"].get(family, ()):
-        return family
-    return fallback
+    if fallback is not None and ord(char) not in table["symbol_coverage"].get(family, ()):
+        return fallback
+    if fallback is None and any(_needs_hancom_font(code) for code in map(ord, display_text(char))):
+        # 한컴 전용 PUA(네모 숫자·글머리·겹낫표)와 옛한글 자모는 지정 글꼴에 없으면 브라우저 기본 글꼴의 빈 네모·빈칸이
+        # 된다. 이 PC에서 그 글리프를 모두 가진 글꼴은 함초롬·한컴바탕뿐이라(fc-list: U+F02B1·F02F2·F0854·E38A·ECF0)
+        # 함초롬바탕을 다음 글꼴로 둔다. 정답 PDF는 함초롬바탕 지정 글자만 같은 모양이고 나머지는 한글이 고른 글꼴이다.
+        return f"'{family}', '함초롬바탕', 'HCR Batang'"
+    return family
+
+
+def _needs_hancom_font(code: int) -> bool:
+    """PUA와 첫가끝 자모(옛한글 조합)·방점. 대부분의 글꼴에 없어 빈 네모나 빈칸이 된다."""
+    return (
+        0xE000 <= code <= 0xF8FF
+        or code >= 0xF0000
+        or 0x1100 <= code <= 0x11FF
+        or 0xA960 <= code <= 0xA97F
+        or 0xD7B0 <= code <= 0xD7FF
+        or code in (0x302E, 0x302F)
+    )
 
 
 def display_text(text: str) -> str:
