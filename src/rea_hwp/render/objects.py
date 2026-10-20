@@ -49,7 +49,7 @@ from .ole import content_metafile, has_ooxml_chart
 from .ooxml_chart import draw_ooxml_chart, ooxml_chart_contents
 from .reflow import ASCENT_PERCENT, RANGE_GRID
 from .scene import Glyph, Image, Line, Rect
-from .table_flow import _margin_shift, is_block_table
+from .table_flow import _margin_shift, is_block_table, vertical_offset
 from .textart import FontFiles, TextArtDrawing, TextArtFontError, draw_textart
 from .wmf import WmfDrawing, convert_wmf
 
@@ -439,18 +439,7 @@ class ObjectsMixin:
             REL_COLUMN_OR_PARA: (para_top, geometry.body_height),
         }
         ref_y, ref_h = vertical.get(model.vert_rel_to, vertical[REL_COLUMN_OR_PARA])
-        vert_offset = model.vert_offset
-        if (
-            model.ctrl_id == tags.TABLE_CTRL
-            and model.vert_rel_to == REL_COLUMN_OR_PARA
-            and model.flow_with_text
-            and vert_offset < 0
-        ):
-            # 본문 영역으로 제한한(attr 0x2000) 문단 기준 개체는 문단 위로 올라가지 않는다(FUN_101c58e0: 음수 세로
-            # 오프셋을 0으로). 실측: 셀 안 issue4889 1쪽 55행 표 오프셋 −975, 위 선 289.12; 본문 kr_156369118 5쪽 s0 p63
-            # 표 오프셋 −622, 정답 기준선 695.2pt; 어울림 표 정책연구용역 오프셋 −21453. 제한하지 않으면 그대로 올라간다
-            # (issue1510 표 B 오프셋 −2000, 정답 위 선 82.03pt = 문단 위 99.2 − 20 + 바깥 여백 2.83).
-            vert_offset = 0
+        vert_offset = vertical_offset(model)
         return (
             _align(ref_x, ref_w, width, model.horz_align, model.horz_offset),
             _align(ref_y, ref_h, height, model.vert_align, vert_offset),

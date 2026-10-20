@@ -317,6 +317,20 @@ def _glyphs_at(page, char: str, x: float, y: float) -> list:
 
 
 @needs_corpus
+def test_cell_picture_negative_offset_is_clamped_and_moves_table():
+    # 한글 2022 PDF 23~24쪽: 셀 안 위아래 배치 그림(오프셋 −52790)은 셀 맨 위로 막혀 셀 내용이 그림과 캡션만큼 높아지고,
+    # 23쪽 남은 자리에 들어가지 않는 표 전체가 24쪽으로 간다(캡션 「그림 23.」은 24쪽에만 있음).
+    pages = _open(POLICY_REPORT)
+
+    def captions(page) -> list:
+        text = "".join(row[0] for row in page_glyph_table(page))
+        return [index for index in range(len(text)) if text.startswith("그림23.EU", index)]
+
+    assert not captions(pages[22])
+    assert captions(pages[23])
+
+
+@needs_corpus
 def test_footnote_stored_rewind_continues_at_next_page_footnote_top():
     # 한글 2022 PDF 67쪽: 66쪽에서 앞 두 줄만 놓인 각주 77의 나머지 「→Part 482」가 각주 자리 첫 줄(84.0, 449.2pt).
     page = _open(POLICY_REPORT)[66]

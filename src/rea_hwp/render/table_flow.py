@@ -530,8 +530,29 @@ def _floating_reach(view: ParagraphView, para_top: float, skipped: list[Node] | 
             # 위·아래 캡션도 자리를 차지한다(실측: 정책연구 22쪽 셀 가운데 정렬 그림 + 아래 캡션 3줄, 정답 위 틈 4pt).
             margins = model.outer_margins or [0, 0, 0, 0]
             extent = margins[2] + model.height + _vertical_caption_extent(ctrl) + margins[3]
-            bottom = max(bottom, para_top + model.vert_offset + extent)
+            bottom = max(bottom, para_top + vertical_offset(model) + extent)
     return bottom
+
+
+def vertical_offset(model: ObjectCtrlHeader) -> int:
+    """개체 위치에 더하는 세로 오프셋.
+
+    본문 영역으로 제한한(attr 0x2000) 문단 기준 개체는 문단 위로 올라가지 않는다(FUN_101c58e0: 음수 세로 오프셋을
+    0으로). 실측: 셀 안 issue4889 1쪽 55행 표 오프셋 −975, 위 선 289.12; 본문 kr_156369118 5쪽 s0 p63 표 오프셋 −622,
+    정답 기준선 695.2pt; 어울림 표 정책연구용역 오프셋 −21453; 셀 안 위아래 배치 그림 중간진도 24쪽 그림 23 오프셋
+    −52790, 정답은 셀 맨 위. 제한하지 않으면 그대로 올라간다(issue1510 표 B 오프셋 −2000, 정답 위 선 82.03pt = 문단 위
+    99.2 − 20 + 바깥 여백 2.83). 표가 아닌 글 앞·뒤 개체는 막지 않는다(FUN_102d51c0은 위아래 배치일 때만 이 값을
+    더하는 경로가 있다. exam_science 2쪽 셀 안 글 앞 도형 −3685는 정답이 문단 위). 남은 조건(FUN_1001dd70 설정 +0x10
+    bit 0x20)은 뜻을 확인하지 못했다.
+    """
+    if (
+        (model.ctrl_id == tags.TABLE_CTRL or model.text_wrap in (TextWrap.SQUARE, TextWrap.TOP_AND_BOTTOM))
+        and model.vert_rel_to == VertRelTo.PARA
+        and model.flow_with_text
+        and model.vert_offset < 0
+    ):
+        return 0
+    return model.vert_offset
 
 
 def _vertical_caption_extent(ctrl: Node) -> float:
@@ -1402,7 +1423,7 @@ class TableFlowMixin:
         stacked = self.__dict__.setdefault("stacked_floats", set())
         stacked.discard(id(source.ctrl))
         try:
-            self.place_object(state, view, source.ctrl, left, top, Area(left, top - model.vert_offset, width))
+            self.place_object(state, view, source.ctrl, left, top, Area(left, top - vertical_offset(model), width))
         finally:
             stacked.add(id(source.ctrl))
 
