@@ -1,0 +1,65 @@
+rea-hwp
+Copyright (c) 2026 김우헌
+
+이 저장소에는 아래 MIT 라이선스 프로젝트에서 옮기거나 그 구현을 따라 다시 쓴 코드와 데이터가 들어 있다.
+옮긴 위치는 각 소스 파일의 주석에 원본 파일 이름과 함께 적어 두었다.
+
+--------------------------------------------------------------------------------
+rhwp (https://github.com/edwardkim/rhwp)
+
+사용한 부분: 열기 암호 키 유도(src/parser/crypto.rs), 글꼴 폭 표(font_metrics_data.rs →
+src/rea_hwp/render/data/font_metrics.json.gz), 글자 폭 측정·문단 배치·표·쪽 배치·테두리·
+번호 매기기·각주 구분선 계산(layout/*.rs, parser/*.rs, svg.rs). 대상 파일은 src/rea_hwp 아래
+crypto.py, models/controls.py, models/docinfo.py, render/borders.py, render/common.py,
+render/decor.py, render/forms.py, render/heads.py, render/layout.py, render/metrics.py,
+render/notes.py, render/objects.py, render/reflow.py, render/tables.py.
+
+MIT License
+
+Copyright (c) 2025-2026 Edward Kim
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+kordoc (https://github.com/chrisryugj/kordoc)
+
+사용한 부분: 한글 기본 금칙 문자 표, 줄 나눔 흉내(simulateWrap·splitWrapUnits), 제목 셀 속성 읽기.
+대상 파일은 src/rea_hwp 아래 models/controls.py, render/reflow.py, render/metrics.py.
+
+MIT License
+
+Copyright (c) 2026 chrisryugj
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
