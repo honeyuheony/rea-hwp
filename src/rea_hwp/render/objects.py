@@ -24,7 +24,15 @@ from ..models.controls import (
 )
 from ..models.docinfo import FILL_GRADIENT, FILL_SOLID
 from ..models.paragraph import LineSeg
-from ..models.shapes import ShapeComponent, ShapeOle, ShapePicture
+from ..models.shapes import (
+    ShapeComponent,
+    ShapeEllipse,
+    ShapeLine,
+    ShapeOle,
+    ShapePicture,
+    ShapePolygon,
+    ShapeRectangle,
+)
 from .chart import ChartDrawing, draw_vtchart, vtchart_contents
 from .common import (
     ALIGN_CENTER,
@@ -586,6 +594,12 @@ class ObjectsMixin:
         origin: tuple[float, float] | None = None,
     ) -> None:
         """origin은 맨 바깥 묶음의 왼쪽 위다. 자식 렌더링 행렬과 오프셋은 바로 위 묶음이 아니라 그 묶음 기준이다."""
+        if isinstance(component.model, ShapeComponent):
+            svg = _shape_svg(component, width, height)
+            if svg is not None:
+                href = f"data:image/svg+xml;base64,{base64.b64encode(svg.encode('utf-8')).decode('ascii')}"
+                pad = max(getattr(component.model, "line_width", 0) or 0, 0)
+                state.page.items.append(Image(left - pad, top - pad, width + 2 * pad, height + 2 * pad, href))
         picture = component.find(tags.SHAPE_COMPONENT_PICTURE)
         if picture is not None and isinstance(picture.model, ShapePicture):
             self.draw_picture(state, picture.model, left, top, width, height)
@@ -1102,6 +1116,120 @@ def _textart_fill(tail: bytes) -> tuple[str, str]:
             definition = f'<defs><linearGradient id="g" gradientTransform="{rotate}">{stops}</linearGradient></defs>'
             return "url(#g)", definition
     return fill, ""
+
+
+#: 선 종류(선 속성 하위 6비트, 0 없음·1 실선) → 점선 무늬(선 굵기 배수).
+#: 검증 안 됨: 명세 선 종류 이름(파선·점선·일점쇄선·이점쇄선·긴 파선)만 보고 고른 무늬다(채점과 무관).
+_DASH_PATTERNS = {2: (4, 2), 3: (1, 1), 4: (4, 2, 1, 2), 5: (4, 2, 1, 2, 1, 2), 6: (8, 2)}
+#: 타원 사분원을 3차 베지어로 그릴 때 제어점 거리 비율.
+_ELLIPSE_KAPPA = 0.5522847498
+
+
+def _shape_svg(component: Node, width: float, height: float) -> str | None:
+    """사각형·타원·직선·다각형 도형의 선과 채우기를 개체 상자(폭×높이, HU) 크기 SVG로. 그릴 것이 없으면 None.
+
+    도형 좌표는 원래 크기 기준이라 묶음 행렬(_rendered_box와 같은 순서)로 옮긴 뒤 그 외곽을 받은 상자에 맞춘다.
+    호·곡선과 화살표·그림자는 옮기지 않았다.
+    """
+    model = component.model
+    geometry = next(
+        (
+            child.model
+            for child in component.children
+            if isinstance(child.model, (ShapeRectangle, ShapeEllipse, ShapeLine, ShapePolygon))
+        ),
+        None,
+    )
+    # 뒤집혀 저장된 상자(현재 크기 음수, 온새미로 표지 글상자)는 옮기지 않았다.
+    if geometry is None or width < 0 or height < 0 or (isinstance(geometry, ShapeEllipse) and geometry.is_arc):
+        return None
+    line_width = getattr(model, "line_width", 0) or 0
+    line_kind = (getattr(model, "line_attr", 0) or 0) & 0x3F
+    fill, definition = ("none", "") if isinstance(geometry, ShapeLine) else _textart_fill(model.tail)
+    if (line_kind == 0 or line_width <= 0) and fill == "none":
+        return None
+
+    subpaths = _shape_subpaths(geometry)
+    if not subpaths:
+        return None
+    matrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    if model.translation is not None and model.scale_rotation:
+        matrix = model.translation
+        for scale, rotation in model.scale_rotation:
+            matrix = _compose(_compose(matrix, rotation), scale)
+    corners = [_apply(matrix, x, y) for x in (0, model.original_width) for y in (0, model.original_height)]
+    left, top = min(c[0] for c in corners), min(c[1] for c in corners)
+    span_x, span_y = max(c[0] for c in corners) - left, max(c[1] for c in corners) - top
+    scale_x = width / span_x if span_x else 1.0
+    scale_y = height / span_y if span_y else 1.0
+
+    def point(x: float, y: float) -> str:
+        px, py = _apply(matrix, x, y)
+        return f"{(px - left) * scale_x:.1f} {(py - top) * scale_y:.1f}"
+
+    commands = []
+    for start, segments, closed in subpaths:
+        commands.append("M" + point(*start))
+        for segment in segments:
+            commands.append(("C" if len(segment) == 3 else "L") + " ".join(point(*p) for p in segment))
+        if closed:
+            commands.append("Z")
+    stroke = ' stroke="none"'
+    if line_kind and line_width > 0:
+        stroke = f' stroke="{_colorref(model.line_color)}" stroke-width="{line_width}"'
+        if line_kind in _DASH_PATTERNS:
+            stroke += f' stroke-dasharray="{",".join(str(n * line_width) for n in _DASH_PATTERNS[line_kind])}"'
+    pad = max(line_width, 0)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{-pad} {-pad} {width + 2 * pad:g} {height + 2 * pad:g}" '
+        f'preserveAspectRatio="none">{definition}<path d="{"".join(commands)}" fill="{fill}"{stroke}/></svg>'
+    )
+
+
+Subpath = tuple[tuple[float, float], list[tuple[tuple[float, float], ...]], bool]
+
+
+def _shape_subpaths(geometry: object) -> list[Subpath]:
+    """도형 레코드의 윤곽(원래 좌표). 구간은 끝점 하나(직선)이거나 제어점 둘과 끝점(3차 베지어)이다."""
+    if isinstance(geometry, ShapeLine):
+        return [((geometry.start_x, geometry.start_y), [((geometry.end_x, geometry.end_y),)], False)]
+    if isinstance(geometry, ShapePolygon):
+        points = geometry.points or []
+        if len(points) < 2:
+            return []
+        return [(points[0], [(p,) for p in points[1:]], points[0] == points[-1])]
+    if isinstance(geometry, ShapeEllipse):
+        cx, cy = geometry.center_x, geometry.center_y
+        ax, ay = geometry.axis1_x - cx, geometry.axis1_y - cy
+        bx, by = geometry.axis2_x - cx, geometry.axis2_y - cy
+        k = _ELLIPSE_KAPPA
+        # 0°, 90°, 180°, 270° 점을 차례로 잇는 사분원 네 개.
+        quarter = [(ax, ay), (bx, by), (-ax, -ay), (-bx, -by)]
+        segments = []
+        for index in range(4):
+            (ux, uy), (vx, vy) = quarter[index], quarter[(index + 1) % 4]
+            segments.append(
+                ((cx + ux + k * vx, cy + uy + k * vy), (cx + vx + k * ux, cy + vy + k * uy), (cx + vx, cy + vy))
+            )
+        return [((cx + ax, cy + ay), segments, True)]
+    xs, ys = [p[0] for p in geometry.corner_points], [p[1] for p in geometry.corner_points]
+    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    # 검증 안 됨: 곡률(%)은 짧은 변에 대한 모서리 반지름 비율로 본다(50%면 양 끝이 반원).
+    radius = min(x1 - x0, y1 - y0) * geometry.round_ratio / 100
+    if radius <= 0:
+        return [(geometry.corner_points[0], [(p,) for p in geometry.corner_points[1:]], True)]
+    k = radius * (1 - _ELLIPSE_KAPPA)
+    segments = [
+        ((x1 - radius, y0),),
+        ((x1 - k, y0), (x1, y0 + k), (x1, y0 + radius)),
+        ((x1, y1 - radius),),
+        ((x1, y1 - k), (x1 - k, y1), (x1 - radius, y1)),
+        ((x0 + radius, y1),),
+        ((x0 + k, y1), (x0, y1 - k), (x0, y1 - radius)),
+        ((x0, y0 + radius),),
+        ((x0, y0 + k), (x0 + k, y0), (x0 + radius, y0)),
+    ]
+    return [((x0 + radius, y0), segments, True)]
 
 
 def _textart_svg(drawing: TextArtDrawing, component: ShapeComponent) -> str:
