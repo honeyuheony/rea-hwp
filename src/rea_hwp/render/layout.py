@@ -27,7 +27,7 @@ from ..models.controls import (
     TextWrap,
     VertRelTo,
 )
-from ..models.docinfo import BorderFill, CharShape, ParaShape
+from ..models.docinfo import BorderFill, BorderLine, CharShape, ParaShape
 from ..models.paragraph import PARA_BREAK, TAB, ControlChar, LineSeg, ParaLineSeg
 from . import heads, metrics, reflow
 from .borders import border_lines
@@ -213,6 +213,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         if self.endnotes:
             self.flow_endnotes(self.note_shapes[1] if len(self.note_shapes) > 1 else None)
         for index, state in enumerate(self.states):
+            self.draw_column_lines(state)
             self.decorate_page(state, self.page_sections[index], self.page_numbers[index])
         self.flush_linked_text()
         arrange_pages(self.__dict__.pop("paint_units", []))
@@ -1051,13 +1052,31 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         first = view.segments[0] if view.segments else None
         if first is not None and top > 0 and top + first.vertical_pos + first.line_height > geometry.body_height:
             return self.new_page(geometry)
+        self.draw_column_lines(state)
         state.geometry = dataclasses.replace(state.geometry, columns=geometry.columns, column_def=geometry.column_def)
         state.base_geometry = dataclasses.replace(
             state.base_geometry, columns=geometry.columns, column_def=geometry.column_def
         )
         state.column = 0
-        state.zone_top = state.zone_bottom = top
+        state.zone_top = state.zone_bottom = state.zone_start = top
         return state
+
+    def draw_column_lines(self, state: PageState) -> None:
+        """지금 단 영역의 단 구분선을 단 사이 가운데에 영역 시작부터 가장 낮은 줄 아래까지 긋는다.
+
+        실측: 3-09월·3-10월·3-11월 교육·실전 통합 정답 PDF 8쪽 중 7쪽에서 선 아래 끝이 zone_bottom과 0.2pt 안.
+        """
+        geometry = state.geometry
+        column_def = geometry.column_def
+        if column_def is None or len(geometry.columns) < 2 or not column_def.values.get("line_type"):
+            return
+        line = BorderLine(column_def.line_type, column_def.line_width, column_def.line_color)
+        top, bottom = geometry.body_top + state.zone_start, geometry.body_top + state.zone_bottom
+        if bottom <= top:
+            return
+        for (left_x, left_width), (right_x, _) in itertools.pairwise(geometry.columns):
+            x = geometry.body_left + (left_x + left_width + right_x) / 2
+            state.page.items.extend(border_lines(line, x, top, x, bottom))
 
     def section_geometry(self, nodes: list[Node]) -> SectionGeometry:
         page_def, column_def = None, None
