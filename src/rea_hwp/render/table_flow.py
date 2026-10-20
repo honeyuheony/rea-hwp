@@ -28,6 +28,7 @@ from .common import (
     SectionGeometry,
     column_layout,
 )
+from .scene import Image
 from .table_paging import (
     MIN_UNIT,
     MODE_LINES,
@@ -143,6 +144,28 @@ class CellLine:
     room_limit: float = float("inf")
     #: LINE_SEG 없이 합성한 줄이면 True.
     synthetic: bool = False
+    #: 셀 오른쪽 끝(표 왼쪽 기준). 0이면 안쪽 오른쪽 끝을 쓴다.
+    cell_right: float = 0.0
+
+
+def clip_images_x(items: list, start: int, clip_left: float, clip_right: float) -> None:
+    """items[start:]의 그림 가운데 [clip_left, clip_right] 밖으로 나간 부분을 잘라 낸다."""
+    for index in range(start, len(items)):
+        image = items[index]
+        if not isinstance(image, Image) or image.width <= 0:
+            continue
+        shown_left, shown_right = max(image.x, clip_left), min(image.x + image.width, clip_right)
+        if shown_left <= image.x and shown_right >= image.x + image.width:
+            continue
+        if shown_right <= shown_left:
+            continue
+        crop_left, crop_top, crop_right, crop_bottom = image.crop or (0.0, 0.0, 1.0, 1.0)
+        span = crop_right - crop_left
+        new_left = crop_left + span * (shown_left - image.x) / image.width
+        new_right = crop_left + span * (shown_right - image.x) / image.width
+        items[index] = dataclasses.replace(
+            image, x=shown_left, width=shown_right - shown_left, crop=(new_left, crop_top, new_right, crop_bottom)
+        )
 
 
 def assign_fragments(
@@ -1217,6 +1240,7 @@ class TableFlowMixin:
                 cx + margins[0],
                 width - margins[0] - margins[1],
                 list_top,
+                cell_right=cx + width,
             )
             self.place_cell_line(state, cell_line, left, list_top)
 
@@ -1486,6 +1510,7 @@ class TableFlowMixin:
                             # (issue6712 마지막 조각 남는 자리 13.5pt).
                             room_limit if piece == 0 else float("inf"),
                             not stored_lines(view.node),
+                            cx + width,
                         )
                     )
         return placed
@@ -1509,8 +1534,13 @@ class TableFlowMixin:
         self.cell_line = line
         try:
             # 셀 글 목록마다 떠 있는 개체를 그 셀 글 다음에 그린다(FUN_1018cd80 → FUN_10189050).
+            start = len(state.page.items)
             with self.painting_list(("cell", line.inner_x, line.origin)):
                 self.place_line(state, line.view, line.index, Area(left + line.inner_x, list_top, line.inner_width))
+            # 한글은 셀 내용을 셀 영역으로 잘라 그린다(kr_156489775 10쪽 PDF 클립 [363.6, 309.0, 534.2, 548.8]: 왼쪽은
+            # 칸 왼쪽 + 안 여백, 오른쪽은 칸 끝). 칸 밖으로 나간 그림이 표 테두리를 덮지 않게 그림만 가로로 자른다.
+            right = left + (line.cell_right or line.inner_x + line.inner_width)
+            clip_images_x(state.page.items, start, left + line.inner_x, right)
         finally:
             self.cell_line = saved
 
