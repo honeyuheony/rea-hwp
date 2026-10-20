@@ -39,6 +39,12 @@ def test_justified_line_without_spaces_spreads_slack_over_glyphs():
     assert justify_offsets([1000, 1000, 1000], [GLYPH] * 3, 300, stretch=True) == [100, 100, 100]
 
 
+def test_leading_spaces_get_no_share_when_only_items_after_them_spread():
+    # kps-ai 21쪽: 공백 셋 + 글자처럼 취급한 표 + 글자. 앞 공백 몫이 없어야 표가 제자리에 놓인다.
+    widths, kinds = [640, 640, 640, 47340, 1000], [SPACE, SPACE, SPACE, FIXED, GLYPH]
+    assert justify_offsets(widths, kinds, 1000, stretch=True) == [0, 0, 0, 500, 500]
+
+
 def test_distribute_puts_slack_between_items_so_last_ends_at_line_end():
     extras = justify_offsets([1000, 500, 1000, 1000], [GLYPH, SPACE, GLYPH, GLYPH], 600, False, distribute=True)
     assert extras == [200, 200, 200, 0]

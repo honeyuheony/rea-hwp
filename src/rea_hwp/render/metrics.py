@@ -335,10 +335,12 @@ def justify_offsets(
         elif stretch and spaces:
             for i in spaces:
                 extras[i] = slack / len(spaces)
-        elif stretch and len(widths) > 1:
+        elif stretch and len(widths) - leading > 1:
             # 공백 없는 양쪽 정렬 줄은 글자마다 나눈다(re-eng-nospace-* PDF, rhwp paragraph_layout.rs 공백 없음 분기).
-            for i in range(len(widths)):
-                extras[i] = slack / len(widths)
+            # 줄 앞 공백은 여기서도 몫을 받지 않는다(kps-ai 21쪽 PDF: 공백 셋 + 글자처럼 취급한 표 줄의 표가 늘이지
+            # 않은 자리 61.72pt).
+            for i in range(leading, len(widths)):
+                extras[i] = slack / (len(widths) - leading)
         return extras
     overflow = -slack
     # 탭이 있는 줄은 저장된 탭 폭을 그대로 둔다(편람 4쪽·국립국어원 업무계획 2쪽 목차).
