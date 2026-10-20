@@ -1476,7 +1476,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             else (metrics.TAB if c.code == TAB else metrics.FIXED)
             for c in chars[:interior_end]
         ]
-        stretch = alignment in (JUSTIFY, SPLIT) and not is_last_line and not forced_break
+        # 나눔 정렬은 문단 마지막 줄까지 공백에 나눈다(basic__Textmail 1쪽 PDF: 「제 목」 한 줄이 「받 는 사 람」 폭으로
+        # 벌어짐, rhwp paragraph_layout.rs needs_word_distribution). 강제 줄바꿈 줄은 두 정렬 모두 늘이지 않는다.
+        stretch = (alignment == SPLIT or alignment == JUSTIFY and not is_last_line) and not forced_break
         if stretch and interior_end and isinstance(chars[interior_end - 1], TextChar):
             # 줄 끝 글자 뒤 자간은 줄 폭에 넣지 않는다(실측: hwp3-sample16 22쪽 13pt 자간 −12%·−16% 줄 끝 글자가
             # 자간 없는 폭 13pt로 오른쪽 끝에 맞음).
