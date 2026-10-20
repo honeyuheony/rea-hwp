@@ -243,3 +243,11 @@ def test_overfull_cell_keeps_lines_narrowed_by_square_wrap_picture():
     # 한글 2022 PDF 3쪽: 그림 옆에서 줄을 바꿔 둘째 줄 「제목ㆍ위치가」가 94.44pt에서 시작한다.
     assert glyphs[0].char == "제"
     assert glyphs[0].x / 100 == pytest.approx(94.44, abs=0.3)
+
+
+@pytest.mark.skipif(not USER_PARSING.exists(), reason="user sample not available")
+def test_paragraph_relative_picture_in_cell_starts_above_space_before():
+    page = layout_document(HwpDocument.open(USER_PARSING))[2]
+    label = next(item for item in page.items if isinstance(item, Glyph) and item.char == "꺾" and item.x > 35000)
+    # 한글 2022 PDF 3쪽: 셀 첫 문단(위 간격 1100) 그림 안 글상자 「중꺾마」 기준선 379.92pt(첫 줄 기준이면 390.88pt).
+    assert label.y / 100 == pytest.approx(379.92, abs=0.5)

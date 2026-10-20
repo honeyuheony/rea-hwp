@@ -437,6 +437,10 @@ class ObjectsMixin:
         }
         ref_x, ref_w = horizontal.get(model.horz_rel_to, horizontal[REL_COLUMN_OR_PARA])
         para_top = area.y + (view.segments[0].vertical_pos if view.segments else 0)
+        if not self.in_body and view.segments and model.vert_rel_to == REL_COLUMN_OR_PARA:
+            # 셀·글상자에서는 위 간격을 뺀 문단 시작점이 기준이다(user-parsing-test 3쪽 셀 그림: 첫 줄 1100 = 위 간격,
+            # 정답 그림 위 끝 = 셀 글 위 + 484; kr_156489570·kr_156489620 셀 그림 4곳도 위 간격만큼 위).
+            para_top -= min(view.para_shape.space_before // 2, view.segments[0].vertical_pos)
         if self.in_body and model.vert_rel_to == REL_COLUMN_OR_PARA and _pushes_first_line(view):
             para_top = self.flow_position(state, para_top)
         elif (
