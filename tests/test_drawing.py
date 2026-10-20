@@ -71,3 +71,14 @@ def test_text_box_line_below_inner_height_is_not_drawn():
     page = layout_document(HwpDocument.open(GROUP_DOC))[0]
     # 「item id」 상자 일곱 개(안쪽 높이 1000)의 둘째 줄 「id」(세로 위치 1600)는 정답 PDF에 없다. 「d」는 3개뿐이다.
     assert sum(1 for item in page.items if isinstance(item, Glyph) and item.char == "d") == 3
+
+
+PUBLIC = Path.home() / "tools" / "hwp-corpus" / "public"
+
+
+@pytest.mark.skipif(not (PUBLIC / "kr_156369052_189351321.hwp").exists(), reason="corpus not available")
+def test_picture_draws_only_its_cropped_part():
+    page = layout_document(HwpDocument.open(PUBLIC / "kr_156369052_189351321.hwp"))[1]
+    arrow = next(item for item in page.items if isinstance(item, Image) and abs(item.x / 100 - 284.5) < 1)
+    # 한글 2022 PDF 2쪽: 1229×513 그림 가운데 잘라 쓰기(43931, 13136)~(49350, 20021) = 픽셀 × 75 영역만 보인다.
+    assert arrow.crop == pytest.approx((43931 / 92175, 13136 / 38475, 49350 / 92175, 20021 / 38475))

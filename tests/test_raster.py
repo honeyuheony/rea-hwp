@@ -3,7 +3,7 @@ from __future__ import annotations
 import struct
 import zlib
 
-from rea_hwp.render.raster import _lzw_decode, png_from_raster
+from rea_hwp.render.raster import _lzw_decode, pixel_size, png_from_raster
 
 
 def png_rows(png: bytes) -> tuple[tuple[int, int, int, int], list[bytes]]:
@@ -105,3 +105,17 @@ def test_pcx_run_length_bilevel_keeps_header_palette() -> None:
 def test_other_formats_are_left_alone() -> None:
     assert png_from_raster(b"\x89PNG\r\n\x1a\n") is None
     assert png_from_raster(tiff(1, 1, b"\x00", photometric=3)) is None
+
+
+def test_pixel_size_reads_png_gif_bmp_and_jpeg_headers():
+    png = b"\x89PNG\r\n\x1a\n" + struct.pack(">I4sII", 13, b"IHDR", 1229, 513)
+    gif = b"GIF89a" + struct.pack("<HH", 529, 749)
+    bmp = b"BM" + b"\0" * 16 + struct.pack("<ii", 87, -93)
+    jpeg = (
+        b"\xff\xd8" + b"\xff\xe0" + struct.pack(">H", 4) + b"JF" + b"\xff\xc0" + struct.pack(">HBHH", 11, 8, 1441, 1195)
+    )
+    assert pixel_size(png) == (1229, 513)
+    assert pixel_size(gif) == (529, 749)
+    assert pixel_size(bmp) == (87, 93)
+    assert pixel_size(jpeg) == (1195, 1441)
+    assert pixel_size(b"II*\x00") is None

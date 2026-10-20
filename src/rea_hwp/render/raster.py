@@ -32,6 +32,28 @@ def png_from_raster(data: bytes) -> bytes | None:
     return None
 
 
+def pixel_size(data: bytes) -> tuple[int, int] | None:
+    """PNG·JPEG·GIF·BMP 머리에 적힌 (가로, 세로) 픽셀 수. 다른 형식이면 None."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        return struct.unpack_from(">II", data, 16)
+    if data.startswith(b"GIF") and len(data) >= 10:
+        return struct.unpack_from("<HH", data, 6)
+    if data.startswith(b"BM") and len(data) >= 26:
+        width, height = struct.unpack_from("<ii", data, 18)
+        return width, abs(height)
+    if data.startswith(b"\xff\xd8"):
+        offset = 2
+        while offset + 9 <= len(data) and data[offset] == 0xFF:
+            marker = data[offset + 1]
+            (length,) = struct.unpack_from(">H", data, offset + 2)
+            # SOF0~SOF15 가운데 DHT(C4)·JPG(C8)·DAC(CC)는 프레임 머리가 아니다.
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                height, width = struct.unpack_from(">HH", data, offset + 5)
+                return width, height
+            offset += 2 + length
+    return None
+
+
 def _tiff_to_png(data: bytes) -> bytes | None:
     order = "<" if data[:2] == b"II" else ">"
     (ifd,) = struct.unpack_from(order + "I", data, 4)

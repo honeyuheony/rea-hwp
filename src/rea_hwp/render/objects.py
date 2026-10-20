@@ -56,7 +56,7 @@ from .equation.glyphs import EQUATION_FONT, glyph_table
 from .forms import draw_form
 from .ole import content_metafile, has_ooxml_chart
 from .ooxml_chart import draw_ooxml_chart, ooxml_chart_contents
-from .raster import png_from_raster
+from .raster import pixel_size, png_from_raster
 from .reflow import ASCENT_PERCENT, RANGE_GRID
 from .scene import Glyph, Image, Line, Rect
 from .table_flow import _margin_shift, is_block_table, vertical_offset
@@ -822,7 +822,9 @@ class ObjectsMixin:
             return
         href = self.image_href(picture.bin_data_id)
         if href is not None:
-            state.page.items.append(Image(left, top, width, height, href))
+            data = self.bin_bytes(picture.bin_data_id)
+            crop = _crop_fraction(picture, pixel_size(data) if data is not None else None)
+            state.page.items.append(Image(left, top, width, height, href, crop))
 
     def draw_metafile(
         self, state: PageState, drawing: WmfDrawing, left: float, top: float, width: float, height: float
@@ -998,6 +1000,28 @@ class ObjectsMixin:
 
 #: 1단계 범위 밖 개체: 수식, 차트 데이터를 담은 그리기 개체(OLE·글맵시는 그리지 못할 때만).
 _OUT_OF_SCOPE_TAGS = frozenset({tags.CHART_DATA, tags.EQEDIT})
+
+
+#: 그림 잘라 쓰기 값의 단위(원본 픽셀당). 코퍼스 PNG·JPEG·BMP 실측: 72~300dpi 모두 전체 = 픽셀 × 75.
+CROP_UNITS_PER_PIXEL = 75
+
+
+def _crop_fraction(picture: ShapePicture, size: tuple[int, int] | None) -> tuple[float, float, float, float] | None:
+    """잘라 쓴 영역(원본 비율). 전체를 쓰거나 단위를 모르면 None.
+
+    TIFF(픽셀 × 7200/DPI)와 GIF 한 사례(interview: 그림 원래 크기와 같은 값)는 단위가 달라 범위를 넘는다. 말뭉치의
+    그런 그림은 모두 전체를 써서 그대로 그린다. 실측: kr_156369052 2쪽 1229×513 그림의 주황 화살표 부분.
+    """
+    if size is None or not size[0] or not size[1]:
+        return None
+    full_x, full_y = size[0] * CROP_UNITS_PER_PIXEL, size[1] * CROP_UNITS_PER_PIXEL
+    left, top, right, bottom = picture.crop_left, picture.crop_top, picture.crop_right, picture.crop_bottom
+    unit = CROP_UNITS_PER_PIXEL
+    if left == 0 and top == 0 and abs(right - full_x) <= unit and abs(bottom - full_y) <= unit:
+        return None
+    if not (0 <= left < right <= full_x + unit and 0 <= top < bottom <= full_y + unit):
+        return None
+    return left / full_x, top / full_y, min(right / full_x, 1.0), min(bottom / full_y, 1.0)
 
 
 def _rendered_box(component: ShapeComponent) -> tuple[float, float, float, float] | None:
