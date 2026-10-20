@@ -437,7 +437,26 @@ class ObjectsMixin:
         }
         ref_x, ref_w = horizontal.get(model.horz_rel_to, horizontal[REL_COLUMN_OR_PARA])
         para_top = area.y + (view.segments[0].vertical_pos if view.segments else 0)
-        if not self.in_body and view.segments and model.vert_rel_to == REL_COLUMN_OR_PARA:
+        if (
+            not self.in_body
+            and view.segments
+            and model.vert_rel_to == REL_COLUMN_OR_PARA
+            and model.text_wrap in (TextWrap.SQUARE, TextWrap.TOP_AND_BOTTOM)
+            and abs(
+                view.segments[0].vertical_pos
+                - _pushed_extent(model, height)
+                + model.vert_offset
+                - vertical_offset(model)
+            )
+            < 1
+        ):
+            # 목록 맨 위에서 꼭 개체 상자(쓰는 세로 오프셋 + 높이 + 위아래 바깥 여백)만큼 밀려 저장된 첫 줄은 그 개체에
+            # 밀린 줄이라, 개체는 목록 맨 위를 기준으로 놓는다(본문의 flow_position 판정과 같은 규칙).
+            # 실측: hwpctl_ParameterSetID 1쪽 머리말 로고 오프셋 −3136 + 높이 11186 = 첫 줄 8050, 정답 그림 위 끝
+            # 11.15pt = 머리말 위 42.52pt − 31.36pt. issue2217 2쪽 좁은 셀 어울림 로고는 오프셋 −365를 0으로 막아
+            # 높이 10087 = 첫 줄 10087, 정답 그림 위 끝 447.9pt(셀 글 위 445.79pt).
+            para_top = area.y
+        elif not self.in_body and view.segments and model.vert_rel_to == REL_COLUMN_OR_PARA:
             # 셀·글상자에서는 위 간격을 뺀 문단 시작점이 기준이다(user-parsing-test 3쪽 셀 그림: 첫 줄 1100 = 위 간격,
             # 정답 그림 위 끝 = 셀 글 위 + 484; kr_156489570·kr_156489620 셀 그림 4곳도 위 간격만큼 위).
             para_top -= min(view.para_shape.space_before // 2, view.segments[0].vertical_pos)
