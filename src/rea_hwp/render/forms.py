@@ -11,7 +11,8 @@ import re
 from ..document import Node
 from . import metrics
 from .common import DEVICE_UNIT, PageState, device_round
-from .scene import Glyph
+from .scene import Glyph, Rect
+from .styles import colorref
 
 #: 글자를 세로 가운데에 놓을 때 기준선이 개체 가운데보다 내려가는 양(글자 크기 비율).
 #: 실측: form-01 명령 단추 Batang 10pt 기준선 = 위끝 + 높이/2 + 3.56pt, 콤보 상자 + 3.54pt
@@ -34,6 +35,15 @@ MARLETT_COLORS = {
     "g": "#ffffff", "f": "#e3e3e3", "e": "#696969", "d": "#ffffff", "c": "#a0a0a0",
     "n": "#ffffff", "m": "#e3e3e3", "l": "#696969", "k": "#ffffff", "j": "#a0a0a0",
 }  # fmt: skip
+#: 테두리 종류(BorderType)별 3D 틀 색: (바깥 위·왼쪽, 바깥 오른·아래, 안쪽 위·왼쪽, 안쪽 오른·아래).
+#: 실측: basic__Textmail 1쪽 정답 PDF, 입력란 BorderType 2와 명령 단추 BorderType 4(바탕 #ece9d8).
+#: 검증 안 됨: 다른 종류와 다른 바탕색 단추(한글이 바탕색에서 3D 색을 만드는지 확인하지 못함).
+FRAME_COLORS = {
+    2: ("#ffffff", "#404040", "#404040", "#ffffff"),
+    4: ("#faf9f5", "#404040", "#f5f3eb", "#b9ae71"),
+}
+#: 3D 틀 한 겹의 굵기(HU): 고전 컨트롤 1px(96dpi). 정답 PDF는 장치 반올림으로 0.72·0.84pt.
+FRAME_STEP = 75
 
 
 def form_properties(text: str) -> dict[str, str]:
@@ -80,6 +90,9 @@ def draw_form(layout, state: PageState, form: Node, left: float, top: float, wid
     shape = shapes[shape_id] if 0 <= shape_id < len(shapes) else shapes[0]
     size = shape.base_size
     center = top + height / 2
+    frame = FRAME_COLORS.get(int(props.get("BorderType", "0") or 0)) if kind in ("edt", "cob", "pbt") else None
+    if frame is not None:
+        draw_frame(state, frame, props.get("BackColor"), left, top, width, height)
     baseline = center + CENTERED_BASELINE * size
     if kind == "pbt":
         text = caption_text(props.get("Caption", ""))
@@ -104,6 +117,25 @@ def draw_form(layout, state: PageState, form: Node, left: float, top: float, wid
         if char.strip():
             layout.append_glyph(state, char, shape, slot, device_round(x), baseline)
         x += ui_advance(layout, char, shape)
+
+
+def draw_frame(
+    state: PageState, colors: tuple[str, ...], back: str | None, left: float, top: float, width: float, height: float
+) -> None:
+    """고전 컨트롤 3D 틀 두 겹과 바탕을 개체 상자 안에 칠한다(정답 PDF 차례: 바깥 틀, 안쪽 틀, 바탕)."""
+    step = FRAME_STEP
+    for inset, (light, dark) in ((0, colors[:2]), (step, colors[2:])):
+        x, y, w, h = left + inset, top + inset, width - 2 * inset, height - 2 * inset
+        state.page.items += [
+            Rect(x, y, w - step, step, fill=light),
+            Rect(x, y, step, h - step, fill=light),
+            Rect(x + w - step, y, step, h, fill=dark),
+            Rect(x, y + h - step, w, step, fill=dark),
+        ]
+    face = colorref(int(back)) if back and back.isdigit() else None
+    if face:
+        inner = 2 * step
+        state.page.items.append(Rect(left + inner, top + inner, width - 2 * inner, height - 2 * inner, fill=face))
 
 
 def caption_text(caption: str) -> str:
