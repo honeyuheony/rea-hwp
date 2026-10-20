@@ -62,7 +62,7 @@ from .notes import NotesMixin, piece_height
 from .numbering import format_number
 from .objects import ObjectsMixin, outer_box
 from .paint import PaintUnit, arrange_pages
-from .scene import Glyph, Line, Page, TextLine
+from .scene import Glyph, Line, Page, Rect, TextLine
 from .styles import DocStyles, colorref
 from .table_flow import TableFlowMixin, is_block_table
 
@@ -1382,6 +1382,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         shadow_run: list[tuple[list[Glyph], Glyph]] = []
         run_shape: CharShape | None = None
         underline: list = []
+        shade: list = []
         guide_text = _guide_text_chars(view)
         for order, (char_index, width) in enumerate(zip(items, widths, strict=True)):
             item = view.chars[char_index]
@@ -1394,6 +1395,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 pieces.append("\t")
             if isinstance(item, TextChar):
                 shape = self.styles.char_shapes[item.shape_id]
+                if shade and shade[0] is not shape:
+                    self.flush_shade(state, shade, line_top, segment.line_height)
+                if colorref(shape.shade_color) and order < interior_end:
+                    self.extend_shade(state, shade, shape, device_round(x), width)
                 if shadow_run and (shape is not run_shape or _joins_previous_jamo(view, char_index)):
                     _flush_shadow_run(state.page, shadow_run)
                 if (
@@ -1425,6 +1430,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 continue
             _flush_shadow_run(state.page, shadow_run)
             self.flush_underline(state, underline, baseline)
+            self.flush_shade(state, shade, line_top, segment.line_height)
             if char_index in view.controls:
                 self.place_control(state, view, view.controls[char_index], x, line_top, baseline, area, char_index)
             elif item.code == TAB and tab_fill(item) == LEADER_DOT:
@@ -1433,6 +1439,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             x += width + extras[order]
         _flush_shadow_run(state.page, shadow_run)
         self.flush_underline(state, underline, baseline)
+        self.flush_shade(state, shade, line_top, segment.line_height)
         self.line_pieces = outer_pieces
         text = "".join(pieces)
         if text.strip():
@@ -1616,6 +1623,22 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         for dy, ratio in UNDERLINE_STROKES.get(shape.underline_shape, ((0.5, 1.0),)):
             y = top + dy * width
             state.page.items.append(Line(start, y, end, y, width * ratio, color, dash_text))
+
+    def extend_shade(self, state: PageState, run: list, shape: CharShape, x: float, width: float) -> None:
+        """run = [글자 모양, 시작 x, 끝 x, 음영을 끼워 넣을 쪽 항목 위치]. 글자보다 먼저(아래에) 그린다."""
+        if run:
+            run[2] = x + width
+        else:
+            run.extend((shape, x, x + width, len(state.page.items)))
+
+    def flush_shade(self, state: PageState, run: list, line_top: float, line_height: float) -> None:
+        if not run:
+            return
+        shape, start, end, position = run
+        run.clear()
+        # 글자 음영은 줄 위 끝부터 줄 높이만큼 칠한다(kr_156489569 1~7쪽·kr_156489756 4·5쪽 정답 PDF 25곳: 쪽 맞춤
+        # 비율 0.998907을 되돌린 사각형 위 끝이 줄 위 끝과 0.05pt 안, 높이 15pt·14pt 글자에서 줄 높이와 같음).
+        state.page.items.insert(position, Rect(start, line_top, end - start, line_height, colorref(shape.shade_color)))
 
     def shadow_strikes(self, glyph: Glyph, shape: CharShape) -> list[Glyph]:
         """본 글자보다 먼저(아래에) 찍는 그림자 글자들. 그림자가 없으면 빈 목록."""
