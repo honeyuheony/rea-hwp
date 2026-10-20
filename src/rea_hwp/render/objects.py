@@ -47,6 +47,7 @@ from .equation.glyphs import EQUATION_FONT, glyph_table
 from .forms import draw_form
 from .ole import content_metafile, has_ooxml_chart
 from .ooxml_chart import draw_ooxml_chart, ooxml_chart_contents
+from .raster import png_from_raster
 from .reflow import ASCENT_PERCENT, RANGE_GRID
 from .scene import Glyph, Image, Line, Rect
 from .table_flow import _margin_shift, is_block_table, vertical_offset
@@ -877,6 +878,9 @@ class ObjectsMixin:
         data = self.bin_bytes(bin_data_id)
         if data is not None:
             name = self.styles.bin_data[bin_data_id - 1].storage_name
+            png = png_from_raster(data)
+            if png is not None:
+                data, name = png, "converted.png"
             href = f"data:{_mime(data, name)};base64,{base64.b64encode(data).decode('ascii')}"
         self.image_cache[bin_data_id] = href
         return href
