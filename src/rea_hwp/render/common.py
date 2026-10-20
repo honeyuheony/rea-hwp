@@ -205,6 +205,9 @@ class FootnotePiece(NamedTuple):
     piece: int = 0
 
 
+ZERO_WIDTH_SPACE = "\u200b"
+
+
 @dataclass
 class PageState:
     page: Page
@@ -329,6 +332,9 @@ class TextMeasurer:
         return slot
 
     def advance(self, char: str, shape: CharShape, slot: int, spacing: int | None = None) -> int:
+        if char == ZERO_WIDTH_SPACE:
+            # exam_kor 17쪽 PDF: 옛한글 PUA 뒤 U+200B 다음 글자가 같은 x(자간 −5%여도 0).
+            return 0
         text_figure_space = char == "\u2007"
         char = metrics.CONTROL_SPACES.get(char, char)
         font_space = self.font_space_em(char, shape)
