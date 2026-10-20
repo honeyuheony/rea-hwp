@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.paragraph import LineSeg
 from rea_hwp.render.layout import layout_document
@@ -150,3 +152,13 @@ def test_page_crossing_nested_table_splits_with_its_host_table():
     # 정답 PDF 3쪽 「3. 국제입찰 대상 공사」 기준선은 576.72pt다(쪽을 넘은 중첩 표 뒤 문단).
     assert abs(_glyph_line(pages[2], "3.국제입찰대상공사")[1] - 576.72) < 1.0
     assert all(page_glyph_table(page) for page in pages)
+
+
+def test_trailing_ideographic_space_is_left_out_of_right_alignment():
+    page = layout_document(HwpDocument.open(CORPUS.parent / "public" / "kr_156369107_189358975.hwp"))[0]
+    glyphs = page_glyph_table(page)
+    chars = "".join(char for char, _, _ in glyphs)
+    plain = glyphs[chars.index("101.27")][1]
+    padded = glyphs[chars.index("101.73")][1]
+    # 정답 1쪽(비트맵 칸): 폭 3128인 이웃 칸의 「101.27」과 전각 공백으로 끝나는 「101.73」이 같은 오른쪽 끝에 맞는다.
+    assert padded - plain == pytest.approx(31.28, abs=0.2)

@@ -362,9 +362,10 @@ def _is_space(item: TextChar | ControlChar) -> bool:
 
 
 def _count_trailing_spaces(items: list) -> int:
+    """줄 끝 공백 수. 전각 공백도 센다(kr_156369107 1쪽 PDF: 전각 공백으로 끝나는 「101.73」도 오른쪽 끝에 맞음)."""
     count = 0
     for item in reversed(items):
-        if not _is_space(item):
+        if not (_is_space(item) or isinstance(item, TextChar) and item.char == "\u3000"):
             break
         count += 1
     return count
