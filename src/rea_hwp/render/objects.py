@@ -55,6 +55,7 @@ from .equation import draw as draw_equation
 from .equation import measure as measure_equation
 from .equation.engine import muldiv
 from .equation.glyphs import EQUATION_FONT, glyph_table
+from .equation.legacy_draw import LegacyLine, draw_legacy
 from .forms import draw_form
 from .ole import content_metafile, has_ooxml_chart
 from .ooxml_chart import draw_ooxml_chart, ooxml_chart_contents
@@ -118,6 +119,7 @@ class ObjectsMixin:
             node = stack.pop()
             stack.extend(reversed(node.children))
             if _is_legacy_equation(node):
+                self.equation_boxes[("legacy_flags", id(node))] = state.flags
                 self.equation_boxes[id(node)] = _recomputed_equation(node, state)
         self.equation_boxes[_LEGACY_DONE] = None
 
@@ -142,7 +144,10 @@ class ObjectsMixin:
             self.equation_boxes[key] = glyphs
         return self.equation_boxes[key]
 
-    def draw_equation(self, state: PageState, ctrl: Node, left: float, top: float, width: float) -> None:
+    def draw_equation(self, state: PageState, ctrl: Node, left: float, top: float, width: float, height: float) -> None:
+        if _is_legacy_equation(ctrl):
+            self.draw_legacy_equation(state, ctrl, left, top, width, height)
+            return
         glyphs = self.equation_glyphs(ctrl)
         if glyphs is None:
             return
@@ -172,6 +177,40 @@ class ObjectsMixin:
                     scale_x=glyph.width * 2 / glyph.height if glyph.height else 1.0,
                 )
             )
+
+    def draw_legacy_equation(
+        self, state: PageState, ctrl: Node, left: float, top: float, width: float, height: float
+    ) -> None:
+        """옛 엔진 수식. 상자에 맞춰 늘리거나(attr 0) 가운데에 둔다(FUN_1026ea60 방식 2·3)."""
+        if self.equation_box(ctrl) is None:
+            return
+        model = ctrl.find(tags.EQEDIT).model
+        flags = self.equation_boxes.get(("legacy_flags", id(ctrl)), 0)
+        try:
+            size = (round(width), round(height))
+            drawn = draw_legacy(model.script or "", model.font_size, *size, model.attr != 0, flags)
+        except KeyError:
+            # 옛 수식 글꼴 표에 없는 글자는 그리지 않고 범위 밖으로 남긴다(크기 계산과 같은 조건).
+            return
+        color = _colorref(model.color)
+        for item in drawn:
+            if isinstance(item, LegacyLine):
+                line = Line(left + item.x1, top + item.y1, left + item.x2, top + item.y2, item.width, color)
+                state.page.items.append(line)
+            elif item.text.strip():
+                state.page.items.append(
+                    Glyph(
+                        item.text,
+                        left + item.x,
+                        top + item.y,
+                        item.height,
+                        item.font,
+                        color,
+                        item.bold,
+                        item.italic,
+                        scale_x=item.ratio / 100,
+                    )
+                )
 
     def resized_equation(self, ctrl: Node) -> bool:
         box = self.equation_box(ctrl)
@@ -334,7 +373,7 @@ class ObjectsMixin:
         first, last, bottom = state, state, top + height
         if self.out_of_scope(ctrl, (width, height)):
             state.page.excluded.append((left, top, width, height))
-            self.draw_equation(state, ctrl, left, top, width)
+            self.draw_equation(state, ctrl, left, top, width, height)
             component = ctrl.find(tags.SHAPE_COMPONENT)
             if component is not None:
                 # 옮기지 못한 개체도 그릴 수 있는 만큼(새 차트의 표현 그림 등)은 그리고 채점에서만 뺀다.

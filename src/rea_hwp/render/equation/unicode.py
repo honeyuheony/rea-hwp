@@ -7,6 +7,8 @@ from .tables import ASCII_PUA, PUA_RANGES
 
 #: 수식 글꼴이 없을 때 쓰는 글꼴 이름 사슬. 앞의 셋은 OFL, Cambria Math는 Windows 기본 글꼴이다.
 FALLBACK_FONT_CHAIN = "'STIX Two Math', 'Latin Modern Math', 'Noto Sans Math', 'Cambria Math', 'STIXGeneral', serif"
+#: 옛 엔진 수식의 HFT 글꼴 이름. 브라우저는 HFT를 못 쓰므로 한컴이 깔린 PC에서도 FALLBACK_FONT_CHAIN으로 그린다.
+LEGACY_EQUATION_FAMILY = "수식"
 
 #: 모양으로 정한 대응(엔진 표에 없는 PUA). 중괄호 가로 조각(E106~E10D)과 빈 칸(E111)은 대응이 없어 뺐다.
 _BY_SHAPE = {

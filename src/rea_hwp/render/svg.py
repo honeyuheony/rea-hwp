@@ -9,7 +9,7 @@ from importlib import resources
 from xml.sax.saxutils import escape, quoteattr
 
 from .equation.glyphs import EQUATION_FONTS
-from .equation.unicode import FALLBACK_FONT_CHAIN, to_unicode
+from .equation.unicode import FALLBACK_FONT_CHAIN, LEGACY_EQUATION_FAMILY, to_unicode
 from .scene import Glyph, Image, Line, Page, Rect
 
 HU_PER_PT = 100.0
@@ -83,6 +83,8 @@ def _glyph(glyph: Glyph, equation_fallback: bool = False) -> str:
     elif glyph.font_family in EQUATION_FONTS:
         # 수식 글꼴 PUA는 옛한글이 아니라 수식 기호라 그대로 찍는다.
         family, text = quoteattr(glyph.font_family), escape(glyph.char)
+    elif glyph.font_family == LEGACY_EQUATION_FAMILY:
+        family, text = quoteattr(f"'{LEGACY_EQUATION_FAMILY}', {FALLBACK_FONT_CHAIN}"), escape(glyph.char)
     else:
         family = quoteattr(display_font(glyph.char, glyph.font_family))
         # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).

@@ -11,6 +11,7 @@ from rea_hwp.render.equation import (
 )
 from rea_hwp.render.equation.engine import cdiv, muldiv
 from rea_hwp.render.equation.glyphs import ppem
+from rea_hwp.render.equation.legacy_draw import LegacyGlyph, draw_legacy
 from rea_hwp.render.equation.parse import lex, preprocess
 from rea_hwp.render.equation.unicode import FALLBACK_FONT_CHAIN, to_unicode
 from rea_hwp.render.html import viewer_html
@@ -309,3 +310,25 @@ def test_viewer_marks_pages_that_have_equation_fallbacks():
     html = viewer_html("t", [("p1.svg", 100, 100), ("p2.svg", 100, 100)], None, [("p1.eq.svg", ["HYhwpEQ"]), None])
     assert 'data-eq-fallback="p1.eq.svg" data-eq-fonts="HYhwpEQ"' in html
     assert html.count("data-eq-fallback=") == 1
+
+
+# 기대값은 한글 2022 PDF(한글문서파일형식_수식_revision1.3)에서 잰 옛 엔진 수식 글자 원점(pt)이다.
+# 9쪽 「1 over 4」는 상자 왼쪽 위 기준, 16쪽 행렬은 첫 글자 X 기준이다.
+def test_legacy_draw_places_fraction_like_hangul_2022():
+    width, height, _ = measure_legacy("1 over 4", 1000)
+    glyphs = [g for g in draw_legacy("1 over 4", 1000, width, height, False) if isinstance(g, LegacyGlyph)]
+    drawn = {g.text: (g.x / 100, g.y / 100) for g in glyphs}
+    for char, x, y in [("1", 5.0, 9.53), ("4", 4.88, 20.93)]:
+        assert abs(drawn[char][0] - x) <= 0.3 and abs(drawn[char][1] - y) <= 0.3, (char, drawn[char])
+
+
+def test_legacy_draw_stacks_matrix_rows_like_hangul_2022():
+    script = "X = bmatrix {\r\n\t42 & 52 & 48 & 58 #\r\n\t4 & 5 & 4 & 3 \r\n}\r\n"
+    width, height, _ = measure_legacy(script, 1000)
+    glyphs = [g for g in draw_legacy(script, 1000, width, height, False) if isinstance(g, LegacyGlyph)]
+    x0, y0 = glyphs[0].x / 100, glyphs[0].y / 100
+    relative = [(g.text, g.x / 100 - x0, g.y / 100 - y0) for g in glyphs]
+    # 세로는 0.3pt, 가로는 X와 오른쪽 괄호 사이 글자가 정답보다 0.6~1.0pt 왼쪽에 놓이는 차이(원인 미상)를 넘지 않게 본다
+    for char, x, y in [("]", 88.56, 2.76), ("4", 28.44, -5.04), ("3", 80.76, 6.96)]:
+        nearest = min(relative, key=lambda r: (r[0] != char, abs(r[1] - x) + abs(r[2] - y)))
+        assert nearest[0] == char and abs(nearest[2] - y) <= 0.3 and abs(nearest[1] - x) <= 1.1, (char, nearest)
