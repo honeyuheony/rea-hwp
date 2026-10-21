@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import models, tags
-from .container import HwpContainer
+from .container import HwpContainer, Limits
+from .errors import CorruptFileError, LimitExceededError
 from .models.base import RawRecord, RecordModel
 from .models.registry import DecodeContext, decode_record
 from .record import Record, RecordStream, build_tree, parse_records
@@ -58,8 +59,12 @@ def _ctrl_id_of(record: Record) -> int:
     return 0
 
 
-def decode_stream(name: str, stream_bytes: bytes) -> DecodedStream:
-    stream = parse_records(stream_bytes)
+def decode_stream(name: str, stream_bytes: bytes, max_records: int | None = None) -> DecodedStream:
+    stream = parse_records(stream_bytes, max_records)
+    if stream.trailing:
+        raise CorruptFileError(
+            f"{name} ends with a truncated record ({len(stream.trailing)} bytes); the file is damaged"
+        )
     roots = build_tree(stream.records)
 
     def convert(record: Record, ancestors: tuple[Record, ...], ctrl_id: int, preceding: frozenset[int]) -> Node:
@@ -87,12 +92,30 @@ class HwpDocument:
     def __init__(self, container: HwpContainer) -> None:
         models.load_all()
         self.container = container
-        self.doc_info = decode_stream("DocInfo", container.record_stream("DocInfo"))
-        self.sections = [decode_stream(name, container.record_stream(name)) for name in container.section_names()]
+        self.doc_info = self._decode("DocInfo", container.limits.max_records)
+        remaining = container.limits.max_records - len(self.doc_info.stream.records)
+        self.sections: list[DecodedStream] = []
+        for name in container.section_names():
+            self.sections.append(self._decode(name, remaining))
+            remaining -= len(self.sections[-1].stream.records)
+
+    def _decode(self, name: str, max_records: int) -> DecodedStream:
+        stream_bytes = self.container.record_stream(name)
+        try:
+            return decode_stream(name, stream_bytes, max_records)
+        except LimitExceededError as error:
+            total = self.container.limits.max_records
+            raise LimitExceededError(f"document has more than {total} records; raise Limits.max_records") from error
+        except RecursionError as error:
+            # level은 10비트라 1024단까지 겹칠 수 있다. 말뭉치 최대 12단이므로 그보다 깊으면 깨진 파일로 본다.
+            raise CorruptFileError(f"{name} records are nested too deeply; the file is damaged") from error
 
     @classmethod
-    def open(cls, source: str | Path | bytes, password: str | None = None) -> HwpDocument:
-        return cls(HwpContainer.open(source, password))
+    def open(
+        cls, source: str | Path | bytes, password: str | None = None, *, limits: Limits | None = None
+    ) -> HwpDocument:
+        """limits를 주지 않으면 Limits() 기본 상한을 쓴다."""
+        return cls(HwpContainer.open(source, password, limits))
 
     @property
     def record_streams(self) -> list[DecodedStream]:

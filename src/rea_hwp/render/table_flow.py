@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from .. import tags
 from ..document import Node
+from ..errors import CorruptFileError
 from ..models.controls import CaptionListHeader, ObjectCtrlHeader, TextWrap, VertRelTo
 from ..models.paragraph import LineSeg
 from . import reflow
@@ -1143,7 +1144,7 @@ class TableFlowMixin:
     def nested_input(self, ctrl: Node) -> NestedInput:
         grid, views = self.table_layout_grid(ctrl, recompose=RECOMPOSE_IN_ENGINE)
         if grid is None:
-            raise ValueError("nested table has no TABLE record")
+            raise CorruptFileError("nested table has no TABLE record; the file is damaged")
         table, sources = paging_table(grid, views, self.nested_input)
         return NestedInput(ctrl, table, grid, sources)
 

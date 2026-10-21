@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from .. import tags
 from ..document import HwpDocument, Node
+from ..errors import CorruptFileError
 from ..models.controls import (
     AutoNumberCtrl,
     AutoNumberKind,
@@ -1093,7 +1094,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             if page_def is not None:
                 break
         if page_def is None:
-            raise ValueError("section has no PAGE_DEF; cannot determine page size")
+            raise CorruptFileError("section has no PAGE_DEF, so the page size is unknown; the file is damaged")
         return SectionGeometry.from_page_def(page_def, column_def)
 
     def place_paragraphs(self, state: PageState, paragraphs: list[Node], area: Area) -> None:

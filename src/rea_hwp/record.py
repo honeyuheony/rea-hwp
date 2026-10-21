@@ -5,6 +5,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
+from .errors import LimitExceededError
+
 #: 크기 필드가 이 값이면 헤더 뒤 u32가 실제 크기다(명세 5.0 rev1.3 4.1절).
 EXTENDED_SIZE_MARK = 0xFFF
 
@@ -41,11 +43,14 @@ class RecordStream:
         return b"".join(parts)
 
 
-def parse_records(stream: bytes) -> RecordStream:
+def parse_records(stream: bytes, max_records: int | None = None) -> RecordStream:
+    """max_records개를 넘게 읽으면 LimitExceededError를 낸다."""
     records: list[Record] = []
     offset = 0
     total = len(stream)
     while offset + 4 <= total:
+        if max_records is not None and len(records) >= max_records:
+            raise LimitExceededError(f"stream has more than {max_records} records")
         (word,) = struct.unpack_from("<I", stream, offset)
         tag = word & 0x3FF
         level = (word >> 10) & 0x3FF

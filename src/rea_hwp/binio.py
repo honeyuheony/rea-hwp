@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import struct
 
+from .errors import CorruptFileError
+
 _FORMATS = {
     "u8": "<B",
     "i8": "<b",
@@ -15,7 +17,7 @@ _FORMATS = {
 _SIZES = {name: struct.calcsize(fmt) for name, fmt in _FORMATS.items()}
 
 
-class TruncatedPayload(ValueError):
+class TruncatedPayload(CorruptFileError):
     """payload가 해석하려는 필드보다 짧다."""
 
 
