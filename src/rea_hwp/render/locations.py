@@ -22,6 +22,21 @@ def paragraph_pages(pages: list[Page]) -> dict[str, int]:
     return first_pages
 
 
+def table_row_pages(pages: list[Page]) -> dict[str, dict[int, int]]:
+    """표(TABLE) 원본 위치 → {행 번호(0부터, 셀의 행 주소): 그 행이 처음 놓인 쪽 번호(Page.number)}.
+
+    쪽 경계에서 나뉜 행은 처음 놓인 쪽이다. 셀 안 표와 바탕쪽 표는 키가 없다(셀 안 표는 그것을 담은 바깥 표 행으로
+    센다). 표의 첫 행 쪽은 paragraph_pages의 표 쪽과 같다.
+    """
+    first_pages: dict[str, dict[int, int]] = {}
+    for page in sorted(pages, key=lambda page: page.number):
+        for located, rows in page.table_rows.items():
+            table = first_pages.setdefault(located, {})
+            for row in rows:
+                table.setdefault(row, page.number)
+    return {located: dict(sorted(rows.items())) for located, rows in first_pages.items()}
+
+
 def page_text_lines(page: Page) -> list[dict]:
     """쪽 글줄을 JSON으로 바로 쓰는 dict 목록으로. 좌표는 SVG와 같은 pt, text는 HTML 글 층과 같은 복사용 글이다."""
     return [

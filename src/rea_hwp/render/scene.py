@@ -115,6 +115,9 @@ class Page:
     missing: list[MissingObject] = field(default_factory=list)
     #: 이 쪽에 놓은 표(TABLE)·그림(SHAPE_COMPONENT_PICTURE)의 원본 위치 "구역:index". 여러 쪽에 걸친 표는 첫 쪽에만.
     objects: list[str] = field(default_factory=list)
+    #: 표(TABLE) 원본 위치 "구역:index" → 이 쪽에 일부라도 놓인 행 번호(0부터, 셀의 행 주소) 목록. 셀 안 표와 바탕쪽
+    #: 표는 넣지 않는다(셀 안 표는 그것을 담은 바깥 표 행으로 센다).
+    table_rows: dict[str, list[int]] = field(default_factory=dict)
 
     @property
     def glyphs(self) -> list[Glyph]:
