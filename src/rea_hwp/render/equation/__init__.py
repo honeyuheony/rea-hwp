@@ -33,7 +33,7 @@ def measure(script: str, font_size: int, font: str = EQUATION_FONT) -> tuple[int
 def draw(script: str, font_size: int, font: str = EQUATION_FONT) -> list[DrawnGlyph | DrawnBox]:
     """수식 글자와 상자를 그리는 순서대로 돌려준다. 좌표는 상자 왼쪽 위 끝이 (0, 0)인 HWPUNIT이다."""
     root = _laid_out(script, font_size, font)
-    root.ctx.set_font(font_size)
+    # 글꼴은 계산이 남긴 크기 그대로 그리기 시작한다(UNDERBRACE 조각은 그 크기로 찍힌다, 정답 PDF 높이 612/900)
     root.ox, root.oy = 0, -root.top
     root.draw()
     return root.ctx.drawn

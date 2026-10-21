@@ -216,7 +216,54 @@ def test_legacy_greek_letter_follows_symbol_substitution_chain_to_batang():
 
 # 기대값은 한글 2022 PDF(3-09월_교육_통합_2022 1쪽)에서 수식 상자 왼쪽 위 기준으로 잰 글자 원점(pt)이다.
 # 글자는 HYhwpEQ 코드 그대로이고, PDF 쪽 상자 위치가 0.1pt 안쪽으로 흔들려 0.3pt까지 같다고 본다.
+# 코퍼스에 없는 객체는 같은 문서의 수식 스크립트를 바꾼 사본을 한글 2022로 재저장해 PDF로 찍은 값이다.
 DRAWN_BY_HANGUL_2022 = [
+    (
+        "UNDEROVER {A} _{k=1} ^{n} x",
+        [("\ue0ef", 0.09, 20.24), ("\ue047", 4.29, 19.88), ("\ue034", 10.05, 20.24), ("\ue0f2", 4.65, 5.24)]
+        + [("\ue000", 3.21, 13.64), ("\ue0fc", 13.05, 13.64)],
+    ),
+    # 묶음괄호: 본문보다 짧으면 조각 셋, 길면 이음 조각(E108) 둘을 늘려 채운다. UNDERBRACE 조각은 작은 줄 크기로 찍힌다.
+    (
+        "OVERBRACE {a+b+c} {n}",
+        [("\ue108", 8.81, 11.01), ("\ue108", 19.97, 11.01), ("\ue106", 0.05, 11.01), ("\ue107", 11.21, 11.01)]
+        + [("\ue109", 22.25, 11.01), ("\ue0e7", 26.81, 16.77), ("\ue0f2", 13.49, 5.25)],
+    ),
+    (
+        "UNDERBRACE {abc} {x over y}",
+        [("\ue10a", -0.04, 23.05), ("\ue10b", 8.72, 23.05), ("\ue10d", 17.47, 23.05), ("\ue0e5", 9.77, 29.1)]
+        + [("\ue06d", 9.53, 16.26), ("\ue0fc", 10.97, 7.62)],
+    ),
+    # LONGDIV: 기호 E10F·몫 아래 선 E110, 빼는 수 행 아래 선 E06D, 행마다 받아내린 자리만큼 들여 쓴다.
+    (
+        "LONGDIV {12} {21} {252 # 24 # 12 # 12 # 0}",
+        [("\ue10f", 9.41, 17.64), ("\ue110", 12.05, 17.64), ("\ue034", 0.05, 18.48), ("\ue035", 17.33, 7.68)]
+        + [("\ue037", 17.33, 28.8), ("\ue06d", 12.77, 36.24), ("\ue06d", 17.33, 57.0), ("\ue03d", 21.77, 59.88)],
+    ),
+    # BIGG는 앞 형제 중 가장 큰 높이로 괄호 글자 하나를 늘린다. COLOR는 본문을 그 자리에 그대로 찍는다.
+    (
+        "x+ {y over z} BIGG ]",
+        [("\ue0fc", 0.02, 13.56), ("\ue048", 6.62, 13.08), ("\ue06d", 15.5, 16.2), ("\ue04a", 23.54, 16.68)],
+    ),
+    (
+        "COLOR {0,0,255} {x over y} +1",
+        [("\ue06d", 1.05, 16.24), ("\ue0fd", 2.73, 19.36), ("\ue0fc", 2.37, 7.72), ("\ue034", 17.85, 13.48)],
+    ),
+    # REL·BUILDREL 화살표는 왼쪽(E058)·이음(E059, 늘림)·오른쪽(E05A) 조각이고, ⇄는 두 줄이다.
+    (
+        "REL -> {x} {y}",
+        [("\ue0fd", 2.7, 19.77), ("\ue0fc", 2.34, 7.65), ("\ue059", 0.06, 12.81), ("\ue05a", 6.3, 12.81)],
+    ),
+    ("REL <- {long text} {}", [("\ue0f0", 2.29, 7.62), ("\ue059", 1.93, 12.78), ("\ue058", -0.83, 12.78)]),
+    (
+        "BUILDREL <-> {abc}",
+        [("\ue0e7", 10.51, 7.65), ("\ue059", 1.87, 12.81), ("\ue058", -0.77, 12.81), ("\ue05a", 13.03, 12.81)],
+    ),
+    (
+        "REL EXARROW {m} {n}",
+        [("\ue0f2", 3.81, 22.98), ("\ue0f1", 2.25, 7.62), ("\ue059", 1.82, 15.65), ("\ue059", 0.03, 12.9)]
+        + [("\ue058", -0.75, 15.78), ("\ue05a", 9.21, 13.02)],
+    ),
     (
         "LEFT ( {2 ^{sqrt {3}}} over {2} RIGHT ) ^{sqrt {3} +1}",
         [
@@ -283,6 +330,26 @@ def test_draw_places_glyphs_like_hangul_2022(script, expected):
     for char, x, y in expected:
         nearest = min((abs(dx - x) + abs(dy - y) for c, dx, dy in drawn if c == char), default=None)
         assert nearest is not None and nearest <= 0.3, (char, x, y, nearest)
+
+
+def test_draw_color_paints_only_its_body():
+    # 정답 PDF: COLOR {0,0,255} 본문(분수선 포함)은 파랑, 뒤 「+1」은 수식 색 그대로다.
+    colors = {g.text: g.color for g in draw("COLOR {0,0,255} {x over y} +1", 900) if isinstance(g, DrawnGlyph)}
+    assert colors["\ue06d"] == colors["\ue0fc"] == 0xFF0000
+    assert colors["\ue048"] is None and colors["\ue034"] is None
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        # 정답 PDF: 줄 글을 공백 없이 이어 읽어 「00255」(네 자리 이상은 255)가 빨강이 되고, 값은 0~255로 자른다
+        ("COLOR {0 0 255} {a}", [0x0000FF]),
+        ("COLOR {300,20,1000} {b}", [0xFF14FF]),
+        ("COLOR {255,0,0} {COLOR {0,0,255} {a} b}", [0xFF0000, 0x0000FF]),
+    ],
+)
+def test_draw_color_reads_rgb_like_hangul_2022(script, expected):
+    assert [g.color for g in draw(script, 900) if isinstance(g, DrawnGlyph)] == expected
 
 
 def test_draw_box_outlines_the_box_accent():

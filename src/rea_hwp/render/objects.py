@@ -159,7 +159,8 @@ class ObjectsMixin:
         for glyph in glyphs:
             if isinstance(glyph, DrawnBox):
                 # 기본 펜은 장치 1점 선이다(정답 PDF: 600dpi에서 0.12pt).
-                rect = Rect(left + glyph.x, top + glyph.y, glyph.w, glyph.h, "#ffffff", "#000000", EQUATION_PEN)
+                fill = "#ffffff" if glyph.filled else None
+                rect = Rect(left + glyph.x, top + glyph.y, glyph.w, glyph.h, fill, "#000000", EQUATION_PEN)
                 state.page.items.append(rect)
                 continue
             if not glyph.text.strip():
@@ -171,7 +172,7 @@ class ObjectsMixin:
                     top + glyph.baseline,
                     glyph.height,
                     glyph.font,
-                    color,
+                    color if glyph.color is None else _colorref(glyph.color),
                     glyph.bold,
                     glyph.italic,
                     scale_x=glyph.width * 2 / glyph.height if glyph.height else 1.0,
