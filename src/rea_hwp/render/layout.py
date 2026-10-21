@@ -313,6 +313,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         relaid_shift = 0
         #: 앞 문단이 끝난 세로 위치와 문단 모양. LINE_SEG가 없는 문단은 여기에 이어 붙인다.
         flow_end, previous_shape, after_spill = 0, None, False
+        #: 앞 문단을 LINE_SEG 없이 다시 짜 쪽(단) 맨 위로 되감았는가. 뒤 저장 줄은 그 영역 맨 위 기준이다.
+        follows_restart = False
         last_paragraph = next((node for node in reversed(nodes) if node.tag == tags.PARA_HEADER), None)
         for node in nodes:
             if node.tag != tags.PARA_HEADER:
@@ -390,6 +392,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 # 계산한 값이다(실측: hwpspec 33쪽 「4.2.10. 문단 모양」만 줄 정보가 없고 뒤 「Tag ID」 줄은 저장 위치가
                 # 정답 241.44pt).
                 state.zone_top -= pushed_reflow[1]
+            restarted = False
             if view_reflowed:
                 if state is None:
                     state = self.new_page(geometry)
@@ -422,6 +425,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                             else body_height - self.footnote_reserve(state)
                         )
                     view = dataclasses.replace(view, segments=reflow.paginate(view.segments, body_height, page_top))
+                restarted = view.segments[0].vertical_pos != start
             spilled = False
             # 이 문단 개체를 놓기 전에 쪽에 있던 위아래 배치 상자(objects.flow_position이 피한다).
             registry = self.__dict__.get("_stacked_boxes", {})
@@ -431,7 +435,12 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     state, geometry, (previous_vpos, previous_line_bottom, previous_bottom, previous_next_line), segment
                 )
                 forced = index == 0 and previous_vpos is not None and page_break
-                if (
+                if state is not None and index == 0 and follows_restart and not (forced or rewound or view_reflowed):
+                    # 다시 짠 앞 문단이 넘쳐 쪽 맨 위로 되감겼으면 뒤 저장 줄 세로 값은 그 쪽 영역 맨 위 기준이다.
+                    # 앞 문단을 앞 쪽에서 넘어온 줄 뒤에 이어 놓느라 옮긴 zone_top을 되돌린다(한글문서파일형식_수식
+                    # 7쪽: 낡은 69660에서 넘어온 「1. 수식」 뒤 줄 없는 제목, 다음 문단 저장 5140은 정답 137.5pt).
+                    state.zone_top = state.zone_start
+                elif (
                     state is not None
                     and index == 0
                     and not (forced or rewound or view_reflowed)
@@ -611,6 +620,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 )
             previous_shape = view.para_shape
             after_spill = spilled
+            follows_restart = restarted and not stale_vertical
 
     def place_floats_before_page(
         self, state: PageState, geometry: SectionGeometry, view: ParagraphView, line: int = 0

@@ -803,3 +803,11 @@ def test_text_after_resized_top_and_bottom_table_moves_up():
     # 한글 2022 PDF 12쪽 미주: 수식 칸 때문에 3771 → 3546으로 줄어든 위아래 배치 표 뒤 문단은 그 차이만큼 올라간다.
     page = _open("oss/rhwp/3-11월_실전_통합_2022.hwp")[11]
     assert _glyphs_at(page, "따", 301.92, 686.64)
+
+
+@needs_corpus
+def test_stored_paragraph_after_reflowed_heading_follows_it():
+    # 한글 2022 PDF 7쪽: 줄 정보 없는 제목 「1.1.」 뒤 문단은 저장 5140(쪽 맨 위 기준)이 아니라 다시 짠 제목 끝에
+    # 위 간격을 두고 이어진다(정답 「완」 기준선 190.6pt, 잘못 이으면 25.6pt 아래).
+    page = _open("oss/hwp-rs/crates__hwp__tests__integration__hancom__files__한글문서파일형식_수식_revision1.3.hwp")[6]
+    assert _glyphs_at(page, "완", 107.04, 190.57)
