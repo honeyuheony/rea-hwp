@@ -7,7 +7,6 @@ import dataclasses
 import functools
 import itertools
 import math
-import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,7 +58,7 @@ from .ole import content_metafile, has_ooxml_chart
 from .ooxml_chart import draw_ooxml_chart, ooxml_chart_contents
 from .raster import image_mime, pixel_size, png_from_raster
 from .reflow import ASCENT_PERCENT, RANGE_GRID
-from .scene import Glyph, Image, Line, Rect
+from .scene import Glyph, Image, Line, MissingObject, Rect
 from .table_flow import _margin_shift, is_block_table, vertical_offset
 from .textart import FontFiles, TextArtDrawing, TextArtFontError, draw_textart
 from .wmf import WmfDrawing, convert_wmf
@@ -691,11 +690,13 @@ class ObjectsMixin:
             self.draw_picture(state, picture.model, left, top, width, height)
         textart = component.find(tags.SHAPE_COMPONENT_TEXTART)
         if textart is not None:
-            drawing = self.textart_drawing(textart, width, height)
+            drawing, reason = self.textart_result(textart, width, height)
             if drawing is not None:
                 svg = _textart_svg(drawing, component.model)
                 href = f"data:image/svg+xml;base64,{base64.b64encode(svg.encode('utf-8')).decode('ascii')}"
                 state.page.items.append(Image(left, top, width, height, href))
+            else:
+                state.page.missing.append(MissingObject("textart", reason, (left, top, width, height)))
         ole = component.find(tags.SHAPE_COMPONENT_OLE)
         if ole is not None and isinstance(ole.model, ShapeOle):
             chart = self.chart_drawing(ole.model.bin_data_id, left, top, width, height)
@@ -961,14 +962,21 @@ class ObjectsMixin:
 
     def textart_drawing(self, node: Node, width: float, height: float) -> TextArtDrawing | None:
         """글맵시 윤곽. 글꼴 파일이 없거나 아직 옮기지 못한 모양(원·여러 줄·HFT)이면 None이고 범위 밖으로 남긴다."""
+        return self.textart_result(node, width, height)[0]
+
+    def textart_result(self, node: Node, width: float, height: float) -> tuple[TextArtDrawing | None, str]:
+        """(글맵시 윤곽, 그리지 못했으면 그 이유)."""
         cache = self.__dict__.setdefault("_textart_drawings", {})
         key = (id(node), round(width), round(height))
         if key not in cache:
             try:
-                cache[key] = draw_textart(node.record.payload, width, height, _textart_fonts().find)
-            except (TextArtFontError, NotImplementedError, ImportError):
-                # 그리지 못하는 글맵시는 그 영역을 채점에서 빼는 기존 동작(범위 밖)으로 둔다.
-                cache[key] = None
+                fonts = _textart_fonts(self.options.font_dirs)
+                cache[key] = (draw_textart(node.record.payload, width, height, fonts.find), "")
+            except ImportError:
+                cache[key] = (None, "fonttools is not installed; install rea-hwp[fonts] to draw text art")
+            except (TextArtFontError, NotImplementedError) as error:
+                # 그리지 못한 글맵시는 기존처럼 채점에서 빼는 범위 밖으로 두고, 이유는 Page.missing에 남긴다.
+                cache[key] = (None, str(error))
         return cache[key]
 
     def out_of_scope(self, ctrl: Node, box_size: tuple[float, float] | None = None) -> bool:
@@ -1218,18 +1226,8 @@ def _align(reference: float, span: float, size: float, align: int, offset: int) 
     return reference + offset
 
 
-#: 글맵시 글꼴을 찾을 폴더. REA_HWP_FONT_DIRS(경로 구분자로 나눔)가 없으면 Windows 글꼴과 한컴 공용 TTF 가운데 있는 것.
-_DEFAULT_FONT_DIRS = (
-    Path("C:/Windows/Fonts"),
-    Path("/mnt/c/Windows/Fonts"),
-    Path("/mnt/c/Program Files (x86)/HNC/Office 2022/HOffice120/Shared/TTF"),
-)
-
-
 @functools.cache
-def _textart_fonts() -> FontFiles:
-    configured = os.environ.get("REA_HWP_FONT_DIRS")
-    directories = [Path(p) for p in configured.split(os.pathsep) if p] if configured else _DEFAULT_FONT_DIRS
+def _textart_fonts(directories: tuple[Path, ...]) -> FontFiles:
     return FontFiles([d for d in directories if d.is_dir()])
 
 

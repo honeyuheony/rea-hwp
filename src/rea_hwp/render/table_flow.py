@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
-import os
 from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -82,12 +81,8 @@ SPLIT_RESERVE = 120
 ROW_RESERVE = 80
 #: 쪽을 넘는 여러 행 셀을 늘린 뒤 쪽 조각을 다시 계산하는 최대 횟수(경험값, 검증 안 됨).
 CARRIED_FIT_ROUNDS = 4
-#: 본문 표를 table_paging(한글 2022 행 배치 루프)으로 나눈다. REA_HWP_TABLE_ENGINE=0이면 경험 규칙 경로를 쓴다.
-TABLE_ENGINE = os.environ.get("REA_HWP_TABLE_ENGINE", "1") != "0"
 #: 쪽을 넘는 행의 마지막 조각을 쪽 바닥까지 늘릴 때 남기는 여유(HWPUNIT).
 LAST_PIECE_BOTTOM_SLACK = 60
-#: 새 엔진 입력에 낡은 셀 줄을 다시 나눈 줄(recompose)을 쓴다. REA_HWP_ENGINE_RECOMPOSE=0이면 저장 줄만 쓴다.
-RECOMPOSE_IN_ENGINE = os.environ.get("REA_HWP_ENGINE_RECOMPOSE", "1") != "0"
 
 
 @dataclass
@@ -849,10 +844,10 @@ class TableFlowMixin:
         if not model.treat_as_char and model.outer_margins:
             outer = (model.outer_margins[2], model.outer_margins[3])
         continued_top = outer[0]
-        if TABLE_ENGINE and self.in_body and paging_eligible(grid, views, model, self.nested_eligible):
+        if self.options.table_engine and self.in_body and paging_eligible(grid, views, model, self.nested_eligible):
             # 저장 높이를 넘는 낡은 셀 줄은 셀 폭으로 다시 나눈 줄이 더 적으면 그것을 쓴다(실측: task2287 81쪽 표 47
             # 행 2~3 열 7 저장 11줄 14282 > 셀 12982, 정답 행 3은 저장 높이).
-            if RECOMPOSE_IN_ENGINE:
+            if self.options.engine_recompose:
                 fresh, fresh_views = self.table_layout_grid(ctrl, recompose=True)
                 if fresh is not None:
                     grid, views = fresh, fresh_views
@@ -1142,14 +1137,14 @@ class TableFlowMixin:
         return placement
 
     def nested_input(self, ctrl: Node) -> NestedInput:
-        grid, views = self.table_layout_grid(ctrl, recompose=RECOMPOSE_IN_ENGINE)
+        grid, views = self.table_layout_grid(ctrl, recompose=self.options.engine_recompose)
         if grid is None:
             raise CorruptFileError("nested table has no TABLE record; the file is damaged")
         table, sources = paging_table(grid, views, self.nested_input)
         return NestedInput(ctrl, table, grid, sources)
 
     def nested_eligible(self, ctrl: Node) -> bool:
-        grid, views = self.table_layout_grid(ctrl, recompose=RECOMPOSE_IN_ENGINE)
+        grid, views = self.table_layout_grid(ctrl, recompose=self.options.engine_recompose)
         return grid is not None and paging_eligible(grid, views, ctrl.model, self.nested_eligible)
 
     def draw_fragments(

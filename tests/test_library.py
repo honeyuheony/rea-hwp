@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import tracemalloc
 import xml.etree.ElementTree as ET
@@ -31,6 +32,7 @@ from rea_hwp.container import HwpContainer
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.html import text_layer
 from rea_hwp.render.layout import layout_document
+from rea_hwp.render.options import RenderOptions
 from rea_hwp.render.scene import Glyph, Page, TextLine
 from rea_hwp.render.svg import page_to_svg
 
@@ -258,3 +260,15 @@ def test_legacy_error_names_still_catch_the_new_kinds():
     from rea_hwp.crypto import HwpDecryptError as crypto_name
 
     assert container_name is HwpFormatError and crypto_name is HwpDecryptError
+
+
+def test_render_options_from_environment_reads_only_the_three_variables(tmp_path):
+    assert RenderOptions.from_environment({}) == RenderOptions()
+    environ = {
+        "REA_HWP_TABLE_ENGINE": "0",
+        "REA_HWP_ENGINE_RECOMPOSE": "0",
+        "REA_HWP_FONT_DIRS": os.pathsep.join([str(tmp_path / "a"), "", str(tmp_path / "b")]),
+    }
+    assert RenderOptions.from_environment(environ) == RenderOptions(
+        table_engine=False, engine_recompose=False, font_dirs=(tmp_path / "a", tmp_path / "b")
+    )

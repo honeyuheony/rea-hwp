@@ -30,6 +30,7 @@ from hancom_resave import RESAVE_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import layout_document
+from rea_hwp.render.options import RenderOptions
 from rea_hwp.render.svg import HU_PER_PT, page_glyph_table, symbol_text
 
 REFERENCE_ROOT = CORPUS_ROOT / "ref2022"
@@ -83,7 +84,7 @@ def equation_oracle(entry, reference_pages) -> dict | None:
     outcome = {"changed_equations": report.changed_equations, "blocking": len(report.blocking)}
     if not report.applicable:
         return outcome
-    totals = score_layout(layout_document(document), reference_pages)
+    totals = score_layout(layout_document(document, RenderOptions.from_environment()), reference_pages)
     del totals["offsets"]
     return outcome | totals
 
@@ -95,7 +96,7 @@ def evaluate(entry) -> dict:
     started = time.monotonic()
     try:
         document = HwpDocument.open(entry.path, entry.password)
-        pages = layout_document(document)
+        pages = layout_document(document, RenderOptions.from_environment())
     except Exception as error:  # 렌더링 실패는 실패로 센다(검사불가 아님).
         return {"status": "render-error", "reason": f"{type(error).__name__}: {error}"}
     reference_pages = pdf_pages(str(reference))

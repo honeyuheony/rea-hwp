@@ -1,4 +1,5 @@
 import functools
+import os
 import re
 import struct
 from pathlib import Path
@@ -7,7 +8,8 @@ import pytest
 
 from rea_hwp import tags
 from rea_hwp.document import HwpDocument
-from rea_hwp.render.layout import layout_document
+from rea_hwp.render.layout import layout_document, render_pages
+from rea_hwp.render.options import RenderOptions
 from rea_hwp.render.scene import Image
 from rea_hwp.render.textart import (
     DEFAULT_FACE,
@@ -66,6 +68,23 @@ def test_preset_textarts_are_drawn_instead_of_excluded():
     drawn = [item for page in pages for item in page.items if isinstance(item, Image) and "svg" in item.href[:30]]
     assert len(drawn) == 25
     assert all(not page.excluded for page in pages)
+    assert all(not page.missing for page in pages)
+
+
+@needs_preset
+def test_textart_without_fonts_is_reported_missing_and_environment_is_ignored(monkeypatch):
+    pytest.importorskip("fontTools")
+    # 라이브러리 경로는 환경 변수를 읽지 않으므로, 글꼴 폴더를 환경 변수로 주어도 options의 빈 목록을 따른다.
+    monkeypatch.setenv("REA_HWP_FONT_DIRS", os.pathsep.join(map(str, FONT_DIRS)))
+    pages = render_pages(HwpDocument.open(PRESET), options=RenderOptions(font_dirs=()))
+
+    missing = [item for page in pages for item in page.missing]
+    assert len(missing) == 25
+    assert {item.kind for item in missing} == {"textart"}
+    assert all("찾지 못했다" in item.reason for item in missing)
+    assert all(item.box[2] > 0 and item.box[3] > 0 for item in missing)
+    drawn = [item for page in pages for item in page.items if isinstance(item, Image) and "svg" in item.href[:30]]
+    assert drawn == []
 
 
 @functools.cache

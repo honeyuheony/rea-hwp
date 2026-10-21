@@ -1,6 +1,6 @@
 [project]
 name = "rea-hwp"
-version = "0.1.4"
+version = "0.1.5"
 description = "Lossless HWP 5.0 parser and page-accurate web renderer"
 readme = "README.md"
 license = "MIT"

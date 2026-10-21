@@ -4,8 +4,8 @@ from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.paragraph import LineSeg
-from rea_hwp.render import table_flow
 from rea_hwp.render.layout import layout_document
+from rea_hwp.render.options import RenderOptions
 from rea_hwp.render.svg import page_glyph_table
 from rea_hwp.render.table_flow import cell_items
 from rea_hwp.render.table_paging import (
@@ -194,31 +194,40 @@ def test_rewound_stored_line_continues_below_previous_line():
     assert [line.top for line in lines] == [0, 1500]
 
 
-def _corpus_pages(name: str, monkeypatch, engine: bool):
-    monkeypatch.setattr(table_flow, "TABLE_ENGINE", engine)
-    return layout_document(HwpDocument.open(CORPUS / name))
+def _corpus_pages(name: str, engine: bool):
+    return layout_document(HwpDocument.open(CORPUS / name), RenderOptions(table_engine=engine))
 
 
-def test_split_multi_row_cell_leaves_row_50_at_stored_height(monkeypatch):
-    page = _corpus_pages("rhwp/task2287__1342000_edu_curriculum_map.hwp", monkeypatch, True)[170]
+def test_split_multi_row_cell_leaves_row_50_at_stored_height():
+    page = _corpus_pages("rhwp/task2287__1342000_edu_curriculum_map.hwp", True)[170]
     # 한글 2022 PDF 171쪽: 행 50 「[9국01-12]」 165.60pt, 행 51 「[9국01-11]」 185.88pt.
     assert abs((_glyph_y(page, "[9국01-12]") or 0) - 165.60) <= 1
     assert abs((_glyph_y(page, "[9국01-11]") or 0) - 185.88) <= 1
 
 
-def test_table_whose_first_row_has_no_room_for_a_line_moves_to_next_page(monkeypatch):
-    pages = _corpus_pages("rhwp/hwpspec.hwp", monkeypatch, True)
+def test_table_whose_first_row_has_no_room_for_a_line_moves_to_next_page():
+    pages = _corpus_pages("rhwp/hwpspec.hwp", True)
     # 한글 2022 PDF 43쪽: 표 66 첫 행 「자료형」 93.72pt(42쪽에는 표가 없다).
     assert abs((_glyph_y(pages[42], "자료형") or 0) - 93.72) <= 1
 
 
-def test_cell_with_floating_pictures_that_do_not_fit_moves_whole_table(monkeypatch):
-    page = _corpus_pages("rhwp/issue1921__59043_regulatory_analysis.hwp", monkeypatch, True)[10]
+def test_cell_with_floating_pictures_that_do_not_fit_moves_whole_table():
+    page = _corpus_pages("rhwp/issue1921__59043_regulatory_analysis.hwp", True)[10]
     # 한글 2022 PDF 11쪽: 표 15 행 1 캡션 「유튜브 담배제품 후기·추천」 262.32pt(행 0 그림이 10쪽에 들어가지 않음).
     assert abs((_glyph_y(page, "유튜브담배제품후기") or 0) - 262.32) <= 1
 
 
-def test_nested_table_splits_along_outer_cell_fragments(monkeypatch):
-    page = _corpus_pages("rhwp/basic__issue2007_nested_cell_pagination_42065.hwp", monkeypatch, True)[11]
+def test_nested_table_splits_along_outer_cell_fragments():
+    page = _corpus_pages("rhwp/basic__issue2007_nested_cell_pagination_42065.hwp", True)[11]
     # 한글 2022 PDF 12쪽: 셀 안 표 이어지는 조각의 「제272조의2(선거범죄의조사등)」 149.40pt.
     assert abs((_glyph_y(page, "제272조의2(선거범죄의조사등)") or 0) - 149.40) <= 1
+
+
+def test_table_engine_option_reaches_layout_and_environment_is_ignored(monkeypatch):
+    document = HwpDocument.open(CORPUS / "rhwp/basic__issue2007_nested_cell_pagination_42065.hwp")
+    monkeypatch.setenv("REA_HWP_TABLE_ENGINE", "0")
+    by_default = layout_document(document)
+    engine_on = layout_document(document, RenderOptions(table_engine=True))
+    engine_off = layout_document(document, RenderOptions(table_engine=False))
+    # 이 문서는 셀 안 표를 나누는 두 경로의 쪽 수가 다르다(엔진 17쪽, 경험 규칙 15쪽).
+    assert len(by_default) == len(engine_on) != len(engine_off)

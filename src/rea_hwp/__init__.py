@@ -14,11 +14,14 @@ from .errors import (
     WrongPasswordError,
 )
 from .models.paragraph import ControlChar
+from .render.layout import render_pages
+from .render.options import RenderOptions
+from .render.scene import Image, MissingObject, Page, TextLine
 from .render.styles import DocStyles
 from .structure import BinDataItem, Paragraph, RecordView, picture_bin_data_id, record_id, subtree_end
 
-#: pyproject.toml의 판과 같게 둔다. 공개 API나 읽기·렌더 결과가 바뀌는 커밋마다 올린다.
-__version__ = "0.1.4"
+#: pyproject.toml의 버전과 같게 둔다. 공개 API나 읽기·렌더 결과가 바뀌는 커밋마다 올린다.
+__version__ = "0.1.5"
 
 __all__ = [
     "BinDataItem",
@@ -30,16 +33,22 @@ __all__ = [
     "HwpDecryptError",
     "HwpDocument",
     "HwpFormatError",
+    "Image",
     "LimitExceededError",
     "Limits",
+    "MissingObject",
+    "Page",
     "Paragraph",
     "PasswordRequiredError",
     "ReaHwpError",
     "RecordView",
+    "RenderOptions",
+    "TextLine",
     "UnsupportedFormatError",
     "WrongPasswordError",
     "__version__",
     "picture_bin_data_id",
     "record_id",
+    "render_pages",
     "subtree_end",
 ]

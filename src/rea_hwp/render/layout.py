@@ -65,6 +65,7 @@ from .decor import DecorMixin
 from .notes import NotesMixin, piece_height
 from .numbering import format_number
 from .objects import ObjectsMixin, outer_box
+from .options import RenderOptions
 from .paint import PaintUnit, arrange_pages
 from .scene import Glyph, Line, Page, Rect, TextLine
 from .styles import DocStyles, colorref
@@ -160,8 +161,9 @@ class ParagraphBorderRun:
 
 
 class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
-    def __init__(self, document: HwpDocument) -> None:
+    def __init__(self, document: HwpDocument, options: RenderOptions | None = None) -> None:
         self.document = document
+        self.options = options or RenderOptions()
         self.styles = DocStyles.from_document(document)
         self.styles.image_source = self.image_fill_source
         self.char_unit = reflow.document_char_unit(
@@ -2320,8 +2322,16 @@ def _flush_shadow_run(page: Page, run: list[tuple[list[Glyph], Glyph]]) -> None:
     run.clear()
 
 
-def layout_document(document: HwpDocument) -> list[Page]:
-    return DocumentLayout(document).run()
+def layout_document(document: HwpDocument, options: RenderOptions | None = None) -> list[Page]:
+    return DocumentLayout(document, options).run()
+
+
+def render_pages(document: HwpDocument, *, options: RenderOptions | None = None) -> list[Page]:
+    """문서를 쪽마다 그릴 항목으로 조판한다. options를 주지 않으면 RenderOptions() 기본값을 쓴다."""
+    try:
+        return layout_document(document, options)
+    except RecursionError as error:
+        raise CorruptFileError("objects are nested too deeply to lay out; the file is damaged") from error
 
 
 #: 글자 모양 밑줄 종류(attr bit 2~3): 1 글자 아래. 2는 한컴이 밑줄 없이 채우는 값(모양 15와 함께)이다.
