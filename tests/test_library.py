@@ -341,3 +341,23 @@ def test_bmp_pictures_reach_svg_as_png(relative):
     for page in layout_document(document):
         page_to_svg(page, image_href=lambda data, mime: mimes.append(mime) or "x")
     assert "image/png" in mimes and "image/bmp" not in mimes
+
+
+@needs_corpus
+def test_internal_paths_used_by_existing_callers_still_work():
+    from rea_hwp import HwpDocument as PublicDocument
+    from rea_hwp.render.layout import layout_document as internal_layout
+    from rea_hwp.render.scene import Image as InternalImage
+    from rea_hwp.render.svg import page_to_svg as internal_page_to_svg
+
+    pages = internal_layout(PublicDocument.open(CORPUS / "oss" / "rhwp" / "pic-in-head-01.hwp", password=None))
+    written = 0
+    for page in pages:
+        for item in page.items:
+            if isinstance(item, InternalImage) and item.href.startswith("data:"):
+                written += 1
+                item.href = f"images/{written}.bin"
+    svgs = [internal_page_to_svg(page) for page in pages]
+    assert written > 0
+    assert all("data:" not in svg for svg in svgs)
+    assert sum(svg.count('href="images/') for svg in svgs) == written
