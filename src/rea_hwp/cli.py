@@ -10,12 +10,13 @@ from pathlib import Path
 from .document import HwpDocument
 from .render.html import text_layer, viewer_html
 from .render.layout import layout_document
+from .render.options import RenderOptions
 from .render.svg import HU_PER_PT, equation_fonts, page_glyph_table, page_to_svg
 
 
 def render(args: argparse.Namespace) -> int:
     document = HwpDocument.open(args.file, args.password)
-    pages = layout_document(document)
+    pages = layout_document(document, RenderOptions.from_environment())
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     listing = []

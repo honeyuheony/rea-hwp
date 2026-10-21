@@ -8,6 +8,8 @@ import struct
 from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
 from cryptography.hazmat.primitives.ciphers import Cipher, CipherAlgorithm, algorithms, modes
 
+from .errors import CorruptEncryptedStreamError
+from .errors import HwpDecryptError as HwpDecryptError  # 예전 경로 rea_hwp.crypto.HwpDecryptError
 from .record import parse_records
 from .tags import DISTRIBUTE_DOC_DATA
 
@@ -21,10 +23,6 @@ LEGACY_KEY_BYTES = 7
 _CFB1_CHUNK_BYTES = 1 << 16
 #: 비트 위치 j마다 ECB 출력 첫 바이트의 맨 위 비트를 평문 바이트의 (7 - j)번 비트 자리로 옮기는 표.
 _KEYSTREAM_BIT_TABLES = [bytes((value >> 7) << (7 - bit) for value in range(256)) for bit in range(8)]
-
-
-class HwpDecryptError(ValueError):
-    """암호 해제에 실패했다(암호가 틀렸거나 스트림이 손상됐다)."""
 
 
 class _MsvcRand:
@@ -41,7 +39,7 @@ class _MsvcRand:
 def distribute_key(doc_data: bytes) -> tuple[bytes, int]:
     """256바이트 DISTRIBUTE_DOC_DATA에서 AES 키와 옵션 플래그를 꺼낸다."""
     if len(doc_data) < 256:
-        raise HwpDecryptError(f"DISTRIBUTE_DOC_DATA is {len(doc_data)} bytes, expected 256")
+        raise CorruptEncryptedStreamError(f"DISTRIBUTE_DOC_DATA is {len(doc_data)} bytes, expected 256")
     (seed,) = struct.unpack_from("<I", doc_data, 0)
     rand = _MsvcRand(seed)
     plain = bytearray(doc_data[:256])
@@ -64,7 +62,9 @@ def decrypt_distribute_stream(stream: bytes) -> bytes:
     """ViewText/Scripts 스트림에서 DISTRIBUTE_DOC_DATA를 떼고 나머지를 AES-128-ECB로 푼다."""
     head = parse_records(stream[:DISTRIBUTE_HEADER_SIZE]).records
     if not head or head[0].tag != DISTRIBUTE_DOC_DATA or len(head[0].payload) != 256:
-        raise HwpDecryptError("stream does not start with a 256-byte DISTRIBUTE_DOC_DATA record")
+        raise CorruptEncryptedStreamError(
+            "distribution stream does not start with a 256-byte DISTRIBUTE_DOC_DATA record; the file is damaged"
+        )
     key, _ = distribute_key(head[0].payload)
     body = stream[DISTRIBUTE_HEADER_SIZE:]
     aligned = len(body) - len(body) % 16

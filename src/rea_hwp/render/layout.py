@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from .. import tags
 from ..document import HwpDocument, Node
+from ..errors import CorruptFileError
 from ..models.controls import (
     AutoNumberCtrl,
     AutoNumberKind,
@@ -65,6 +66,7 @@ from .decor import DecorMixin
 from .notes import NotesMixin, piece_height
 from .numbering import format_number
 from .objects import ObjectsMixin, outer_box
+from .options import RenderOptions
 from .paint import PaintUnit, arrange_pages
 from .scene import Glyph, Line, Page, Rect, TextLine
 from .styles import DocStyles, colorref
@@ -160,8 +162,9 @@ class ParagraphBorderRun:
 
 
 class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
-    def __init__(self, document: HwpDocument) -> None:
+    def __init__(self, document: HwpDocument, options: RenderOptions | None = None) -> None:
         self.document = document
+        self.options = options or RenderOptions()
         self.styles = DocStyles.from_document(document)
         self.styles.image_source = self.image_fill_source
         self.char_unit = reflow.document_char_unit(
@@ -1094,7 +1097,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             if page_def is not None:
                 break
         if page_def is None:
-            raise ValueError("section has no PAGE_DEF; cannot determine page size")
+            raise CorruptFileError("section has no PAGE_DEF, so the page size is unknown; the file is damaged")
         return SectionGeometry.from_page_def(page_def, column_def)
 
     def place_paragraphs(self, state: PageState, paragraphs: list[Node], area: Area) -> None:
@@ -1452,6 +1455,18 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         runs[context] = ParagraphBorderRun.start(state.page, fill, area.x, area.width, top, opened)
         runs[context].extend(view.node, shape, bottom, last_line)
 
+    def paragraph_id(self, view: ParagraphView) -> str | None:
+        """글줄이 속한 문단의 원본 위치. 바탕쪽 글은 쪽마다 되풀이되므로 위치를 정하지 않는다."""
+        if self.__dict__.get("in_master_page"):
+            return None
+        return self.document.record_id(view.node.record)
+
+    def note_placed(self, page: Page, node: Node | None) -> None:
+        """표·그림 레코드가 page에 놓였다고 적는다. 바탕쪽 개체와 이미 적은 개체는 건너뛴다."""
+        located = None if node is None or self.__dict__.get("in_master_page") else self.document.record_id(node.record)
+        if located is not None and located not in page.objects:
+            page.objects.append(located)
+
     def draw_line(self, state: PageState, view: ParagraphView, index: int, area: Area) -> None:
         segment = view.segments[index]
         first, last = view.line_range(index)
@@ -1606,7 +1621,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         self.line_pieces = outer_pieces
         text = "".join(pieces)
         if text.strip():
-            state.page.text_lines.append(TextLine(text.rstrip(), line_start, baseline, x - line_start, max(sizes)))
+            state.page.text_lines.append(
+                TextLine(text.rstrip(), line_start, baseline, x - line_start, max(sizes), self.paragraph_id(view))
+            )
 
     def draw_vertical_line(
         self, state: PageState, view: ParagraphView, index: int, right: float, top: float, rotate_latin: bool
@@ -2015,7 +2032,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 self.append_glyph(state, char, sub, slot, device_round(sub_x), sub_baseline)
             sub_x += self.measurer.advance(char, sub, slot)
         if sub_text.strip():
-            state.page.text_lines.append(TextLine(sub_text, x + offset, sub_baseline, sub_width, sub.base_size))
+            state.page.text_lines.append(
+                TextLine(sub_text, x + offset, sub_baseline, sub_width, sub.base_size, self.paragraph_id(view))
+            )
 
     def place_overlap(self, state: PageState, model: OverlapCtrl, shape: CharShape, x: float, baseline: float) -> None:
         """글자 겹침. 한글 2022 PDF 실측(글자겹침 견본·kr_156369074·수출입 현황·table-vpos-01·k-water-rfp).
@@ -2340,8 +2359,16 @@ def _flush_shadow_run(page: Page, run: list[tuple[list[Glyph], Glyph]]) -> None:
     run.clear()
 
 
-def layout_document(document: HwpDocument) -> list[Page]:
-    return DocumentLayout(document).run()
+def layout_document(document: HwpDocument, options: RenderOptions | None = None) -> list[Page]:
+    return DocumentLayout(document, options).run()
+
+
+def render_pages(document: HwpDocument, *, options: RenderOptions | None = None) -> list[Page]:
+    """문서를 쪽마다 그릴 항목으로 조판한다. options를 주지 않으면 RenderOptions() 기본값을 쓴다."""
+    try:
+        return layout_document(document, options)
+    except RecursionError as error:
+        raise CorruptFileError("objects are nested too deeply to lay out; the file is damaged") from error
 
 
 #: 글자 모양 밑줄 종류(attr bit 2~3): 1 글자 아래. 2는 한컴이 밑줄 없이 채우는 값(모양 15와 함께)이다.

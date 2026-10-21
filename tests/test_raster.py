@@ -119,3 +119,55 @@ def test_pixel_size_reads_png_gif_bmp_and_jpeg_headers():
     assert pixel_size(bmp) == (87, 93)
     assert pixel_size(jpeg) == (1195, 1441)
     assert pixel_size(b"II*\x00") is None
+
+
+def bmp(width: int, height: int, bits: int, rows: list[bytes], *, palette: bytes = b"", **extra: int) -> bytes:
+    """rows는 저장 차례(아래 행부터, height가 음수면 위 행부터)의 행 바이트다. 4바이트 경계까지 0을 채운다."""
+    stride = (width * bits + 31) // 32 * 4
+    pixels = b"".join(row.ljust(stride, b"\x00") for row in rows)
+    info = struct.pack(
+        "<IiiHHIIiiII", 40, width, height, 1, bits, extra.get("compression", 0), len(pixels), 0, 0, len(palette) // 4, 0
+    )
+    offset = 14 + len(info) + len(palette)
+    return b"BM" + struct.pack("<IHHI", offset + len(pixels), 0, 0, offset) + info + palette + pixels
+
+
+def png_palette(png: bytes) -> bytes:
+    start = png.index(b"PLTE")
+    (length,) = struct.unpack_from(">I", png, start - 4)
+    return png[start + 4 : start + 4 + length]
+
+
+def test_bmp_24_bit_bottom_up_becomes_rgb_png_top_row_first() -> None:
+    bottom = bytes([1, 2, 3, 4, 5, 6])
+    top = bytes([7, 8, 9, 10, 11, 12])
+    header, rows = png_rows(png_from_raster(bmp(2, 2, 24, [bottom, top])))
+    assert header == (2, 2, 8, 2)
+    assert rows == [bytes([9, 8, 7, 12, 11, 10]), bytes([3, 2, 1, 6, 5, 4])]
+
+
+def test_bmp_32_bit_top_down_drops_reserved_byte() -> None:
+    header, rows = png_rows(png_from_raster(bmp(2, -1, 32, [bytes([1, 2, 3, 99, 4, 5, 6, 0])])))
+    assert header == (2, 1, 8, 2)
+    assert rows == [bytes([3, 2, 1, 6, 5, 4])]
+
+
+def test_bmp_4_bit_palette_keeps_indices_and_pads_palette() -> None:
+    palette = bytes([255, 0, 0, 0, 0, 0, 255, 0])
+    png = png_from_raster(bmp(3, 1, 4, [bytes([0x10, 0x10])], palette=palette))
+    header, rows = png_rows(png)
+    assert header == (3, 1, 4, 3)
+    assert rows == [bytes([0x10, 0x10])]
+    assert png_palette(png) == bytes([0, 0, 255, 255, 0, 0]) + bytes(3 * 14)
+
+
+def test_bmp_run_length_and_os2_headers_are_left_as_bmp() -> None:
+    assert png_from_raster(bmp(2, 1, 8, [bytes([0, 0])], palette=bytes(8), compression=1)) is None
+    os2 = bytearray(bmp(1, 1, 24, [bytes(3)]))
+    os2[14:18] = struct.pack("<I", 12)
+    assert png_from_raster(bytes(os2)) is None
+
+
+def test_bmp_taller_than_limit_is_left_as_bmp() -> None:
+    assert png_from_raster(bmp(1, 40000, 1, [bytes(1)] * 40000, palette=bytes(8))) is None
+    assert png_from_raster(bmp(1, 30000, 1, [bytes(1)] * 30000, palette=bytes(8))) is not None

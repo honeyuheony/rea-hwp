@@ -21,6 +21,7 @@ import pymupdf
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import layout_document
 from rea_hwp.render.metrics import rhwp_database
+from rea_hwp.render.options import RenderOptions
 
 #: 글꼴 이름이 다른 PDF 글꼴로 대체됐다고 볼 최소 비율·글자 수.
 SUBSTITUTE_SHARE, SUBSTITUTE_MIN = 0.9, 100
@@ -115,7 +116,7 @@ def scan(paths: tuple[Path, Path]) -> dict:
     """문서 하나: 우리 배치와 정답 PDF 글자를 맞대어 PDF 글꼴마다 어느 HWP 글꼴이 차지했는지 세고 폭을 읽는다."""
     hwp, pdf = paths
     try:
-        pages = layout_document(HwpDocument.open(hwp))
+        pages = layout_document(HwpDocument.open(hwp), RenderOptions.from_environment())
         document = pymupdf.open(str(pdf))
     except Exception as error:  # 열리지 않는 문서는 건너뛰고 건수를 보고한다.
         return {"error": f"{hwp.name}: {type(error).__name__}"}

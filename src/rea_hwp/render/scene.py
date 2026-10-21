@@ -85,6 +85,20 @@ class TextLine:
     width: float
     #: 줄에서 가장 큰 글자 크기.
     size: float
+    #: 이 줄이 속한 문단 PARA_HEADER의 원본 위치 "구역:index"(rea_hwp.RecordView.index). 바탕쪽·쪽 번호 글은 None.
+    paragraph: str | None = None
+
+
+@dataclass
+class MissingObject:
+    """그리지 못하고 빠뜨린 개체. 호출하는 쪽이 세어 사용자에게 알릴 수 있게 남긴다."""
+
+    #: 개체 종류. 지금은 "textart"(글맵시)만 있다.
+    kind: str
+    #: 그리지 못한 이유(글꼴을 찾지 못함, fonttools 없음, 아직 옮기지 못한 모양 등).
+    reason: str
+    #: 개체 영역 (x, y, 너비, 높이).
+    box: tuple[float, float, float, float]
 
 
 @dataclass
@@ -97,6 +111,10 @@ class Page:
     excluded: list[tuple[float, float, float, float]] = field(default_factory=list)
     #: 놓은 순서대로의 줄 글. 뷰어가 투명한 글 층으로 깔아 글자를 고르고 복사할 수 있게 한다.
     text_lines: list[TextLine] = field(default_factory=list)
+    #: 그리지 못하고 빠뜨린 개체. excluded(채점에서 빼는 영역)와 달리 이유를 함께 남긴다.
+    missing: list[MissingObject] = field(default_factory=list)
+    #: 이 쪽에 놓은 표(TABLE)·그림(SHAPE_COMPONENT_PICTURE)의 원본 위치 "구역:index". 여러 쪽에 걸친 표는 첫 쪽에만.
+    objects: list[str] = field(default_factory=list)
 
     @property
     def glyphs(self) -> list[Glyph]:

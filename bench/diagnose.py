@@ -12,6 +12,7 @@ from corpus import CORPUS_ROOT, load_corpus
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.layout import layout_document
+from rea_hwp.render.options import RenderOptions
 from rea_hwp.render.svg import page_glyph_table
 
 
@@ -19,7 +20,7 @@ def main() -> int:
     entry = next(e for e in load_corpus() if sys.argv[1] in str(e.path))
     only_page = int(sys.argv[2]) if len(sys.argv) > 2 else None
     reference = pdf_pages(str(CORPUS_ROOT / "ref2022" / entry.path.relative_to(CORPUS_ROOT).with_suffix(".pdf")))
-    pages = layout_document(HwpDocument.open(entry.path, entry.password))
+    pages = layout_document(HwpDocument.open(entry.path, entry.password), RenderOptions.from_environment())
     for index, ref in enumerate(reference):
         if only_page is not None and index + 1 != only_page:
             continue
@@ -56,7 +57,7 @@ def missing(path_part: str, page_no: int) -> None:
     """정답에는 있는데 짝을 못 찾은 글자를 줄별로 보여 준다."""
     entry = next(e for e in load_corpus() if path_part in str(e.path))
     reference = pdf_pages(str(CORPUS_ROOT / "ref2022" / entry.path.relative_to(CORPUS_ROOT).with_suffix(".pdf")))
-    page = layout_document(HwpDocument.open(entry.path, entry.password))[page_no - 1]
+    page = layout_document(HwpDocument.open(entry.path, entry.password), RenderOptions.from_environment())[page_no - 1]
     boxes = [tuple(v / 100 for v in box) for box in page.excluded]
     ref = [c for c in reference[page_no - 1] if not _inside(c, boxes) and not c.font.startswith(EQUATION_FONTS)]
     out = [PlacedChar(c, x, y) for c, x, y in page_glyph_table(page)]

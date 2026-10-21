@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import functools
 import gzip
 import json
+import re
+import urllib.parse
+from collections.abc import Callable
 from importlib import resources
 from xml.sax.saxutils import escape, quoteattr
 
@@ -13,6 +17,10 @@ from .equation.unicode import FALLBACK_FONT_CHAIN, LEGACY_EQUATION_FAMILY, to_un
 from .scene import Glyph, Image, Line, Page, Rect
 
 HU_PER_PT = 100.0
+#: XML 1.0이 허용하지 않는 글자: 탭·줄바꿈·CR을 뺀 C0 제어 문자, 짝 없는 대리 코드, U+FFFE·U+FFFF.
+_XML_FORBIDDEN = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+#: 한글 글자 코드 30(묶음 빈칸)·31(고정폭 빈칸)은 빈칸으로 보이므로 복사할 글에서는 지우지 않고 빈칸으로 바꾼다.
+_SPACE_CONTROLS = str.maketrans({"\x1e": " ", "\x1f": " "})
 
 
 @functools.cache
@@ -64,6 +72,15 @@ def display_text(text: str) -> str:
     return "".join(table.get(ord(char), char) for char in text)
 
 
+def xml_safe(text: str) -> str:
+    return _XML_FORBIDDEN.sub("", text)
+
+
+def copy_text(text: str) -> str:
+    """복사·검색용 줄 글: 보여 주는 글(display_text)에서 빈칸 제어 문자는 빈칸으로, 나머지 XML 금지 글자는 지운다."""
+    return xml_safe(display_text(text).translate(_SPACE_CONTROLS))
+
+
 def _pt(value: float) -> str:
     text = f"{value / HU_PER_PT:.3f}".rstrip("0").rstrip(".")
     return text if text not in ("", "-0") else "0"
@@ -79,17 +96,17 @@ def _glyph(glyph: Glyph, equation_fallback: bool = False) -> str:
         style.append(f'fill="{glyph.color}"')
     attrs = " ".join(style)
     if glyph.font_family in EQUATION_FONTS and equation_fallback:
-        family, text = quoteattr(FALLBACK_FONT_CHAIN), escape(to_unicode(glyph.char))
+        family, text = quoteattr(FALLBACK_FONT_CHAIN), escape(xml_safe(to_unicode(glyph.char)))
     elif glyph.font_family in EQUATION_FONTS:
         # 수식 글꼴 PUA는 옛한글이 아니라 수식 기호라 그대로 찍는다.
-        family, text = quoteattr(glyph.font_family), escape(glyph.char)
+        family, text = quoteattr(xml_safe(glyph.font_family)), escape(xml_safe(glyph.char))
     elif glyph.font_family == LEGACY_EQUATION_FAMILY:
-        family, text = quoteattr(f"'{LEGACY_EQUATION_FAMILY}', {FALLBACK_FONT_CHAIN}"), escape(glyph.char)
+        family, text = quoteattr(f"'{LEGACY_EQUATION_FAMILY}', {FALLBACK_FONT_CHAIN}"), escape(xml_safe(glyph.char))
     else:
-        family = quoteattr(display_font(glyph.char, glyph.font_family))
+        family = quoteattr(xml_safe(display_font(glyph.char, glyph.font_family)))
         # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
         # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
-        text = escape(display_text(glyph.char).replace("\u00ad", "-"))
+        text = escape(xml_safe(display_text(glyph.char).replace("\u00ad", "-")))
     if abs(glyph.scale_x - 1.0) > 0.001 or glyph.rotation:
         # 장평은 가로로만 줄이거나 늘린다. 원점을 기준으로 변환해 x 위치가 흔들리지 않게 한다.
         rotate = f" rotate({-glyph.rotation:g})" if glyph.rotation else ""
@@ -134,8 +151,8 @@ def _rect(rect: Rect, index: int) -> str:
     )
 
 
-def _image(image: Image, index: int) -> str:
-    href = quoteattr(image.href)
+def _image(image: Image, index: int, href: str) -> str:
+    href = quoteattr(xml_safe(href))
     if image.crop is None:
         return (
             f'<image x="{_pt(image.x)}" y="{_pt(image.y)}" width="{_pt(image.width)}" height="{_pt(image.height)}" '
@@ -158,8 +175,39 @@ def equation_fonts(page: Page) -> set[str]:
     return {glyph.font_family for glyph in page.glyphs if glyph.font_family in EQUATION_FONTS}
 
 
-def page_to_svg(page: Page, equation_fallback: bool = False) -> str:
-    """equation_fallback이면 수식 글꼴 PUA를 유니코드로 바꿔 OFL 수학 글꼴 이름 사슬로 그린다(수식 글꼴이 없는 PC용)."""
+#: 그림 바이트와 mime을 받아 SVG <image href>에 넣을 주소를 돌려주는 함수.
+ImageHref = Callable[[bytes, str], str]
+
+
+def image_data(href: str) -> tuple[bytes, str] | None:
+    """data: URI의 (바이트, mime). data: URI가 아니면 None."""
+    if not href.startswith("data:"):
+        return None
+    meta, _, payload = href[5:].partition(",")
+    mime, *parameters = meta.split(";")
+    if "base64" in parameters:
+        return base64.b64decode(payload), mime or "text/plain"
+    return urllib.parse.unquote_to_bytes(payload), mime or "text/plain"
+
+
+def page_to_svg(page: Page, equation_fallback: bool = False, *, image_href: ImageHref | None = None) -> str:
+    """equation_fallback이면 수식 글꼴 PUA를 유니코드로 바꿔 OFL 수학 글꼴 이름 사슬로 그린다(수식 글꼴이 없는 PC용).
+
+    image_href를 주면 그림마다 (바이트, mime)으로 불러 돌려준 주소를 쓰고, 주지 않으면 data: URI를 그대로 넣는다.
+
+    mime은 래스터 그림이면 image/png·image/jpeg·image/gif 등(BMP·TIFF·PCX는 PNG로 바꿔 넘긴다, 바꾸지 못한 BMP는
+    image/bmp), 그리기 도형·WMF·글맵시를 옮긴 벡터 그림이면 image/svg+xml이다. 같은 그림은 같은 바이트로 넘어온다.
+    """
+    resolved: dict[str, str] = {}
+
+    def href_of(image: Image) -> str:
+        if image_href is None:
+            return image.href
+        if image.href not in resolved:
+            decoded = image_data(image.href)
+            resolved[image.href] = image.href if decoded is None else image_href(*decoded)
+        return resolved[image.href]
+
     width, height = _pt(page.width), _pt(page.height)
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}pt" height="{height}pt" '
@@ -174,7 +222,7 @@ def page_to_svg(page: Page, equation_fallback: bool = False) -> str:
         elif isinstance(item, Rect):
             parts.append(_rect(item, index))
         elif isinstance(item, Image):
-            parts.append(_image(item, index))
+            parts.append(_image(item, index, href_of(item)))
     parts.append("</svg>")
     return "\n".join(parts)
 
