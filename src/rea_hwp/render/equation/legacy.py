@@ -19,8 +19,11 @@ PREFIX = "eqalign{"
 POOL_SIZE = 255
 #: 대응 없음을 뜻하는 한글 3.0 코드(HncUnicodeToHCharBase).
 NO_HCHAR = 0x3441
-#: 96DPI 화면 DC에서 1픽셀 = 7200/96 HWPUNIT(FUN_1026e540의 창·뷰포트 범위).
+#: 96DPI 화면 DC에서 1픽셀 = 7200/96 HWPUNIT(FUN_1026e540의 창·뷰포트 범위). 크기 계산은 이 DC로 잰다.
 UNITS_PER_PIXEL = 75
+#: 600DPI 인쇄 DC의 1픽셀. 그리기는 출력 DC로 다시 배치하므로 글자 폭이 이 단위로 반올림된다
+#: (정답 PDF의 수식 글자 원점이 0.12pt 격자에 놓이고, 이 단위로 재면 행렬 글자 차이가 1pt → 0.06pt).
+PRINT_UNITS_PER_PIXEL = 12
 
 SPACE, CARET, UNDERSCORE, HASH, LBRACE, RBRACE, AMP, QUOTE, TILDE, BACKQUOTE, BACKSLASH = (
     0x20,
@@ -824,19 +827,23 @@ class FontTables:
             return self.general[code]
         return self.pairs.get(code, NO_HCHAR)
 
-    def width(self, code: int, height: int, italic: bool, bold: bool, ratio: int = 100) -> int:
-        """GetTextExtentPointW cx. ppem = 반올림(높이/75), 폭 = 반올림(em폭 x ppem / em) 픽셀(시험 496건으로 확인).
+    def width(
+        self, code: int, height: int, italic: bool, bold: bool, ratio: int = 100, pixel: int = UNITS_PER_PIXEL
+    ) -> int:
+        """GetTextExtentPointW cx. ppem = 반올림(높이/pixel), 폭 = 반올림(em폭 x ppem / em) 픽셀.
+
+        화면 DC(pixel 75)는 시험 496건으로 확인했다.
 
         글꼴은 HncBaseDraw FUN_10055910처럼 글자 언어의 "수식" 사슬을 앞에서부터 찾는다.
         """
         hchar = self.hchar(code)
-        ppem = (height * 2 + UNITS_PER_PIXEL) // (2 * UNITS_PER_PIXEL)
+        ppem = (height * 2 + pixel) // (2 * pixel)
         found = None
         for step in self.chains[char_language(code)]:
             if "ttf" in step:
                 pixels = self._ttf_width(step["ttf"], code, ppem, bold)
                 if pixels is not None:
-                    return pixels * UNITS_PER_PIXEL
+                    return pixels * pixel
                 continue
             found = self._find([self.fonts[step["italic" if italic else "regular"]]], hchar)
             if found is not None:
@@ -856,7 +863,7 @@ class FontTables:
             # 수식 글꼴 계열에는 굵은 파일이 없다. 대체 글꼴 파일의 꼴은 표에 없어 같은 식을 쓴다(확인하지 못함)
             em_width += (em + 10) // 20
         # 검증 안 됨: 장평(그리기의 늘린 괄호·악센트)은 em폭에 곱해 같은 식으로 반올림한다고 보았다
-        return (em_width * ratio * ppem * 2 + em * 100) // (2 * em * 100) * UNITS_PER_PIXEL
+        return (em_width * ratio * ppem * 2 + em * 100) // (2 * em * 100) * pixel
 
     def family(self, code: int, italic: bool) -> str:
         """width()와 같은 사슬에서 그 글자를 가진 글꼴의 이름(HFT는 글꼴 family, TTF는 면 이름)."""
@@ -920,7 +927,7 @@ def atom_kind(c: int) -> int:
 class Layout:
     """FUN_106578c0의 지역 구조체(this). 필드 옆 숫자는 오프셋이다."""
 
-    def __init__(self, parser: Parser, font_size: int, carried_flags: int = 0) -> None:
+    def __init__(self, parser: Parser, font_size: int, carried_flags: int = 0, pixel: int = UNITS_PER_PIXEL) -> None:
         self.parser = parser
         self.nodes = parser.nodes
         self.font_size = font_size  # +0x10
@@ -933,13 +940,15 @@ class Layout:
         self.ratio = 100  # DAT_1089371b, 장평(그리기에서만 바뀐다)
         self.font = (font_size, bool(self.flags & 1), bool(self.flags & 2), 100)  # +0x60, 마지막으로 만든 글꼴
         self.tables = font_tables()
+        #: 글자 폭을 재는 DC의 한 픽셀(HWPUNIT).
+        self.pixel = pixel
 
     def create_font(self) -> None:
         """FUN_10650f40: 지금 높이·플래그로 글꼴을 다시 만든다. 굵게(비트1)는 lfWeight 700이다."""
         self.font = (self.height, bool(self.flags & 1), bool(self.flags & 2), self.ratio)
 
     def measure(self, code: int) -> int:
-        return self.tables.width(code, *self.font)
+        return self.tables.width(code, *self.font, pixel=self.pixel)
 
     def space(self) -> int:
         return self.measure(SPACE)
@@ -1425,7 +1434,7 @@ class LegacyEngineState:
     flags: int = 0
 
 
-def laid_out_legacy(script: str, font_size: int, flags: int) -> tuple[Layout, int]:
+def laid_out_legacy(script: str, font_size: int, flags: int, pixel: int = UNITS_PER_PIXEL) -> tuple[Layout, int]:
     """FUN_106578c0의 해석·세로·가로 배치. (배치 문맥, 뿌리 노드 번호). 해석에 실패하면 LegacyEquationError."""
     data = clean_script(script).encode("utf-16-le")
     source = [int.from_bytes(data[i : i + 2], "little") for i in range(0, len(data), 2)]
@@ -1436,7 +1445,7 @@ def laid_out_legacy(script: str, font_size: int, flags: int) -> tuple[Layout, in
     error = parser.parse_list(root, 100)
     if error:
         raise LegacyEquationError(f"옛 수식 해석 실패(오류 {error})")
-    layout = Layout(parser, font_size, flags)
+    layout = Layout(parser, font_size, flags, pixel)
     layout.vertical(root)
     layout.horizontal(root)
     return layout, root

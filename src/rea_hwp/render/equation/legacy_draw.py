@@ -18,6 +18,7 @@ from .legacy import (
     LEFT,
     MATRIX,
     OVER,
+    PRINT_UNITS_PER_PIXEL,
     QUOTE,
     RIGHT,
     RM,
@@ -138,8 +139,9 @@ class LegacyPainter:
 
     def width(self, code: int) -> int:
         """GetTextExtentPointW cx. 폭이 0인 글자(공백 제외)는 공백 폭이다(FUN_10650e10)."""
-        cx = self.tables.width(code, *self._font())
-        return self.tables.width(0x20, *self._font()) if cx == 0 and code != 0x20 else cx
+        pixel = self.layout.pixel
+        cx = self.tables.width(code, *self._font(), pixel=pixel)
+        return self.tables.width(0x20, *self._font(), pixel=pixel) if cx == 0 and code != 0x20 else cx
 
     def char(self, x: int, y: int, code: int) -> None:
         """FUN_106569d0: 아래 끝 맞춤으로 글자 하나. 괄호 조각 코드는 HyHwpEQ PUA로 바꿔 찍는다."""
@@ -469,7 +471,7 @@ def draw_legacy(
     script: str, font_size: int, box_width: int, box_height: int, centered: bool, flags: int = 0
 ) -> list[LegacyGlyph | LegacyLine]:
     """옛 엔진 수식 글자와 선. flags는 배치 전 글꼴 플래그(측정 때와 같은 값을 넘긴다)."""
-    layout, root = laid_out_legacy(script, font_size, flags)
+    layout, root = laid_out_legacy(script, font_size, flags, PRINT_UNITS_PER_PIXEL)
     # FUN_106578c0 그리기 분기: 기울임 스타일·굵게 없음으로 FUN_10651430을 x 0부터 부른다
     layout.style, layout.bold = 4, 0
     painter = LegacyPainter(layout, box_width, box_height, centered)

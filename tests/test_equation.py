@@ -328,7 +328,8 @@ def test_legacy_draw_stacks_matrix_rows_like_hangul_2022():
     glyphs = [g for g in draw_legacy(script, 1000, width, height, False) if isinstance(g, LegacyGlyph)]
     x0, y0 = glyphs[0].x / 100, glyphs[0].y / 100
     relative = [(g.text, g.x / 100 - x0, g.y / 100 - y0) for g in glyphs]
-    # 세로는 0.3pt, 가로는 X와 오른쪽 괄호 사이 글자가 정답보다 0.6~1.0pt 왼쪽에 놓이는 차이(원인 미상)를 넘지 않게 본다
-    for char, x, y in [("]", 88.56, 2.76), ("4", 28.44, -5.04), ("3", 80.76, 6.96)]:
+    # 그리기는 600DPI 인쇄 DC 폭으로 다시 배치하므로 가운데 글자도 0.15pt 안에 든다(화면 DC 폭이면 1pt 왼쪽)
+    expected = [("=", 10.32, 0), ("[", 22.2, 2.76), ("]", 88.56, 2.76), ("4", 28.44, -5.04), ("5", 45.12, -5.04)]
+    for char, x, y in expected + [("8", 83.4, -5.04), ("5", 47.64, 6.96), ("3", 80.76, 6.96)]:
         nearest = min(relative, key=lambda r: (r[0] != char, abs(r[1] - x) + abs(r[2] - y)))
-        assert nearest[0] == char and abs(nearest[2] - y) <= 0.3 and abs(nearest[1] - x) <= 1.1, (char, nearest)
+        assert nearest[0] == char and abs(nearest[2] - y) <= 0.3 and abs(nearest[1] - x) <= 0.15, (char, nearest)
