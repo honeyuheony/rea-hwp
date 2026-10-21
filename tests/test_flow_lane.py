@@ -570,8 +570,9 @@ def test_resized_equation_paragraphs_match_hangul_2022_resave():
             [getattr(g, f) for f in fields] for g in expected
         ]
         compared += 1
-    # 재저장본에서 크기가 바뀐 수식이 든 문단 52개(relay_oracle 집계).
-    assert compared == 52
+    # 재저장본에서 크기가 바뀐 수식이 든 문단 52개(relay_oracle 집계)와, 그런 수식을 담은 글상자 문단 1개
+    # (3-10월 보기 상자: 재저장본 줄 19905 → 19198).
+    assert compared == 53
 
 
 @needs_corpus
@@ -753,3 +754,12 @@ def test_group_children_scale_before_rotation_from_outermost_group():
     pages = _open("oss/rhwp/2025 행정업무운영 편람(최종).hwp")
     assert _first(pages[3], "차") == pytest.approx((96.36, 110.64), abs=0.5)
     assert _first(pages[8], "행", 260, 280) == pytest.approx((267.72, 269.4), abs=0.5)
+
+
+@needs_corpus
+def test_textbox_with_resized_equations_shrinks_like_hangul():
+    # 한글 2022 PDF 2쪽 보기 상자: 안의 수식이 707HU 줄어 상자도 그만큼 낮아지고(재저장본 19904 → 19197),
+    # 세로 가운데 정렬된 안쪽 글은 절반, 상자 뒤 글은 전부 올라간다.
+    page = _open("oss/rhwp/3-10월_교육_통합_2022.hwp")[1]
+    assert _glyphs_at(page, "코", 393.48, 178.32)
+    assert _glyphs_at(page, "값", 301.92, 384.0)

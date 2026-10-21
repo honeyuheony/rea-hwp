@@ -220,7 +220,7 @@ class ObjectsMixin:
         """한글이 문서를 열 때 바꾸는 개체 (폭, 높이). 바뀌지 않으면 None.
 
         수식은 다시 계산한 크기다. 셀에 크기가 바뀐 수식이 든 표는 한글이 셀을 다시 짜 높이를 행 높이 합으로 다시
-        쓴다(재저장본: 그런 표 21개 모두 높이가 바뀌었고 20개가 우리 격자 높이와 같다).
+        쓴다(재저장본: 그런 표 21개 모두 높이가 바뀌었고 20개가 우리 격자 높이와 같다). 글상자는 textbox_resized_size.
         """
         key = ("size", id(ctrl))
         if key not in self.equation_boxes:
@@ -231,8 +231,31 @@ class ObjectsMixin:
                 if any(self.resized_equation(node) for node in _descendants(ctrl) if node.tag == tags.CTRL_HEADER):
                     grid, _ = self.table_layout_grid(ctrl)
                     size = (model.width, round(grid.height)) if grid is not None else None
+            if size is None:
+                size = self.textbox_resized_size(ctrl)
             self.equation_boxes[key] = size if size is not None and size != (model.width, model.height) else None
         return self.equation_boxes[key]
+
+    def textbox_resized_size(self, ctrl: Node) -> tuple[int, int] | None:
+        """크기가 바뀐 수식이 든 글상자 (폭, 높이). 한글은 내용을 다시 짜 높이를 내용 높이 + 위아래 여백으로 정한다.
+
+        재저장본 글자처럼 취급한 수식 글상자 문단 124개에서 줄 높이가 이 값과 같다. 저장되는 도형 현재 높이는
+        1HU 작게 적히기도 한다(3-10월_교육_통합_2022 2쪽 보기 상자: 줄 19198, 도형 19197).
+        """
+        component = ctrl.find(tags.SHAPE_COMPONENT)
+        if component is None or not isinstance(component.model, ShapeComponent):
+            return None
+        text_list = component.find(tags.LIST_HEADER)
+        if text_list is None or not isinstance(text_list.model, TextBoxListHeader) or text_list.model.text_direction:
+            return None
+        if not any(self.resized_equation(node) for node in _descendants(component) if node.tag == tags.CTRL_HEADER):
+            return None
+        margins = text_list.model.margins
+        paragraphs = [child for child in component.children if child.tag == tags.PARA_HEADER]
+        views = self.paragraph_views(paragraphs, ctrl.model.width - margins[0] - margins[1], textbox=True)
+        if not views or not views[-1].segments:
+            return None
+        return ctrl.model.width, views[-1].content_height + margins[2] + margins[3]
 
     def resized_object(self, ctrl: Node) -> bool:
         """한글이 문서를 열 때 크기나 기준선을 바꿔 그 문단 줄을 다시 짜게 하는 개체인가."""
@@ -297,7 +320,8 @@ class ObjectsMixin:
             # 머리 1249, 현재 19904 = 기준 줄 높이 19905).
             text_list = component.find(tags.LIST_HEADER)
             if text_list is not None and isinstance(text_list.model, TextBoxListHeader):
-                height = max(height, float(component.model.current_height))
+                resized = self.textbox_resized_size(ctrl) if self.resized_size(ctrl) is not None else None
+                height = float(resized[1]) if resized else max(height, float(component.model.current_height))
         margins = model.outer_margins or [0, 0, 0, 0]
         anchor_state = state
         caption = self.object_caption(ctrl, width, margins[0])
