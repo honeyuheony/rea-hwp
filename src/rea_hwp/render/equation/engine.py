@@ -3,7 +3,17 @@ y는 아래로 늘고 수식 축이 0이다. top은 상자 위 끝(+0x54), w·h�
 
 from __future__ import annotations
 
-from .glyphs import EQUATION_FONT, FALLBACK_FONT, UNITS_PER_PIXEL, glyph_table
+from dataclasses import dataclass
+
+from .glyphs import (
+    DEVICE_UNIT,
+    EQUATION_ASCENT,
+    EQUATION_FONT,
+    FALLBACK_FONT,
+    STRING_ADVANCES,
+    UNITS_PER_PIXEL,
+    glyph_table,
+)
 from .parse import Node, Parser
 from .tables import ASCII_PUA, ASCII_PUA_FIRST, CHAR_NAMES, FUNCTION_NAMES, NAMED_CLASS, PUA_RANGES, SPACING
 
@@ -37,6 +47,38 @@ def to_pua(c: int) -> int:
     return _ASCII_TO_PUA.get(c, 0)
 
 
+@dataclass
+class DrawnGlyph:
+    """Draw가 찍은 글자. 좌표·크기는 수식 좌표(HWPUNIT)다."""
+
+    text: str
+    x: int
+    #: 기준선 y. top_aligned면 글자 칸 위 끝 y(글꼴 ascent를 더해야 기준선)다.
+    y: int
+    top_aligned: bool
+    #: 글꼴 높이(lfHeight)와 lfWidth. lfWidth가 높이의 절반이면 늘리지 않은 글자다.
+    height: int
+    width: int
+    font: str
+    italic: bool
+    bold: bool
+
+    @property
+    def baseline(self) -> int:
+        """기준선 y. 위 끝 맞춤 글자는 수식 글꼴 ascent를 더한다(위 끝 맞춤은 수식 글꼴 PUA 조각에만 쓴다)."""
+        return self.y + round(self.height * EQUATION_ASCENT) if self.top_aligned else self.y
+
+
+@dataclass
+class DrawnBox:
+    """Draw가 흰 붓과 기본 펜(장치 1점 검은 선)으로 그린 상자(BOX 악센트). 좌표는 수식 좌표다."""
+
+    x: int
+    y: int
+    w: int
+    h: int
+
+
 class Context:
     """글꼴 문맥(CHncDrawContext와 HNCLOGFONT를 가진 구조체). 필드 옆 숫자는 오프셋이다."""
 
@@ -48,12 +90,67 @@ class Context:
         self.top_flag = 0  # +0x0e
         self.empty_zero = 1  # +0x880, HwpApp이 vt[0x24](h, 1)로 1을 넘긴다
         self.bold = 0  # +0x854, 글꼴 가중치 700
+        self.weight = 400  # +0x04 HNCLOGFONT 가중치
         self.table = glyph_table()
+        #: Draw가 찍은 글자와 상자(그리는 순서).
+        self.drawn: list[DrawnGlyph | DrawnBox] = []
 
     def set_font(self, size: int) -> None:
         """FUN_10011f10."""
         self.size = size
         self.half = cdiv(size, 2)
+
+    def set_extent(self, height: int, width: int) -> None:
+        """FUN_10011e80: 글꼴 높이와 lfWidth를 따로 정한다(늘린 글자)."""
+        self.size = height
+        self.half = width
+
+    def draw_char(self, x: int, y: int, code: int) -> None:
+        """FUN_100122f0: 상자 위 끝 y에 글자 하나를 찍는다."""
+        if code < 0x20:
+            return
+        if code == 0x2026 and self.font == EQUATION_FONT:
+            y += int(self.size * 0.35)
+        italic = False
+        if self.italic == 0:
+            if 0xE0E5 <= code <= 0xE0FE:
+                code, y = code - 0xE0E5 + 0x61, y - muldiv(self.size, 0x43, 1000)
+            elif 0xE000 <= code <= 0xE019:
+                code, y = code - 0xE000 + 0x41, y - muldiv(self.size, 0x41, 1000)
+            elif code == 0xE05B:
+                code = 0xE072
+        elif 0xE000 <= code <= 0xE019:
+            # 기울인 대문자는 PUA 글자를 그대로 두고 글꼴 기울임(+0x0e)으로 찍는다
+            italic = True
+        font = self.font if italic or self.has_glyph(code) else FALLBACK_FONT
+        # 괄호·근호 조각(E044~E084, E100~E105)은 위 끝 맞춤(TA_TOP), 나머지는 기준선 맞춤(TA_BASELINE)이다
+        top_aligned = not italic and (0xE044 <= code <= 0xE084 or 0xE100 <= code <= 0xE105)
+        self._emit(chr(code), x, y if top_aligned else y + muldiv(self.size, 0x55, 100), top_aligned, font, italic)
+
+    def draw_text(self, x: int, y: int, text: str) -> None:
+        """FUN_100126b0: 글자열을 기준선 맞춤으로 찍는다. 글리프가 하나라도 없으면 대체 글꼴로 찍는다."""
+        font = self.font if all(self.has_glyph(ord(ch)) for ch in text) else FALLBACK_FONT
+        baseline = y + muldiv(self.size, 0x55, 100)
+        if len(text) == 2 and 0xD800 <= ord(text[0]) <= 0xDBFF:
+            # 대리 쌍은 글자 하나로 찍는다
+            self._emit(text.encode("utf-16-le", "surrogatepass").decode("utf-16-le"), x, baseline, False, font, False)
+            return
+        advances = STRING_ADVANCES.get(font, {})
+        ppem = muldiv(self.size, 1, DEVICE_UNIT)
+        for ch in text:
+            self._emit(ch, x, baseline, False, font, False)
+            if ch in advances:
+                x += muldiv(advances[ch], ppem, 1024) * DEVICE_UNIT
+            else:
+                # 검증 안 됨: 전진 폭 표에 없는 글자는 화면(96DPI) 폭으로 잇는다
+                x += self.extent(font, ord(ch))[0]
+
+    def _emit(self, text: str, x: int, y: int, top_aligned: bool, font: str, italic: bool) -> None:
+        self.drawn.append(DrawnGlyph(text, x, y, top_aligned, self.size, self.half, font, italic, self.weight == 700))
+
+    def has_glyph(self, code: int) -> bool:
+        """FUN_10011fd0."""
+        return code != 0xAC and (self.has(self.font, code) or self.has(EQUATION_FONT, code))
 
     def has(self, font: str, code: int) -> bool:
         return self.table.has_glyph(font, code)
@@ -126,6 +223,14 @@ class Obj:
         """FUN_1000d4c0: 일반 객체는 (0, 0)."""
         return 0, 0
 
+    def draw(self) -> None:
+        """Draw(가상 함수 +4). 일반 객체(FUN_10008260)는 아무것도 그리지 않는다."""
+
+    def origin(self) -> tuple[int, int]:
+        """가상 함수 +0x10(FUN_100076f0)이 돌려주는 부모 줄의 원점(+0x80 x, +0x7c 수식 축 y)과 이 객체 x를 더한 값."""
+        line = self.parent
+        return self.x + line.ox, line.oy
+
     def cached(self, cache: int) -> bool:
         return bool(cache) and not self.dirty
 
@@ -147,6 +252,10 @@ class Line(Obj):
         self.amp = 0  # +0x78
         self.next_line: Line | None = None  # +0x98
         self.prev_line: Line | None = None  # +0x9c
+        self.ox = 0  # +0x80, Draw 때 부모가 정하는 원점 x
+        self.oy = 0  # +0x7c, 원점의 수식 축 y
+        self.own_w = 0  # +0xa0, 다음 줄을 더하기 전 이 줄의 폭
+        self.own_h = 0  # +0xa4, 다음 줄을 더하기 전 이 줄의 높이
         self.head = Marker(ctx, 0x79, self)
         self.end = Marker(ctx, 0x7A, self)
         self.head.next = self.end
@@ -174,6 +283,7 @@ class Line(Obj):
                         break
                 if column >= 2:
                     break
+        self.own_w, self.own_h = self.w, self.h
         if self.next_line is not None:
             gap = muldiv(self.size, self.gap, 100)
             _, next_h = self.next_line.calc(cache)
@@ -240,6 +350,21 @@ class Line(Obj):
         self.top = top
         self.h = height
         return result
+
+    def draw(self) -> None:
+        """FUN_1000f550: 항목을 차례로 그리고 다음 줄을 이 줄 아래에 놓는다."""
+        ctx = self.ctx
+        if self.owner is None:
+            ctx.top_flag &= 1
+            if ctx.top_flag == 0:
+                ctx.italic = 1
+        for item in self.items():
+            item.draw()
+        if self.next_line is not None:
+            gap = muldiv(self.size, self.gap, 100)
+            self.next_line.oy = self.own_h - self.next_line.top + gap + self.oy + self.top
+            self.next_line.ox = self.ox
+            self.next_line.draw()
 
     def first_line(self) -> Line:
         line = self
@@ -327,6 +452,26 @@ class Glyph(Obj):
         self.w, self.h, self.top = width + gap, height, -cdiv(height, 2)
         return self.w, self.h
 
+    def draw(self) -> None:
+        """FUN_100100f0. 대리 쌍은 상위 글자가 둘을 함께 찍고 하위 글자는 건너뛴다."""
+        ctx = self.ctx
+        style = self.style
+        if self.roman:
+            ctx.italic = 0
+        ctx.set_font(self.size)
+        x, y = self.origin()
+        y += self.top
+        code = self.code
+        if code not in (0x20, 0x7E, 0x60):
+            nxt = self.next
+            if 0xD800 <= code <= 0xDBFF:
+                if isinstance(nxt, Glyph) and 0xDC00 <= nxt.code <= 0xDFFF:
+                    ctx.draw_text(x, y, chr(code) + chr(nxt.code))
+            elif not 0xDC00 <= code <= 0xDFFF:
+                ctx.draw_char(x, y, code)
+        if self.roman:
+            ctx.italic = 1 if style == 0 else 0
+
 
 def mark_function_name(glyph: Glyph) -> None:
     """FUN_10010c80: 앞 글자들과 이어 함수 이름(sin 등)이 되면 똑바른 꼴 표시를 한다."""
@@ -375,6 +520,11 @@ class Shape(Obj):
         self.ctx.italic = 0 if self.kind == 0x1F else 1
         self.w, self.h, self.top = 0, self.size, -cdiv(self.size, 2)
         return self.w, self.h
+
+    def draw(self) -> None:
+        """FUN_1001d870(RM)·FUN_1001db50(IT)."""
+        self.ctx.italic = 0 if self.kind == 0x1F else 1
+        self.ctx.set_font(self.size)
 
 
 class Script(Obj):
@@ -457,6 +607,7 @@ class Script(Obj):
             sup_y -= sup_bottom
         if self.has_sub and sub_top < 0:
             sub_y -= sub_top
+        self.sub_y, self.sup_y = sub_y, sup_y  # +0x80, +0x84
         top, bottom = base_top, base_bottom
         if self.has_sup:
             top = self.sup.top + sup_y
@@ -464,6 +615,21 @@ class Script(Obj):
             bottom = self.sub.top + sub_y + sub_h
         self.w, self.top, self.h = width + extra, top, bottom - top
         return self.w, self.h
+
+    def draw(self) -> None:
+        """FUN_100152f0. 위 첨자는 앞 글자가 대문자로 시작하면 직전 글꼴 크기의 15%만큼 오른쪽으로 민다."""
+        ctx = self.ctx
+        prev = self.prev
+        capital = self.has_sup and isinstance(prev, Glyph) and prev.name[:1] >= "A" and prev.name[:1] < "["
+        shift = muldiv(ctx.size, 15, 100) if capital else 0
+        x, oy = self.origin()
+        ctx.set_font(self.size)
+        if self.has_sub:
+            self.sub.ox, self.sub.oy = x, self.sub_y + oy
+            self.sub.draw()
+        if self.has_sup:
+            self.sup.ox, self.sup.oy = x + shift, self.sup_y + oy
+            self.sup.draw()
 
 
 class Fraction(Obj):
@@ -509,6 +675,30 @@ class Fraction(Obj):
         self.top = -cdiv(gap, 2) - upper_h
         return self.w, self.h
 
+    def draw(self) -> None:
+        """OVER FUN_100141b0(분수선은 U+E06D를 폭에 맞게 늘려 찍는다)·ATOP FUN_100148e0."""
+        ctx = self.ctx
+        x, oy = self.origin()
+        ctx.set_font(self.size)
+        if self.kind == 1:
+            inset = muldiv(ctx.size, 10, 100)
+            ctx.set_extent(ctx.size, self.w - inset * 2)
+            ctx.draw_char(inset + x, self.upper.h + self.top + oy, 0xE06D)
+            ctx.set_font(self.size)
+            gap = muldiv(ctx.size, 30, 100)
+        else:
+            gap = cdiv(ctx.plain(0xE05B)[1], 10)
+        center = cdiv(self.w, 2) + x
+        self.lower.ox = center - cdiv(self.lower.w, 2)
+        self.lower.oy = cdiv(gap, 2) - self.lower.top + oy
+        self.lower.draw()
+        if self.kind != 1:
+            ctx.set_font(self.size)
+        self.upper.ox = center - cdiv(self.upper.w, 2)
+        self.upper.oy = oy - cdiv(gap, 2) - self.upper.h - self.upper.top
+        self.upper.draw()
+        ctx.set_font(self.size)
+
 
 class Root(Obj):
     """근호(6, FUN_10016990). +0x78 = 색인, +0x7c = 본문."""
@@ -538,15 +728,38 @@ class Root(Obj):
         scale = cdiv((muldiv(s, 10, 100) + body_h) * 100, sign_h)
         scale = max(scale, 100)
         sign_h = muldiv(sign_h, scale, 100)
+        self.scale, self.sign_h = scale, sign_h  # +0x80, +0x88
+        self.index_shift = cdiv(sign_w, 2) - index_w  # +0x8c
         sign_w = sign_w + max(0, index_w - cdiv(sign_w, 2))
+        self.sign_w = sign_w  # +0x84
         width = muldiv(s, 17, 100) + sign_w + body_w
         extra = index_h - muldiv(sign_h, 52, 100)
+        self.index_rise = extra  # +0x90
         if extra <= muldiv(s, 5, 100):
             extra = muldiv(s, 5, 100)
         self.w = width
         self.h = sign_h + extra
         self.top = self.body.top - muldiv(s, 10, 100) - extra
         return self.w, self.h
+
+    def draw(self) -> None:
+        """FUN_10016810·FUN_10016ba0: 근호(U+E05C)를 세로로 늘려 찍고 윗선(U+E06D)을 본문 폭에 맞춰 늘린다."""
+        ctx = self.ctx
+        ctx.set_font(self.size)
+        ctx.set_extent(muldiv(ctx.size, self.scale, 100), ctx.half)
+        x, oy = self.origin()
+        sign_y = oy + self.top + max(self.index_rise, muldiv(self.size, 5, 100))
+        ctx.draw_char(max(-self.index_shift, 0) + x, sign_y, 0xE05C)
+        self.index.ox = max(self.index_shift, 0) + x
+        self.index.oy = oy - min(self.index_rise, 0) - self.index.top + self.top
+        self.index.draw()
+        ctx.set_font(self.size)
+        ctx.set_extent(ctx.size, muldiv(self.size, 17, 100) + self.body.w)
+        ctx.draw_char(x + self.sign_w - muldiv(self.size, 2, 100), sign_y - muldiv(ctx.size, 18, 100), 0xE06D)
+        ctx.set_font(self.size)
+        self.body.ox, self.body.oy = self.sign_w + x, oy
+        self.body.draw()
+        ctx.set_font(self.size)
 
 
 class BigOperator(Obj):
@@ -577,16 +790,33 @@ class BigOperator(Obj):
         lower_w, lower_h = self.lower.calc(cache)
         self.upper.size = limit
         upper_w, upper_h = self.upper.calc(cache)
+        self.glyph_w, self.core = glyph_w, core  # +0xa0, +0xa4
         self.w = max(glyph_w, lower_w, upper_w)
         self.h = core + upper_h + lower_h
         self.top = -upper_h - cdiv(core, 2)
         return self.w, self.h
 
+    def draw(self) -> None:
+        """FUN_10013b00."""
+        ctx = self.ctx
+        ctx.set_font(muldiv(self.size, self.scale, 100))
+        x, oy = self.origin()
+        core = self.core
+        center = cdiv(self.w, 2) + x
+        ctx.draw_char(center - cdiv(self.glyph_w, 2), oy - cdiv(core, 2) - muldiv(core, 10, 100), self.glyph)
+        self.lower.ox = center - cdiv(self.lower.w, 2)
+        self.lower.oy = cdiv(core, 2) - self.lower.top + oy
+        self.lower.draw()
+        self.upper.ox = center - cdiv(self.upper.w, 2)
+        self.upper.oy = oy - cdiv(core, 2) - self.upper.h - self.upper.top
+        self.upper.draw()
+        ctx.set_font(self.size)
+
 
 class Delimiter:
     """괄호 글리프(FUN_10011580·FUN_100116b0·FUN_10011850)."""
 
-    #: 종류별 (위, 늘림, 아래, 가운데) 글리프. 가운데(+0x26)의 폭이 괄호 폭이다.
+    #: 종류별 +0x20·+0x22·+0x24·+0x26 조각 글리프. 가운데(+0x26)의 폭이 괄호 폭이다.
     PIECES = {
         1: (0xE07C, 0xE07E, 0, 0xE07D),
         2: (0xE078, 0xE07A, 0xE07B, 0xE079),
@@ -595,6 +825,8 @@ class Delimiter:
         10: (0xE082, 0xE084, 0xE07B, 0xE083),
         11: (0xE102, 0xE104, 0, 0xE105),
     }
+    #: 조각 합보다 낮은 괄호를 한 글자로 찍을 때 쓰는 글리프(+0x28).
+    SMALL = {1: 0xE044, 2: 0xE04B, 3: 0xE049, 9: 0xE045, 10: 0xE04C, 11: 0xE04A}
     #: 그 밖 종류의 가운데 글리프(표 0x100a0434).
     SINGLE = {
         4: 0x2329,
@@ -613,16 +845,24 @@ class Delimiter:
     def __init__(self, ctx: Context) -> None:
         self.ctx = ctx
         self.kind = 0
-        self.middle = 0
+        self.top_piece = self.bottom_piece = self.extend_piece = 0  # +0x20, +0x22, +0x24
+        self.middle = 0  # +0x26
+        self.small = 0  # +0x28
+        self.top_h = self.bottom_h = self.middle_h = 0  # +0x30, +0x38(+0x22 조각), +0x48
         self.whole_w = 0  # +0x44
         self.target = 0  # +0x10
+        self.least = 0  # +0x14, 조각으로 그릴 수 있는 가장 낮은 높이
+        self.size = 0  # +0x18
+        self.x = self.y = 0  # +0x0c, +0x08 Draw 때 정하는 위 끝 왼쪽
 
     def set_kind(self, kind: int) -> None:
         self.kind = kind
         if kind in self.PIECES:
-            self.middle = self.PIECES[kind][3]
+            self.top_piece, self.bottom_piece, self.extend_piece, self.middle = self.PIECES[kind]
+            self.small = self.SMALL[kind]
         elif 0 <= kind < 0x15:
-            self.middle = self.SINGLE.get(kind, 0)
+            self.top_piece = self.bottom_piece = self.extend_piece = 0
+            self.middle = self.small = self.SINGLE.get(kind, 0)
 
     def set_char(self, ch: int) -> None:
         if ch in (0x20, 0x2E):
@@ -631,20 +871,87 @@ class Delimiter:
             self.set_kind(self.CHAR_KIND[ch])
         else:
             self.kind = 0x13
-            self.middle = ch
+            self.middle = self.small = ch
 
     def measure(self, target: int, size: int) -> None:
         ctx = self.ctx
         ctx.set_font(size)
+        self.size = size
         self.target = target or ctx.size
         if self.kind == 0x13:
             if self.middle:
-                self.whole_w, _ = ctx.measure(self.middle)
+                self.whole_w, self.middle_h = ctx.measure(self.middle)
+        else:
+            if self.top_piece:
+                self.top_h = ctx.plain(self.top_piece)[1]
+            if self.bottom_piece:
+                self.bottom_h = ctx.plain(self.bottom_piece)[1]
+            if self.middle:
+                self.whole_w, self.middle_h = ctx.plain(self.middle)
+            if self.middle in (0x2329, 0x232A):
+                self.whole_w = cdiv(self.whole_w * 2, 3)
+        if self.kind in (1, 2, 9, 10):
+            self.least = self.middle_h + self.bottom_h + self.top_h
+        elif self.kind in (3, 0xB):
+            self.least = self.bottom_h + self.top_h
+        else:
+            self.least = self.middle_h
+
+    def draw(self) -> None:
+        """FUN_100119e0: 낮으면 한 글자를 괄호 높이로 늘려 찍고, 높으면 위·아래 조각 사이를 가운데 조각으로 채운다."""
+        ctx = self.ctx
+        ctx.set_font(self.size)
+        s = ctx.size
+        x, y, kind, target = self.x, self.y, self.kind, self.target
+        if target < self.least:
+            ctx.set_extent(target, ctx.half)
+            if kind in (4, 0xC):
+                x -= cdiv(s, 8)
+            elif kind in (3, 0xB):
+                x += cdiv(s, 8)
+            ctx.draw_char(x, y, self.small)
             return
-        if self.middle:
-            self.whole_w, _ = ctx.plain(self.middle)
-        if self.middle in (0x2329, 0x232A):
-            self.whole_w = cdiv(self.whole_w * 2, 3)
+        weight, ctx.bold, ctx.weight = ctx.weight, 0, 400
+        half = ctx.half
+        if kind in (1, 9):
+            rest = self.middle_h - self.least + target
+            ctx.draw_char(x, y, self.top_piece)
+            ctx.draw_char(x, self.top_h + y + rest, self.bottom_piece)
+            top_cut = muldiv(self.top_h, 5, 100)
+            # 가운데 조각 글리프는 em의 9.8%를 덮는다. 글꼴 높이 50000마다 4900씩 이어 찍는다
+            length = int((muldiv(self.bottom_h, 5, 100) + top_cut + rest) / 0.098)
+            offset = 0
+            while length > 0:
+                ctx.set_extent(min(length, 50000), half)
+                ctx.draw_char(x, self.top_h - top_cut + y + offset, self.middle)
+                offset += 0x1324
+                length -= 50000
+        elif kind in (2, 10):
+            cut = muldiv(ctx.size, 5, 100)
+            half_gap = cdiv(target - self.least, 2)
+            rise = int(half_gap * 0.26 / 0.48)
+            ctx.draw_char(x, y, self.top_piece)
+            ctx.draw_char(x, half_gap + y + self.top_h, self.middle)
+            ctx.draw_char(x, y + half_gap * 2 + self.top_h + self.middle_h, self.bottom_piece)
+            stretch = cut * 2 - int(half_gap / -0.48)
+            ctx.set_extent(stretch, half)
+            ctx.draw_char(x, y + self.top_h - rise - cut, self.extend_piece)
+            ctx.set_extent(stretch, half)
+            ctx.draw_char(x, y - rise - cut + self.top_h + self.middle_h + half_gap, self.extend_piece)
+        elif kind in (3, 0xB):
+            rest = target - self.least
+            ctx.draw_char(x, y, self.top_piece)
+            ctx.draw_char(x, self.top_h + y + rest, self.bottom_piece)
+            top_cut = muldiv(self.top_h, 80, 100)
+            ctx.set_extent(muldiv(self.bottom_h, 5, 100) + top_cut + rest, half)
+            ctx.draw_char(x, self.top_h - top_cut + y, self.middle)
+        elif kind in (4, 0xC):
+            ctx.set_extent(target, half if half * 6 > target else cdiv(target, 6))
+            ctx.draw_char(x - cdiv(s, 8), y, self.small)
+        else:
+            ctx.set_extent(target, half)
+            ctx.draw_char(x, y, self.small)
+        ctx.weight, ctx.bold = weight, int(weight == 700)
 
     def width(self) -> int:
         if self.kind in (0x13, 4, 0xC):
@@ -676,6 +983,18 @@ class Bracket(Obj):
         self.h = body_h
         self.top = self.body.top
         return self.w, self.h
+
+    def draw(self) -> None:
+        """FUN_1001fdf0."""
+        x, oy = self.origin()
+        top = oy + self.body.top
+        self.left.x, self.left.y = x, top
+        self.left.draw()
+        self.body.ox, self.body.oy = self.left.width() + x, oy
+        self.body.draw()
+        self.right.x, self.right.y = self.body.w + self.left.width() + x, top
+        self.right.draw()
+        self.ctx.set_font(self.size)
 
 
 class Accent(Obj):
@@ -712,6 +1031,7 @@ class Accent(Obj):
         ctx.set_font(self.size)
         glyph_w, glyph_h = ctx.plain(self.GLYPHS[self.kind])
         extra = muldiv(glyph_h, 20, 100)
+        self.glyph_w, self.extra = glyph_w, extra  # +0x80, +0x84
         self.body.size = self.size
         body_w, body_h = self.body.calc(cache)
         kind = self.kind
@@ -734,6 +1054,49 @@ class Accent(Obj):
         self.w, self.h, self.top = width, height, top
         return self.w, self.h
 
+    def _capital_end(self, item: Obj | None) -> bool:
+        """기울인 대문자(E000~E019, 글꼴 기울임 +0x0e)인 글자인가. 판정하며 +0x0e를 0·1로 줄인다."""
+        if not (isinstance(item, Glyph) and 0xE000 <= item.code <= 0xE019):
+            return False
+        self.ctx.top_flag &= 1
+        return bool(self.ctx.top_flag)
+
+    def draw(self) -> None:
+        """BAR FUN_10019ca0, VEC FUN_10019140·FUN_10019430, BOX FUN_1001a520. 막대 U+E06D, 화살촉 U+E06E."""
+        ctx = self.ctx
+        x, oy = self.origin()
+        if self.kind == 0x1B:
+            leaning = self._capital_end(self.body.head.next)
+            ctx.set_font(self.size)
+            lift = 0 if is_flat(self.body) else cdiv(self.extra, 2)
+            ctx.set_extent(ctx.size, self.body.w)
+            ctx.draw_char(x + cdiv(self.size, 4 if leaning else 20), self.top - lift + oy, 0xE06D)
+        elif self.kind == 0x1C:
+            first = self._capital_end(self.body.head.next)
+            last = self._capital_end(self.body.end.prev)
+            y = oy - self.extra + self.top
+            span = self.body.w - (cdiv(self.size, 4) if first and not last else 0)
+            length = span - muldiv(self.glyph_w, 55, 100)
+            offset = cdiv(self.size, 5 if first else 40)
+            if length >= 0:
+                ctx.set_font(self.size)
+                ctx.set_extent(ctx.size, span)
+                ctx.draw_char(offset + x, y, 0xE06D)
+                ctx.set_font(self.size)
+                offset += length
+            # 짧은 본문이면 화살촉만 직전 글꼴 상태 그대로 찍는다(FUN_10019430은 글꼴을 다시 정하지 않는다)
+            ctx.draw_char(offset + x, y, 0xE06E)
+        elif self.kind == 0x4E:
+            # BOX(FUN_1001a520): 흰 붓으로 상자를 칠하고 선택된 기본 펜으로 테두리를 그린 뒤 본문을 찍는다
+            ctx.set_font(self.size)
+            ctx.drawn.append(DrawnBox(x, self.top + oy, self.w, self.h))
+        else:
+            raise NotImplementedError(f"수식 악센트 0x{self.kind:X} 그리기는 아직 옮기지 않았습니다")
+        ctx.set_font(self.size)
+        self.body.ox, self.body.oy = cdiv(self.w, 2) + x - cdiv(self.body.w, 2), oy
+        self.body.draw()
+        ctx.set_font(self.size)
+
 
 class Wrapper(Obj):
     """본문 상자를 그대로 쓰는 객체: NOT(0x4b, FUN_1001e180), PHANTOM(0x6e, FUN_10018d60), COLOR(0x75, FUN_1001f4c0)."""
@@ -755,6 +1118,24 @@ class Wrapper(Obj):
         self.w, self.h = self.body.calc(cache)
         self.top = self.body.top
         return self.w, self.h
+
+    def draw(self) -> None:
+        """NOT FUN_1001dfb0(본문 위에 사선 U+E054를 상자 크기로 늘려 찍는다), PHANTOM FUN_10018c40(그리지 않는다)."""
+        if self.kind == 0x6E:
+            return
+        if self.kind != 0x4B:
+            raise NotImplementedError("COLOR 수식 그리기는 아직 옮기지 않았습니다")
+        ctx = self.ctx
+        x, oy = self.origin()
+        self.body.ox, self.body.oy = x, oy
+        self.body.draw()
+        first = self.body.head.next
+        width = self.w
+        if not (isinstance(first, Glyph) and first.code in (0xE047, 0xE0E5)):
+            width = muldiv(width, 0x78, 100)
+        ctx.set_extent(self.h, width)
+        ctx.draw_char(x, self.top + oy, 0xE054)
+        ctx.set_font(self.size)
 
 
 class Limit(Obj):
@@ -789,6 +1170,7 @@ class Limit(Obj):
         self.inherit()
         small = muldiv(self.size, 0x44, 100)
         text_w, text_h = self.text_size()
+        self.text_w, self.text_h = text_w, text_h  # +0x88, +0x8c
         self.lower.size = small
         lower_w, _ = self.lower.calc(cache)
         self.body.size = self.size
@@ -798,6 +1180,26 @@ class Limit(Obj):
         self.w = body_w + max(text_w, lower_w)
         self.top, self.h = top, bottom - top
         return self.w, self.h
+
+    def draw(self) -> None:
+        """FUN_10015f20: 'lim'은 글자열로 찍는다(PUA로 바꾸지 않는다)."""
+        ctx = self.ctx
+        upright = ctx.top_flag & 1
+        ctx.top_flag = upright
+        if upright:
+            ctx.italic = 0
+        ctx.set_font(muldiv(self.size, self.scale, 100))
+        x, oy = self.origin()
+        left = cdiv(self.w - self.body.w, 2) + x
+        ctx.draw_text(left - cdiv(self.text_w, 2), oy - cdiv(self.text_h, 2), "Lim" if self.capital == 1 else "lim")
+        if upright:
+            ctx.italic = 1
+        self.lower.ox = left - cdiv(self.lower.w, 2)
+        self.lower.oy = cdiv(self.text_h, 2) - self.lower.top + oy
+        self.lower.draw()
+        self.body.ox, self.body.oy = self.w - self.body.w + x, oy
+        self.body.draw()
+        ctx.set_font(self.size)
 
 
 class Integral(Obj):
@@ -846,9 +1248,27 @@ class Integral(Obj):
             upper_y -= upper_bottom
         top = min(self.upper.top + upper_y, self.body.top)
         bottom = max(self.lower.top + lower_y + lower_h, self.body.top + body_h)
+        self.glyph_w, self.glyph_h = glyph_w, glyph_h  # +0xa4, +0xa8
+        self.lower_shift, self.right_gap, self.tail = lower_shift, right_gap, tail  # +0xac, +0xb0, +0xb4
+        self.lower_y, self.upper_y = lower_y, upper_y  # +0xb8, +0xbc
         self.w = max(lower_w + lower_shift, upper_w + right_gap) + body_w + tail + glyph_w
         self.top, self.h = top, bottom - top
         return self.w, self.h
+
+    def draw(self) -> None:
+        """FUN_100132d0."""
+        ctx = self.ctx
+        x, oy = self.origin()
+        ctx.set_font(muldiv(self.size, self.scale, 100))
+        ctx.draw_char(x, oy - cdiv(self.glyph_h, 2), self.glyph)
+        right = self.glyph_w + x
+        self.lower.ox, self.lower.oy = self.lower_shift + right, self.lower_y + oy
+        self.lower.draw()
+        self.upper.ox, self.upper.oy = self.right_gap + right, self.upper_y + oy
+        self.upper.draw()
+        limits = max(self.lower_shift + self.lower.w, self.right_gap + self.upper.w)
+        self.body.ox, self.body.oy = self.tail + limits + right, oy
+        self.body.draw()
 
 
 class Grid(Obj):
@@ -894,8 +1314,50 @@ class Grid(Obj):
             self.left.measure(height, s)
             self.right.measure(height, s)
             width += self.left.width() + self.right.width()
+        self.col_w, self.row_h = col_w, row_h  # +0x84, +0x80
         self.w, self.h, self.top = width, height, -cdiv(height, 2)
         return self.w, self.h
+
+    def draw(self) -> None:
+        """PILE류 FUN_1000a2d0(칸은 행 위 끝에 붙인다), 괄호 행렬 FUN_10008a00(칸은 행 가운데, cases만 왼쪽 맞춤)."""
+        if type(self) is not Grid:
+            raise NotImplementedError(f"수식 격자 0x{self.kind:X} 그리기는 아직 옮기지 않았습니다")
+        ctx = self.ctx
+        x, oy = self.origin()
+        s = self.size
+        col_gap, row_gap = muldiv(s, 20, 100), muldiv(s, 15, 100)
+        top = oy - cdiv(self.h, 2)
+        if self.left is None:
+            align = {0x11: 1, 0x12: 2}.get(self.kind, 0)
+            left = x
+        else:
+            align = 1 if self.kind == 0x13 else 0
+            self.left.x, self.left.y = x, top
+            self.right.x, self.right.y = self.w - self.right.width() + x, top
+            self.left.draw()
+            self.right.draw()
+            left = self.left.width() + x
+        row_top = 0
+        for r in range(self.nrows):
+            cell_x = left
+            for c in range(self.ncols):
+                cell = self.rows[r * self.ncols + c]
+                if align == 1:
+                    cell.ox = cell_x
+                elif align == 2:
+                    cell.ox = self.col_w[c] - cell.w + cell_x
+                elif self.left is None:
+                    cell.ox = cdiv(self.col_w[c], 2) - cdiv(cell.w, 2) + cell_x
+                else:
+                    cell.ox = cdiv(self.col_w[c] - cell.w, 2) + cell_x
+                if self.left is None:
+                    cell.oy = row_top - cell.top + top
+                else:
+                    cell.oy = cdiv(self.row_h[r] - cell.h, 2) - cell.top + top + row_top
+                cell.draw()
+                cell_x += col_gap + self.col_w[c]
+            row_top += row_gap + self.row_h[r]
+        ctx.set_font(s)
 
 
 class Ladder(Grid):
@@ -912,10 +1374,13 @@ class Ladder(Grid):
         s = self.size
         ctx = self.ctx
         ctx.set_font(s)
-        # FUN_100097a0: 사다리 모양 글리프 U+E101의 폭
-        corner = ctx.plain(0xE101)[0]
+        # FUN_100097a0: 사다리 모양 글리프 U+E101의 폭과 높이의 20%
+        corner, corner_h = ctx.plain(0xE101)
+        self.corner_h = muldiv(corner_h, 20, 100)  # +0x8c
         dots = ctx.plain(0x22EF)[0] + muldiv(s, 20, 100) if self.kind == 0x74 else 0
+        self.corner_w, self.dots_w = corner, dots  # +0x88, +0x94
         col_w = [0] * self.ncols
+        self.row_h = []
         width = height = 0
         for r in range(self.nrows):
             row_h = 0
@@ -941,13 +1406,66 @@ class Ladder(Grid):
                 column += 1
             width = max(width, x)
             height += muldiv(s, 15, 100) + row_h
+            self.row_h.append(row_h)
         if self.ncols > 1:
             col_w[0] += corner
             width += corner
         if self.kind == 0x74 and self.ncols > 2 and self.nrows > 1:
+            col_w[-1] += dots
             width += dots
+        self.col_w = col_w
         self.w, self.h, self.top = width, height, -cdiv(height, 2)
         return self.w, self.h
+
+    def draw(self) -> None:
+        """FUN_10009170. 마지막 줄 칸은 한 열 오른쪽에 놓는다."""
+        x, oy = self.origin()
+        s, ncols, last = self.size, self.ncols, self.nrows - 1
+        sladder = self.kind == 0x74 and ncols > 2
+        row_top = oy - cdiv(self.h, 2)
+        for r in range(self.nrows):
+            if ncols > 1:
+                self._draw_corner(x, oy, r)
+            left = shifted = x
+            for c in range(ncols):
+                if c == ncols - 1 and ((r == last and r > 0) or (sladder and r == 0)):
+                    break
+                cell = self.rows[r * ncols + c]
+                if r == last and r > 0:
+                    shifted += muldiv(s, 20, 100) + self.col_w[c]
+                    if sladder and c == ncols - 2:
+                        shifted += cdiv(self.dots_w, 2)
+                    cell.ox = cdiv(self.col_w[c + 1] - cell.w, 2) + shifted
+                else:
+                    if sladder and c == ncols - 1:
+                        left += cdiv(self.dots_w, 2)
+                    cell.ox = cdiv(self.col_w[c] - cell.w, 2) + left
+                left += muldiv(s, 20, 100) + self.col_w[c]
+                cell.oy = cdiv(self.row_h[r] - cell.h, 2) - cell.top + row_top
+                cell.draw()
+            row_top += self.row_h[r] + muldiv(s, 15, 100)
+        self.ctx.set_font(s)
+
+    def _draw_corner(self, x: int, oy: int, row: int) -> None:
+        """FUN_10009850: 행 왼쪽 세로 모서리(U+E101)와 행 아래 가로선(U+E06D), SLADDER의 ⋯."""
+        ctx = self.ctx
+        ctx.set_font(self.size)
+        s20, s15 = muldiv(self.size, 20, 100), muldiv(self.size, 15, 100)
+        s2, s6 = muldiv(self.size, 2, 100), muldiv(self.size, 6, 100)
+        left = x + self.col_w[0]
+        bottom = oy + self.top + sum(h + s15 for h in self.row_h[: row + 1])
+        bar = self.w - s20 - self.col_w[0] + s2
+        if self.kind == 0x74 and self.ncols > 2:
+            dots_x = bar - self.col_w[-1]
+            bar = dots_x - s20
+            if row > 0:
+                ctx.draw_char(left + dots_x, bottom - self.row_h[row] - s15, 0x22EF)
+        if row != self.nrows - 1 or row < 1:
+            ctx.set_extent(cdiv(s15, 2) + self.row_h[row], ctx.half)
+            ctx.draw_char(left - cdiv(self.corner_w, 2), bottom - self.row_h[row] - s15, 0xE101)
+            ctx.set_extent(muldiv(self.size, 125, 100), bar)
+            ctx.draw_char(left - s2, -self.corner_h - cdiv(s15, 2) - s6 + bottom, 0xE06D)
+            ctx.set_font(self.size)
 
 
 class LoneDelimiter(Obj):
@@ -973,6 +1491,15 @@ class LoneDelimiter(Obj):
         self.h = body_h
         self.top = self.body.top
         return self.w, self.h
+
+    def draw(self) -> None:
+        """FUN_10020600: 종류 0x36 이상(RIGHT)은 본문 뒤에 괄호를 찍는다."""
+        x, oy = self.origin()
+        self.body.ox, self.body.oy = x, oy
+        self.body.draw()
+        self.delimiter.x, self.delimiter.y = self.body.w + x, self.body.top + oy
+        self.delimiter.draw()
+        self.ctx.set_font(self.size)
 
 
 class Bold(Obj):
@@ -1000,9 +1527,21 @@ class Bold(Obj):
         self.top = self.body.top
         return self.w, self.h
 
+    def draw(self) -> None:
+        """FUN_1001d400."""
+        ctx = self.ctx
+        self.body.ox, self.body.oy = self.origin()
+        ctx.bold, ctx.weight = 1, 700
+        self.body.draw()
+        ctx.bold, ctx.weight = 0, 400
+        ctx.set_font(self.size)
+
 
 class UnderOver(Obj):
     """UNDEROVER와 SUM 밖 큰 연산자(0x42, FUN_10017930·FUN_10017f30). +0x80 = 가운데, +0x78 = 아래, +0x7c = 위."""
+
+    def draw(self) -> None:
+        raise NotImplementedError("수식 객체 UnderOver 그리기는 아직 옮기지 않았습니다(코퍼스에 없음)")
 
     kind = 0x42
     #: 가운데 첫 글자가 이 글자면 180%로 키우고 높이의 75%만 쓴다.
@@ -1040,6 +1579,9 @@ class UnderOver(Obj):
 class Bigg(Obj):
     """BIGG(0x47, FUN_10020da0). 앞 형제들 중 가장 큰 높이를 쓰고 폭은 글자 하나의 폭이다."""
 
+    def draw(self) -> None:
+        raise NotImplementedError("수식 객체 Bigg 그리기는 아직 옮기지 않았습니다(코퍼스에 없음)")
+
     kind = 0x47
 
     def __init__(self, ctx: Context) -> None:
@@ -1076,6 +1618,9 @@ class Bigg(Obj):
 
 class Relation(Obj):
     """REL(0x4D)·BUILDREL(5), FUN_100174a0. +0x7c = 화살표 위, +0x78 = 화살표 아래."""
+
+    def draw(self) -> None:
+        raise NotImplementedError("수식 객체 Relation 그리기는 아직 옮기지 않았습니다(코퍼스에 없음)")
 
     #: 선으로 그리는 화살표 → 모양 번호(0x10017683 분기). 그 밖의 글자는 글꼴 글자로 측정한다.
     DRAWN = {0x2192: 0, 0x2190: 1, 0x2194: 2, 0x21D2: 3, 0x21D0: 4, 0x21D4: 5, 0x21C4: 6}
@@ -1150,6 +1695,9 @@ def is_flat(line: Line) -> bool:
 class Brace(Obj):
     """OVERBRACE(0x6B)·UNDERBRACE(0x6C), FUN_1001e8d0. 첫 줄은 +0x7c, 둘째 줄은 +0x78이다."""
 
+    def draw(self) -> None:
+        raise NotImplementedError("수식 객체 Brace 그리기는 아직 옮기지 않았습니다(코퍼스에 없음)")
+
     #: 괄호 조각 글자 +0xac·+0xae·+0xb0·+0xb2(FUN_1001e250).
     PIECES = {0x6B: (0xE106, 0xE107, 0xE108, 0xE109), 0x6C: (0xE10A, 0xE10B, 0xE10C, 0xE10D)}
 
@@ -1187,6 +1735,9 @@ class Brace(Obj):
 
 class LongDivision(Obj):
     """LONGDIV(0x72), FUN_10018660. +0x78 = 나누는 수, +0x7c = 몫, +0x80 = 나눗셈 격자(0x6D)."""
+
+    def draw(self) -> None:
+        raise NotImplementedError("수식 객체 LongDivision 그리기는 아직 옮기지 않았습니다(코퍼스에 없음)")
 
     kind = 0x72
 

@@ -1,6 +1,14 @@
 import pytest
 
-from rea_hwp.render.equation import LegacyEngineState, LegacyEquationError, measure, measure_legacy
+from rea_hwp.render.equation import (
+    DrawnBox,
+    DrawnGlyph,
+    LegacyEngineState,
+    LegacyEquationError,
+    draw,
+    measure,
+    measure_legacy,
+)
 from rea_hwp.render.equation.engine import cdiv, muldiv
 from rea_hwp.render.equation.glyphs import ppem
 from rea_hwp.render.equation.parse import lex, preprocess
@@ -199,3 +207,79 @@ def test_legacy_greek_letter_follows_symbol_substitution_chain_to_batang():
     assert measure_legacy("α", 1000) == (684, 1200, 84)
     assert measure_legacy("β", 800) == (725, 960, 84)
     assert measure_legacy("β", 1200) == (1091, 1440, 84)
+
+
+# 기대값은 한글 2022 PDF(3-09월_교육_통합_2022 1쪽)에서 수식 상자 왼쪽 위 기준으로 잰 글자 원점(pt)이다.
+# 글자는 HYhwpEQ 코드 그대로이고, PDF 쪽 상자 위치가 0.1pt 안쪽으로 흔들려 0.3pt까지 같다고 본다.
+DRAWN_BY_HANGUL_2022 = [
+    (
+        "LEFT ( {2 ^{sqrt {3}}} over {2} RIGHT ) ^{sqrt {3} +1}",
+        [
+            ("", 0.09, 21.01),
+            ("", 4.77, 21.01),
+            ("", 11.13, 24.13),
+            ("", 6.09, 12.49),
+            ("", 10.65, 8.17),
+            ("", 16.5, 6.41),
+            ("", 16.65, 8.53),
+            ("", 22.89, 21.01),
+            ("", 26.61, 5.77),
+            ("", 32.45, 4.01),
+            ("", 32.61, 6.13),
+            ("", 36.69, 5.89),
+            ("", 42.09, 6.13),
+        ],
+    ),
+    (
+        "lim _{x` -> `2} {} ` {f(x)-f(2)} over {x-2}",
+        [
+            ("l", 0.15, 14.29),
+            ("i", 3.27, 14.29),
+            ("m", 6.39, 14.29),
+            ("", 0.51, 20.89),
+            ("→", 4.95, 20.89),
+            ("", 11.79, 20.89),
+            ("", 17.19, 16.21),
+            ("", 31.71, 19.33),
+            ("", 38.31, 18.97),
+            ("", 46.23, 19.33),
+            ("", 18.51, 7.69),
+            ("", 23.67, 7.21),
+            ("", 27.39, 7.69),
+            ("", 33.27, 7.21),
+        ],
+    ),
+    (
+        "= {cases{`-2x+a``&(x LEQ a)#`ax-6&(x>a)}}",
+        [
+            ("", 0.08, 12.43),
+            # 1쪽 쪽 맞춤 행렬(1.00109배)을 pdf_pages가 늘린 글자 span에는 되돌리지 못해 직접 보정했다
+            ("", 8.67, 15.55),
+            ("", 15.68, 7.27),
+            ("", 23.6, 7.63),
+            ("", 28.16, 7.63),
+            ("", 34.64, 7.27),
+            ("", 42.68, 7.63),
+            ("", 51.2, 7.27),
+            ("", 54.92, 7.63),
+            ("≤", 62.12, 7.63),
+            ("", 73.04, 7.63),
+            ("", 78.08, 7.27),
+            ("", 14.36, 18.07),
+            ("", 18.92, 18.07),
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize(("script", "expected"), DRAWN_BY_HANGUL_2022)
+def test_draw_places_glyphs_like_hangul_2022(script, expected):
+    drawn = [(g.text, g.x / 100, g.baseline / 100) for g in draw(script, 900) if isinstance(g, DrawnGlyph)]
+    for char, x, y in expected:
+        nearest = min((abs(dx - x) + abs(dy - y) for c, dx, dy in drawn if c == char), default=None)
+        assert nearest is not None and nearest <= 0.3, (char, x, y, nearest)
+
+
+def test_draw_box_outlines_the_box_accent():
+    box = next(g for g in draw("BOX{````A````}", 900) if isinstance(g, DrawnBox))
+    assert (box.x, box.y, box.w) == (0, 0, measure("BOX{````A````}", 900)[0])

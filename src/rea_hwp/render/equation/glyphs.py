@@ -15,6 +15,17 @@ _DATA = Path(__file__).resolve().parent.parent / "data" / "eq_glyph_metrics.json
 FALLBACK_FONT = "한컴바탕"
 #: 수식 글꼴. FUN_10011fd0은 현재 글꼴 다음에 이 글꼴에서 글리프를 찾는다.
 EQUATION_FONT = "HYhwpEQ"
+#: PUA에 수식 기호를 둔 글꼴(폭 표에 있는 수식 글꼴). 이 글꼴의 PUA는 옛한글이 아니다.
+EQUATION_FONTS = frozenset((EQUATION_FONT, "HancomEQN"))
+#: 두 수식 글꼴의 usWinAscent / unitsPerEm(= 820/1024). 위 끝 맞춤(TA_TOP)으로 찍은 글자의 기준선 = 위 끝 + ascent.
+EQUATION_ASCENT = 820 / 1024
+#: 'lim'·'Lim' 글자열의 전진 폭(hmtx, em 1024). 글자열은 장치 폭으로 이어 찍는다(FUN_100126b0, ExtTextOutW lpDx 없음).
+STRING_ADVANCES = {
+    "HYhwpEQ": {"L": 640, "l": 298, "i": 298, "m": 853},
+    "HancomEQN": {"L": 681, "l": 303, "i": 289, "m": 892},
+}
+#: 정답 PDF를 찍은 인쇄 장치의 1점(600dpi = 12 HWPUNIT). BOX 테두리 0.12pt와 lim 글자 간격 3.12pt로 확인했다.
+DEVICE_UNIT = 12
 #: 96DPI 화면 DC에서 1픽셀 = 7200/96 HWPUNIT(FUN_1026e540의 창·뷰포트 범위).
 UNITS_PER_PIXEL = 75
 

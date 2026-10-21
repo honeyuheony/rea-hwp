@@ -8,6 +8,7 @@ import json
 from importlib import resources
 from xml.sax.saxutils import escape, quoteattr
 
+from .equation.glyphs import EQUATION_FONTS
 from .scene import Glyph, Image, Line, Page, Rect
 
 HU_PER_PT = 100.0
@@ -76,10 +77,14 @@ def _glyph(glyph: Glyph) -> str:
     if glyph.color != "#000000":
         style.append(f'fill="{glyph.color}"')
     attrs = " ".join(style)
-    family = quoteattr(display_font(glyph.char, glyph.font_family))
-    # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
-    # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
-    text = escape(display_text(glyph.char).replace("\u00ad", "-"))
+    if glyph.font_family in EQUATION_FONTS:
+        # 수식 글꼴 PUA는 옛한글이 아니라 수식 기호라 그대로 찍는다.
+        family, text = quoteattr(glyph.font_family), escape(glyph.char)
+    else:
+        family = quoteattr(display_font(glyph.char, glyph.font_family))
+        # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
+        # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
+        text = escape(display_text(glyph.char).replace("\u00ad", "-"))
     if abs(glyph.scale_x - 1.0) > 0.001 or glyph.rotation:
         # 장평은 가로로만 줄이거나 늘린다. 원점을 기준으로 변환해 x 위치가 흔들리지 않게 한다.
         rotate = f" rotate({-glyph.rotation:g})" if glyph.rotation else ""
