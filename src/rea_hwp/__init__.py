@@ -3,6 +3,7 @@
 from .container import FileHeader, Limits
 from .document import HwpDocument
 from .errors import (
+    CorruptEncryptedStreamError,
     CorruptFileError,
     DrmProtectedError,
     HwpDecryptError,
@@ -15,7 +16,7 @@ from .errors import (
 )
 from .models.paragraph import ControlChar
 from .render.layout import render_pages
-from .render.locations import page_text_lines, paragraph_pages
+from .render.locations import page_text_lines, paragraph_pages, table_row_pages
 from .render.options import RenderOptions
 from .render.scene import Image, MissingObject, Page, TextLine
 from .render.styles import DocStyles
@@ -23,11 +24,12 @@ from .render.svg import page_to_svg
 from .structure import BinDataItem, Paragraph, RecordView, picture_bin_data_id, record_id, subtree_end
 
 #: pyproject.toml의 버전과 같게 둔다. 공개 API나 읽기·렌더 결과가 바뀌는 커밋마다 올린다.
-__version__ = "0.2.2"
+__version__ = "0.2.6"
 
 __all__ = [
     "BinDataItem",
     "ControlChar",
+    "CorruptEncryptedStreamError",
     "CorruptFileError",
     "DocStyles",
     "DrmProtectedError",
@@ -56,4 +58,5 @@ __all__ = [
     "record_id",
     "render_pages",
     "subtree_end",
+    "table_row_pages",
 ]

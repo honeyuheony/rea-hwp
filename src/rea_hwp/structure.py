@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from . import tags
@@ -14,13 +15,41 @@ from .models.paragraph import ControlChar, ParaCharShape, ParaHeader, ParaText
 from .models.shapes import ShapePicture
 
 
+class DeferredModel:
+    """RecordView.model 자리에 두면 그 모델을 처음 읽을 때 load(RecordView.index)로 해석한다.
+
+    한 스트림의 RecordView들이 하나를 나눠 쓴다(레코드마다 만들면 레코드 수에 비례해 메모리가 는다).
+    """
+
+    __slots__ = ("load",)
+
+    def __init__(self, load: Callable[[int], RecordModel]) -> None:
+        self.load = load
+
+
+class _ModelField:
+    """RecordView.model 필드. 값은 인스턴스 __dict__["model"]에 두고, DeferredModel이면 처음 읽을 때 바꿔 넣는다."""
+
+    def __get__(self, instance: RecordView | None, owner: type | None = None) -> RecordModel:
+        if instance is None:
+            # dataclass가 기본값을 물을 때다. 기본값이 없는 필드로 둔다.
+            raise AttributeError("model")
+        value = instance.__dict__["model"]
+        if isinstance(value, DeferredModel):
+            value = instance.__dict__["model"] = value.load(instance.index)
+        return value
+
+    def __set__(self, instance: RecordView, value: RecordModel | DeferredModel) -> None:
+        instance.__dict__["model"] = value
+
+
 @dataclass(frozen=True)
 class RecordView:
-    """구역 스트림의 레코드 하나.
+    """구역 스트림 또는 DocInfo 스트림의 레코드 하나.
 
-    index는 구역 스트림(압축·암호를 푼 BodyText/SectionN, 배포용 문서는 ViewText/SectionN)의 레코드 머리를 앞에서부터
-    차례로 읽은 평평한 목록에서 0부터 센 위치다. level로 트리를 짜기 전, 스트림에 나온 차례 그대로 세며, 모델로
-    해석하지 못한 레코드도 하나로 센다. 이 규칙은 바꾸지 않는다.
+    index는 구역 스트림(압축·암호를 푼 BodyText/SectionN, 배포용 문서는 ViewText/SectionN)이나 DocInfo 스트림의 레코드
+    머리를 앞에서부터 차례로 읽은 평평한 목록에서 0부터 센 위치다. level로 트리를 짜기 전, 스트림에 나온 차례 그대로
+    세며, 모델로 해석하지 못한 레코드도 하나로 센다. 이 규칙은 바꾸지 않는다.
     """
 
     index: int
@@ -28,8 +57,12 @@ class RecordView:
     level: int
     #: 레코드 머리를 뺀 원본 바이트.
     payload: bytes
-    #: 타입 모델. 모델이 없거나 해석 결과가 원본과 다르면 원본 바이트를 담은 RawRecord다.
-    model: RecordModel
+    #: 타입 모델. 모델이 없거나 해석 결과가 원본과 다르면 원본 바이트를 담은 RawRecord다. 문서에서 꺼낸 목록은 이 값을
+    #: 처음 읽을 때 해석한다.
+    model: RecordModel = _ModelField()  # type: ignore[assignment]
+
+    def __getstate__(self) -> dict:
+        return {**self.__dict__, "model": self.model}
 
 
 def subtree_end(records: list[RecordView], index: int) -> int:

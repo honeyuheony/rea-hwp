@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import itertools
 import re
 import unicodedata
@@ -1476,6 +1477,34 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         located = None if node is None or self.__dict__.get("in_master_page") else self.document.record_id(node.record)
         if located is not None and located not in page.objects:
             page.objects.append(located)
+
+    def note_table_rows(self, ctrl: Node, placed: list[tuple[Page, list[int]]]) -> None:
+        """표 개체 ctrl의 (쪽, 그 쪽에 놓인 행 번호들)을 적는다. 바탕쪽 표와 셀 안 표는 건너뛴다."""
+        table = ctrl.find(tags.TABLE)
+        if table is None or self.__dict__.get("in_master_page") or id(table.record) in self.cell_table_records:
+            return
+        located = self.document.record_id(table.record)
+        if located is None:
+            return
+        for page, rows in placed:
+            noted = page.table_rows.setdefault(located, [])
+            noted.extend(row for row in rows if row not in noted)
+
+    @functools.cached_property
+    def cell_table_records(self) -> frozenset[int]:
+        """다른 표 개체 안(칸·캡션) 어딘가에 든 TABLE 레코드의 id.
+
+        칸 문단은 칸 LIST_HEADER의 자식이 아니라 같은 수준의 형제라, 표 개체 아래에서 자기 TABLE 말고는 모두 표 안이다.
+        """
+        found: set[int] = set()
+        pending = [(node, False) for stream in self.document.sections for node in stream.nodes]
+        while pending:
+            node, in_cell = pending.pop()
+            if in_cell and node.tag == tags.TABLE:
+                found.add(id(node.record))
+            is_table = node.tag == tags.CTRL_HEADER and node.record.payload[:4] == tags.TABLE_CTRL.to_bytes(4, "little")
+            pending.extend((child, in_cell or (is_table and child.tag != tags.TABLE)) for child in node.children)
+        return frozenset(found)
 
     def draw_line(self, state: PageState, view: ParagraphView, index: int, area: Area) -> None:
         segment = view.segments[index]

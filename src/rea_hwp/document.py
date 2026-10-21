@@ -15,7 +15,7 @@ from .errors import CorruptFileError, LimitExceededError
 from .models.base import RawRecord, RecordModel
 from .models.registry import DecodeContext, decode_record
 from .record import Record, RecordStream, build_tree, parse_records
-from .structure import BinDataItem, Paragraph, RecordView, read_paragraph, record_id
+from .structure import BinDataItem, DeferredModel, Paragraph, RecordView, read_paragraph, record_id
 
 if TYPE_CHECKING:
     from .render.styles import DocStyles
@@ -41,11 +41,67 @@ class Node:
         return [child for child in self.children if child.tag == tag]
 
 
-@dataclass
+#: 레코드가 겹칠 수 있는 깊이(조상 수). level은 10비트라 1023단까지 적을 수 있으나 말뭉치 최대는 12단이다. 0.2.4까지는
+#: 재귀 한도(호출한 쪽 스택에 따라 약 987단)에 걸리면 깨진 파일로 봤고, 그보다 낮은 고정값으로 같은 판정을 한다.
+MAX_NESTING = 900
+
+
 class DecodedStream:
-    name: str
-    nodes: list[Node]
-    stream: RecordStream
+    """레코드 스트림 하나. 레코드 머리와 트리 관계는 만들 때 모두 읽고, 타입 모델은 처음 꺼낼 때 해석한다."""
+
+    def __init__(self, name: str, stream: RecordStream) -> None:
+        self.name = name
+        self.stream = stream
+        records = stream.records
+        build_tree(records)
+        #: 레코드마다 부모 레코드 위치(최상위는 -1)와 같은 부모 아래 앞선 형제들의 태그 종류(DecodeContext 재료).
+        self._parents: list[int] = []
+        self._preceding: list[frozenset[int]] = []
+        self._models: list[RecordModel | None] = [None] * len(records)
+        stack: list[int] = []
+        # 새 태그 종류가 나올 때만 집합을 다시 만든다(형제가 많아도 형제 수에 비례하는 비용).
+        seen: dict[int, frozenset[int]] = {}
+        for index, record in enumerate(records):
+            while stack and records[stack[-1]].level >= record.level:
+                stack.pop()
+            if len(stack) > MAX_NESTING:
+                raise CorruptFileError(f"{name} records are nested too deeply; the file is damaged")
+            parent = stack[-1] if stack else -1
+            before = seen.get(parent, frozenset())
+            self._parents.append(parent)
+            self._preceding.append(before)
+            if record.tag not in before:
+                seen[parent] = before | {record.tag}
+            stack.append(index)
+
+    def model(self, index: int) -> RecordModel:
+        """stream.records[index]의 타입 모델. 한 번 해석한 모델은 nodes와 RecordView가 같은 객체로 나눠 쓴다.
+
+        잠그지 않는다. 여러 스레드가 같은 레코드를 처음 동시에 꺼내면 두 번 해석해 값은 같고 객체는 다를 수 있다.
+        """
+        model = self._models[index]
+        if model is None:
+            records = self.stream.records
+            ancestors = []
+            parent = self._parents[index]
+            while parent >= 0:
+                ancestors.append(records[parent])
+                parent = self._parents[parent]
+            ctrl_id = next((ctrl for ctrl in map(_ctrl_id_of, ancestors) if ctrl), 0)
+            context = DecodeContext(tuple(reversed(ancestors)), ctrl_id, self._preceding[index])
+            model = self._models[index] = decode_record(records[index], context)
+        return model
+
+    @functools.cached_property
+    def nodes(self) -> list[Node]:
+        """최상위 레코드의 Node 목록. 처음 읽을 때 스트림의 모든 모델을 해석한다."""
+        built: list[Node] = []
+        roots: list[Node] = []
+        for index, record in enumerate(self.stream.records):
+            built.append(Node(record, self.model(index)))
+            parent = self._parents[index]
+            (built[parent].children if parent >= 0 else roots).append(built[-1])
+        return roots
 
     def to_bytes(self) -> bytes:
         """모델을 다시 인코딩해 레코드 스트림을 만든다(원본 Record.payload는 쓰지 않는다)."""
@@ -75,27 +131,7 @@ def decode_stream(name: str, stream_bytes: bytes, max_records: int | None = None
         raise CorruptFileError(
             f"{name} ends with a truncated record ({len(stream.trailing)} bytes); the file is damaged"
         )
-    roots = build_tree(stream.records)
-
-    def convert(record: Record, ancestors: tuple[Record, ...], ctrl_id: int, preceding: frozenset[int]) -> Node:
-        context = DecodeContext(ancestors, ctrl_id, preceding)
-        node = Node(record, decode_record(record, context))
-        own_ctrl = _ctrl_id_of(record) or ctrl_id
-        # 새 태그 종류가 나올 때만 집합을 다시 만든다(형제가 많아도 형제 수에 비례하는 비용).
-        seen: frozenset[int] = frozenset()
-        for child in record.children:
-            node.children.append(convert(child, ancestors + (record,), own_ctrl, seen))
-            if child.tag not in seen:
-                seen = seen | {child.tag}
-        return node
-
-    nodes = []
-    seen_roots: frozenset[int] = frozenset()
-    for root in roots:
-        nodes.append(convert(root, (), 0, seen_roots))
-        if root.tag not in seen_roots:
-            seen_roots = seen_roots | {root.tag}
-    return DecodedStream(name, nodes, stream)
+    return DecodedStream(name, stream)
 
 
 class HwpDocument:
@@ -116,9 +152,6 @@ class HwpDocument:
         except LimitExceededError as error:
             total = self.container.limits.max_records
             raise LimitExceededError(f"document has more than {total} records; raise Limits.max_records") from error
-        except RecursionError as error:
-            # level은 10비트라 1024단까지 겹칠 수 있다. 말뭉치 최대 12단이므로 그보다 깊으면 깨진 파일로 본다.
-            raise CorruptFileError(f"{name} records are nested too deeply; the file is damaged") from error
 
     @classmethod
     def open(
@@ -146,13 +179,14 @@ class HwpDocument:
         """구역 번호 section의 레코드를 스트림에 나온 차례 그대로 담은 목록. 같은 문서에서는 같은 목록을 돌려준다."""
         cache = self.__dict__.setdefault("_section_records", {})
         if section not in cache:
-            stream = self._section_stream(section)
-            models_by_record = {id(node.record): node.model for node in stream.walk()}
-            cache[section] = [
-                RecordView(index, record.tag, record.level, record.payload, models_by_record[id(record)])
-                for index, record in enumerate(stream.stream.records)
-            ]
+            cache[section] = _record_views(self._section_stream(section))
         return cache[section]
+
+    def docinfo_records(self) -> list[RecordView]:
+        """DocInfo 레코드를 스트림에 나온 차례 그대로 담은 목록. index는 section_records와 같은 규칙으로 센다."""
+        if "_docinfo_records" not in self.__dict__:
+            self._docinfo_records = _record_views(self.doc_info)
+        return self._docinfo_records
 
     def paragraph(self, section: int, index: int) -> Paragraph:
         """section_records(section)[index]가 PARA_HEADER인 문단의 글·글자 모양 구간·문단 모양·스타일."""
@@ -211,6 +245,14 @@ class HwpDocument:
             for node in stream.walk()
             if isinstance(node.model, RawRecord)
         ]
+
+
+def _record_views(stream: DecodedStream) -> list[RecordView]:
+    deferred = DeferredModel(stream.model)
+    return [
+        RecordView(index, record.tag, record.level, record.payload, deferred)
+        for index, record in enumerate(stream.stream.records)
+    ]
 
 
 def _section_number(stream_name: str) -> int:

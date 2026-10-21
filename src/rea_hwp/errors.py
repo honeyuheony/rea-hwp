@@ -39,7 +39,7 @@ class CorruptFileError(HwpFormatError):
 
 
 class CorruptEncryptedStreamError(CorruptFileError, HwpDecryptError):
-    """배포용 문서의 암호 머리(DISTRIBUTE_DOC_DATA)가 깨졌다."""
+    """배포용 문서의 본문을 풀지 못했다(암호 머리 DISTRIBUTE_DOC_DATA가 깨짐, ViewText 본문 스트림이 없음)."""
 
 
 class LimitExceededError(ReaHwpError):

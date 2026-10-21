@@ -8,7 +8,18 @@ import json
 import pytest
 from corpus_paths import CORPUS_ROOT
 
-from rea_hwp import HwpDocument, Page, TextLine, page_text_lines, paragraph_pages, render_pages, subtree_end, tags
+from rea_hwp import (
+    HwpDocument,
+    Page,
+    TextLine,
+    page_text_lines,
+    paragraph_pages,
+    render_pages,
+    subtree_end,
+    table_row_pages,
+    tags,
+)
+from rea_hwp.models.controls import CellListHeader
 
 CORPUS = CORPUS_ROOT
 needs_corpus = pytest.mark.skipif(not CORPUS.exists(), reason="corpus not available")
@@ -126,6 +137,70 @@ def test_paragraph_pages_keeps_earliest_page_number():
     second.objects.append("0:9")
     third = Page(10, 10, 3, text_lines=[TextLine("p", 0, 0, 1, 1)])
     assert paragraph_pages([second, third, first]) == {"0:4": 1, "0:9": 1, "1:2": 2}
+
+
+#: 쪽을 넘는 표가 여럿인 문서(table_scattered_header_rowbreak 52쪽 중 16개), 한 쪽 표와 섞인 문서(hwpx_sample2).
+ROW_PAGE_DOCS = ("oss/rhwp/table_scattered_header_rowbreak.hwp", "oss/rhwp/hwpx_sample2.hwp")
+
+
+def _owner(document: HwpDocument, located: str) -> str:
+    """원본 위치 레코드를 바로 품은 레코드(표는 표 개체 CTRL_HEADER)의 원본 위치."""
+    section, index = map(int, located.split(":"))
+    records = document.section_records(section)
+    return f"{section}:{next(i for i in range(index - 1, -1, -1) if records[i].level < records[index].level)}"
+
+
+def _cell_paragraph_rows(document: HwpDocument, table: str) -> dict[str, int]:
+    """표 칸 안(셀 안 표 포함) 문단의 원본 위치 → 그 칸이 시작하는 행 번호."""
+    section, owner = map(int, _owner(document, table).split(":"))
+    records = document.section_records(section)
+    end = subtree_end(records, owner)
+    cells = [
+        view.index
+        for view in records[owner + 1 : end]
+        if view.level == records[owner].level + 1 and isinstance(view.model, CellListHeader)
+    ]
+    rows = {}
+    for start, stop in zip(cells, [*cells[1:], end], strict=True):
+        for view in records[start + 1 : stop]:
+            if view.tag == tags.PARA_HEADER:
+                rows[f"{section}:{view.index}"] = records[start].model.row
+    return rows
+
+
+@needs_corpus
+@pytest.mark.parametrize("relative", ROW_PAGE_DOCS)
+def test_table_row_pages_match_pages_of_cell_paragraph_lines(relative):
+    document, pages = _rendered(relative)
+    row_pages = table_row_pages(pages)
+    first_pages = paragraph_pages(pages)
+    tables = [key for key in first_pages if _located_tag(document, key) == tags.TABLE]
+    # 셀 안 표(표 개체를 품은 표 개체)는 바깥 표 행으로 세므로 키가 없다.
+    outer = [
+        key
+        for key in tables
+        if tags.TABLE_CTRL.to_bytes(4, "little") not in _enclosing_controls(document, _owner(document, key))
+    ]
+    assert sorted(row_pages) == sorted(outer)
+    assert any(len(set(rows.values())) > 1 for rows in row_pages.values())
+    compared = 0
+    for table, rows in row_pages.items():
+        section, index = map(int, table.split(":"))
+        assert list(rows) == list(range(document.section_records(section)[index].model.rows))
+        assert rows[0] == first_pages[table]
+        line_pages: dict[int, int] = {}
+        for located, row in _cell_paragraph_rows(document, table).items():
+            if located in first_pages:
+                line_pages[row] = min(line_pages.get(row, first_pages[located]), first_pages[located])
+        assert {row: rows[row] for row in line_pages} == line_pages
+        compared += len(line_pages)
+    assert compared > 100
+
+
+def test_table_row_pages_keeps_first_page_of_each_row():
+    first = Page(10, 10, 1, table_rows={"0:5": [0, 1]})
+    second = Page(10, 10, 2, table_rows={"0:5": [1, 2], "1:3": [0]})
+    assert table_row_pages([second, first]) == {"0:5": {0: 1, 1: 1, 2: 2}, "1:3": {0: 2}}
 
 
 def test_page_text_lines_are_json_ready_in_points():

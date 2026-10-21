@@ -256,6 +256,22 @@ def _restored_baseline(segment: LineSeg) -> LineSeg:
     return segment
 
 
+def fragment_rows(row_y: list[float], fragments: list[tuple[float, float]], first: int) -> list[list[int]]:
+    """쪽 조각(표 세로 범위)마다 일부라도 놓인 행. first는 그린 첫 조각 번호다(통째로 옮긴 표는 빈 조각 0을 건너뛴다).
+
+    행은 위 끝을 담는 첫 조각(없으면 마지막 조각)에서 시작해, 아래 끝이 뒤 조각 시작보다 아래면 그 조각에도 놓인다.
+    """
+    placed: list[list[int]] = [[] for _ in fragments]
+    for row in range(len(row_y) - 1):
+        top, bottom = row_y[row], row_y[row + 1]
+        home = next((k for k in range(first, len(fragments)) if fragments[k][1] > top), len(fragments) - 1)
+        placed[home].append(row)
+        for number in range(home + 1, len(fragments)):
+            if bottom > fragments[number][0]:
+                placed[number].append(row)
+    return placed
+
+
 def is_block_table(ctrl: Node) -> bool:
     """셀 문단 기준 위쪽에 놓이는 자리차지 표(바깥 표와 함께 쪽을 넘는다)."""
     model = ctrl.model
@@ -1042,6 +1058,9 @@ class TableFlowMixin:
                     placement.last_state, placement.bottom = state, origin + (end - start)
             finally:
                 self.host_fragments = saved_host
+            drawn = range(int(moved_whole), len(fragments))
+            placed_rows = fragment_rows(grid.row_y, fragments, drawn.start)
+            self.note_table_rows(ctrl, [(states[k].page, placed_rows[k]) for k in drawn])
             self.current_state = state
             if split:
                 state.column = columns[-1]
@@ -1118,6 +1137,8 @@ class TableFlowMixin:
             self.draw_fragments(grid, table, sources, paging.fragments, positions)
         finally:
             self.in_body = True
+        pieces = zip(paging.fragments, positions, strict=True)
+        self.note_table_rows(ctrl, [(page.page, fragment.rows) for fragment, (page, _, _) in pieces])
         last_state, last_origin = states[-1], origins[-1]
         bottom = last_origin + paging.fragments[-1].bottom
         self.table_bottom = bottom
