@@ -161,3 +161,10 @@ def test_underline_skips_trailing_spaces_of_line():
     line = next(item for item in underlines(page) if abs(item.y1 / 100 - 614.9) < 0.5 and item.x1 < 10000)
     # 한글 2022 PDF 2쪽: 공백으로 끝나는 「한 진위여부를 …필」 줄 밑줄 끝 295.84pt.
     assert line.x2 / 100 == pytest.approx(295.84, abs=0.3)
+
+
+def test_page_number_ignores_letter_spacing():
+    page = corpus_pages("rhwp/exam_kor.hwp")[11]
+    digits = [(glyph.char, glyph.x / 100) for glyph in page.glyphs if glyph.y / 100 == pytest.approx(1093.68, abs=0.1)]
+    # 한글 2022 PDF 12쪽 꼬리말 쪽 번호 「12」(자간 −5%): 숫자 사이 7.80pt, 자간을 넣으면 7.32pt.
+    assert digits == [("1", pytest.approx(399.84, abs=0.05)), ("2", pytest.approx(407.64, abs=0.05))]

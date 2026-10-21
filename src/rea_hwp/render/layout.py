@@ -2116,12 +2116,13 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         else:
             number = self.page_numbers[-1] if model.kind == 0 else self.current_note_number
         text = _affix(model.prefix_char) + format_number(number, model.number_shape) + _affix(model.suffix_char)
-        if model.kind != 0:
-            # 주석 번호에는 자간을 적용하지 않는다(실측: 중간진도보고서 각주 「8)」 바탕 9pt 장평 95% 자간 −15%,
-            # 숫자 전진 5.04~5.16pt = 자간 없는 0.596em × 9 × 0.95, 자간을 넣으면 4.33pt).
-            plain = type(shape)(values=dict(shape.values), tail=shape.tail)
-            plain.values["spacings"] = [0] * 7
-            shape = plain
+        # 자동 번호에는 자간을 적용하지 않는다(실측: 중간진도보고서 각주 「8)」 바탕 9pt 장평 95% 자간 −15%, 숫자 전진
+        # 5.04~5.16pt = 자간 없는 0.596em × 9 × 0.95, 자간을 넣으면 4.33pt). 쪽 번호도 같다(exam_kor 12쪽 꼬리말
+        # 「12」 자간 −5%: 정답 7.80pt, 같은 줄에 입력한 「20」은 7.32pt. task2070 머리말 「188」 자간 −8%: 3.9·3.7pt,
+        # 본문 숫자 3.5pt).
+        plain = type(shape)(values=dict(shape.values), tail=shape.tail)
+        plain.values["spacings"] = [0] * 7
+        shape = plain
         return text, _superscript(shape) if model.superscript else shape
 
     def note_mark(self, view: ParagraphView, char_index: int, model: NoteCtrl) -> tuple[str, CharShape]:
