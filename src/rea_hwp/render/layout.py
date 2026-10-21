@@ -16,6 +16,7 @@ from ..models.controls import (
     AutoNumberKind,
     ColumnDefCtrl,
     DutmalCtrl,
+    EqEdit,
     FieldCtrl,
     HeaderFooterCtrl,
     NewNumberCtrl,
@@ -1540,6 +1541,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 pieces.append(item.char)
             elif item.code == TAB:
                 pieces.append("\t")
+            elif char_index in view.controls:
+                pieces.append(_equation_copy_text(view.controls[char_index]))
             if isinstance(item, TextChar):
                 shape = self.styles.char_shapes[item.shape_id]
                 if shade and shade[0] is not shape:
@@ -2104,6 +2107,14 @@ def _first_line_page_floats(view: ParagraphView) -> list[tuple[int, Node]]:
         and ctrl.model.text_wrap == TextWrap.TOP_AND_BOTTOM
         and ctrl.model.vert_rel_to != VertRelTo.PARA
     ]
+
+
+def _equation_copy_text(ctrl: Node) -> str:
+    """복사 층에 넣을 수식 스크립트 원문(수식 편집기에 붙여 넣는 용도). 줄바꿈·탭은 줄을 끊지 않게 공백으로 바꾼다."""
+    equation = ctrl.find(tags.EQEDIT) if ctrl.record.payload[:4] == tags.EQUATION_CTRL.to_bytes(4, "little") else None
+    if equation is None or not isinstance(equation.model, EqEdit):
+        return ""
+    return re.sub(r"[\r\n\t]+", " ", equation.model.script or "").strip()
 
 
 def _line_end(segment: LineSeg) -> int:

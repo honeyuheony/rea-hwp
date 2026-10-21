@@ -758,6 +758,29 @@ def test_group_children_scale_before_rotation_from_outermost_group():
 
 
 @needs_corpus
+@pytest.mark.parametrize(
+    ("path", "page_number", "line"),
+    [
+        # 새 엔진 수식 둘이 붙은 줄: 스크립트가 줄 글 안 수식 자리에 차례대로 든다.
+        (
+            "oss/rhwp/3-10월_교육_통합_2022.hwp",
+            4,
+            "오른쪽 표준정규분포표를 이용하여 구한 rm P it (X LEQ k)+rm P it (Y ge  k)의",
+        ),
+        # 옛 엔진 수식: 스크립트 끝 줄바꿈은 공백이 되어 떨어진다.
+        (
+            "oss/hwp-rs/crates__hwp__tests__integration__hancom__files__한글문서파일형식_수식_revision1.3.hwp",
+            9,
+            "결과 예시:rm 2H_2 O = 2H_2 + O_2",
+        ),
+    ],
+)
+def test_text_lines_carry_equation_script(path, page_number, line):
+    # 사용자 결정: 복사하면 한글 수식 편집기에 그대로 붙여 넣을 수 있게 수식 스크립트 원문을 싣는다.
+    assert line in [text_line.text for text_line in _open(path)[page_number - 1].text_lines]
+
+
+@needs_corpus
 def test_textbox_with_resized_equations_shrinks_like_hangul():
     # 한글 2022 PDF 2쪽 보기 상자: 안의 수식이 707HU 줄어 상자도 그만큼 낮아지고(재저장본 19904 → 19197),
     # 세로 가운데 정렬된 안쪽 글은 절반, 상자 뒤 글은 전부 올라간다.
