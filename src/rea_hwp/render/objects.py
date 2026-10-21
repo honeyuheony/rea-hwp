@@ -339,7 +339,7 @@ class ObjectsMixin:
             if self.in_body and is_block_table(ctrl) and model.text_wrap == TextWrap.TOP_AND_BOTTOM:
                 grid, _ = self.table_layout_grid(ctrl)
                 full_height = grid.height if grid is not None else None
-            left, top = self.floating_position(model, state, view, area, box_width, box_height, full_height)
+            left, top = self.floating_position(model, state, view, area, box_width, box_height, full_height, ctrl)
             if self.overflows_to_next_column(model, ctrl, state, top, box_height + margins[2] + margins[3]):
                 # FUN_102d51c0 0x102d5474: 단 아래를 넘는 문단 기준 개체는 대기 목록에 들어갔다가 다음 단을 시작할 때
                 # 단 맨 위에 놓인다(FUN_102d6280). 다시 놓을 때 세로 오프셋을 더하는 조건(obj+0x68)은 확인하지 못해
@@ -533,8 +533,11 @@ class ObjectsMixin:
         width: float,
         height: float,
         full_height: float | None = None,
+        anchor: Node | None = None,
     ) -> tuple[float, float]:
-        """full_height는 쪽을 넘을 수 있는 표의 격자 높이다(저장 높이는 첫 쪽 몫만 적히기도 한다)."""
+        """full_height는 쪽을 넘을 수 있는 표의 격자 높이다(저장 높이는 첫 쪽 몫만 적히기도 한다).
+
+        anchor는 개체 컨트롤이다(조판 부호가 든 줄을 찾는다)."""
         geometry = state.geometry
         column_x, column_width = geometry.columns[state.column]
         if len({w for _, w in geometry.columns}) == 1:
@@ -628,10 +631,14 @@ class ObjectsMixin:
         }
         ref_y, ref_h = vertical.get(model.vert_rel_to, vertical[REL_COLUMN_OR_PARA])
         vert_offset = vertical_offset(model)
-        return (
-            _align(ref_x, ref_w, width, model.horz_align, model.horz_offset),
-            _align(ref_y, ref_h, height, model.vert_align, vert_offset),
-        )
+        top = _align(ref_y, ref_h, height, model.vert_align, vert_offset)
+        line = _anchor_line(view, anchor)
+        if self.in_body and model.vert_rel_to == REL_COLUMN_OR_PARA and model.text_wrap == TextWrap.SQUARE and line:
+            # 한글은 줄을 차례로 짜다 조판 부호가 든 줄에서 개체를 놓아, 이미 짠 앞 줄 위로는 올리지 않는다(코퍼스 본문
+            # 문단 기준 어울림 개체 중 오프셋 0이고 부호가 둘째 줄 이후인 53개: 49개는 처음 좁아진 저장 줄이 부호 줄,
+            # 4개는 앞 개체가 먼저 좁힘. 3-10월_교육_통합_2022 4쪽 표 위 선 171.05pt = 둘째 줄 위).
+            top = max(top, area.y + view.segments[line].vertical_pos)
+        return _align(ref_x, ref_w, width, model.horz_align, model.horz_offset), top
 
     def starts_page_by_rewind(self, state: PageState, view: ParagraphView) -> bool:
         """쪽·단 나누기 없이 넘쳐서 이 쪽·단의 첫 문단이 됐는가."""
@@ -1230,6 +1237,15 @@ def _is_stored_line(view: ParagraphView, index: int) -> bool:
     """줄이 LINE_SEG 레코드에 저장된 그대로인가(다시 나누거나 옮긴 줄이 아닌가)."""
     stored = view.node.find(tags.PARA_LINE_SEG)
     return stored is not None and any(segment is view.segments[index] for segment in stored.model.segments)
+
+
+def _anchor_line(view: ParagraphView, anchor: Node | None) -> int:
+    """개체 조판 부호가 든 줄 번호(모르면 0)."""
+    order = next((index for index, ctrl in view.controls.items() if ctrl is anchor), None) if anchor else None
+    if order is None or not view.segments:
+        return 0
+    position = view.positions[order]
+    return max((i for i, segment in enumerate(view.segments) if segment.text_start <= position), default=0)
 
 
 def _pushes_first_line(view: ParagraphView) -> bool:

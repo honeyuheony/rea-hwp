@@ -16,6 +16,7 @@ from rea_hwp.render import reflow
 from rea_hwp.render.common import PageState, ParagraphView, TextChar
 from rea_hwp.render.equation import measure_legacy
 from rea_hwp.render.layout import DocumentLayout, layout_document
+from rea_hwp.render.scene import Line
 from rea_hwp.render.svg import display_text, page_glyph_table, page_to_svg
 
 CORPUS = CORPUS_ROOT
@@ -763,3 +764,12 @@ def test_textbox_with_resized_equations_shrinks_like_hangul():
     page = _open("oss/rhwp/3-10월_교육_통합_2022.hwp")[1]
     assert _glyphs_at(page, "코", 393.48, 178.32)
     assert _glyphs_at(page, "값", 301.92, 384.0)
+
+
+@needs_corpus
+def test_square_wrapped_object_stays_below_lines_before_its_anchor():
+    # 한글 2022 PDF 4쪽 표준정규분포표: 문단 기준 오프셋 0이지만 조판 부호가 둘째 줄에 있어
+    # 표 위 선이 둘째 줄 위(171.05pt)다.
+    page = _open("oss/rhwp/3-10월_교육_통합_2022.hwp")[3]
+    tops = [item.y1 / 100 for item in page.items if isinstance(item, Line) and item.y1 == item.y2 and item.x1 > 49000]
+    assert any(abs(top - 171.05) < 0.3 for top in tops), sorted(tops)[:5]

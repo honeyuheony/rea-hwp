@@ -1214,7 +1214,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 continue
             column_area = dataclasses.replace(area, width=geometry.columns[state.column][1])
             width, height = self.object_size(model, state, column_area)
-            left, top = self.floating_position(model, state, view, column_area, width, height)
+            left, top = self.floating_position(model, state, view, column_area, width, height, anchor=ctrl)
             x, y, w, h, flow = outer_box(model, left, top, width, height)
             floats.append((x - area.x, y - area.y, w, h, flow))
             active_from.append(item)
