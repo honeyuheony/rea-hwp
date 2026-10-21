@@ -12,6 +12,10 @@ from rea_hwp.render.equation import (
 from rea_hwp.render.equation.engine import cdiv, muldiv
 from rea_hwp.render.equation.glyphs import ppem
 from rea_hwp.render.equation.parse import lex, preprocess
+from rea_hwp.render.equation.unicode import FALLBACK_FONT_CHAIN, to_unicode
+from rea_hwp.render.html import viewer_html
+from rea_hwp.render.scene import Glyph, Page
+from rea_hwp.render.svg import equation_fonts, page_to_svg
 
 # 기대값은 한글 2022가 다시 저장한 문서의 수식 크기(폭, 높이, 기준선 백분율 + 1)다.
 SAVED_BY_HANGUL_2022 = [
@@ -283,3 +287,25 @@ def test_draw_places_glyphs_like_hangul_2022(script, expected):
 def test_draw_box_outlines_the_box_accent():
     box = next(g for g in draw("BOX{````A````}", 900) if isinstance(g, DrawnBox))
     assert (box.x, box.y, box.w) == (0, 0, measure("BOX{````A````}", 900)[0])
+
+
+@pytest.mark.parametrize(
+    ("pua", "expected"),
+    [(0xE0E5, "𝑎"), (0xE0EC, "ℎ"), (0xE039, "6"), (0xE046, "−"), (0xE067, "∑"), (0xE0CD, "ℂ"), (0xE09D, "𝛼")],
+)
+def test_pua_maps_to_unicode_math_characters(pua, expected):
+    assert to_unicode(chr(pua)) == expected
+
+
+def test_equation_fallback_svg_draws_unicode_with_math_font_chain():
+    page = Page(1000, 1000, 1, [Glyph("", 0, 500, 900, "HYhwpEQ"), Glyph("가", 0, 900, 900, "함초롬바탕")])
+    assert equation_fonts(page) == {"HYhwpEQ"}
+    plain, fallback = page_to_svg(page), page_to_svg(page, equation_fallback=True)
+    assert ">\ue0e5</text>" in plain and 'font-family="HYhwpEQ"' in plain
+    assert ">𝑎</text>" in fallback and FALLBACK_FONT_CHAIN in fallback and ">가</text>" in fallback
+
+
+def test_viewer_marks_pages_that_have_equation_fallbacks():
+    html = viewer_html("t", [("p1.svg", 100, 100), ("p2.svg", 100, 100)], None, [("p1.eq.svg", ["HYhwpEQ"]), None])
+    assert 'data-eq-fallback="p1.eq.svg" data-eq-fonts="HYhwpEQ"' in html
+    assert html.count("data-eq-fallback=") == 1

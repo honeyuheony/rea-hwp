@@ -67,6 +67,18 @@ document.getElementById('zoom').addEventListener('change', (event) => {{
 }});
 window.addEventListener('resize', fitTextLayers);
 document.fonts.ready.then(fitTextLayers);
+// 수식 글꼴이 이 PC에 없으면(PUA 글자 폭이 대체 글꼴과 같으면) 유니코드 수식으로 그린 쪽으로 바꾼다.
+function hasFont(name) {{
+  const context = document.createElement('canvas').getContext('2d');
+  const sample = '\ue0e5\ue048\ue06d\ue05c\ue044';
+  context.font = '40px monospace';
+  const fallback = context.measureText(sample).width;
+  context.font = `40px "${{name}}", monospace`;
+  return context.measureText(sample).width !== fallback;
+}}
+for (const img of document.querySelectorAll('img[data-eq-fallback]')) {{
+  if (!img.dataset.eqFonts.split(' ').every(hasFont)) img.src = img.dataset.eqFallback;
+}}
 </script>
 </body>
 </html>
@@ -88,14 +100,32 @@ def text_layer(lines: list[TextLine], width: float, height: float) -> str:
     return f'<div class="text-layer">{"".join(spans)}</div>'
 
 
-def viewer_html(title: str, svg_files: list[tuple[str, float, float]], text_layers: list[str] | None = None) -> str:
-    """svg_files: (상대 경로, 너비 pt, 높이 pt) 목록. text_layers는 쪽마다 text_layer() 결과(없으면 그림만)."""
+def _fallback_attrs(fallback: tuple[str, list[str]] | None) -> str:
+    if fallback is None:
+        return ""
+    path, fonts = fallback
+    return f' data-eq-fallback="{escape(path)}" data-eq-fonts="{escape(" ".join(fonts))}"'
+
+
+def viewer_html(
+    title: str,
+    svg_files: list[tuple[str, float, float]],
+    text_layers: list[str] | None = None,
+    equation_fallbacks: list[tuple[str, list[str]] | None] | None = None,
+) -> str:
+    """svg_files: (상대 경로, 너비 pt, 높이 pt) 목록. text_layers는 쪽마다 text_layer() 결과(없으면 그림만).
+
+    equation_fallbacks는 쪽마다 (수식 대체 SVG 경로, 쪽에 쓴 수식 글꼴) 또는 None이다.
+    """
     layers = text_layers or [""] * len(svg_files)
+    fallbacks = equation_fallbacks or [None] * len(svg_files)
     pages = "\n".join(
         f'<figure class="page" style="--w: {width * 96 / 72:.1f}px; margin: 0">'
         f'<img src="{escape(path)}" alt="{index}쪽" width="{width * 96 / 72:.0f}" '
-        f'height="{height * 96 / 72:.0f}" loading="lazy">{layer}'
+        f'height="{height * 96 / 72:.0f}" loading="lazy"{_fallback_attrs(fallback)}>{layer}'
         f'</figure><div class="label">{index}</div>'
-        for index, ((path, width, height), layer) in enumerate(zip(svg_files, layers, strict=True), 1)
+        for index, ((path, width, height), layer, fallback) in enumerate(
+            zip(svg_files, layers, fallbacks, strict=True), 1
+        )
     )
     return _TEMPLATE.format(title=escape(title), count=len(svg_files), pages=pages)

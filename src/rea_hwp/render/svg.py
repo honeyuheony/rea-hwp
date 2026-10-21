@@ -9,6 +9,7 @@ from importlib import resources
 from xml.sax.saxutils import escape, quoteattr
 
 from .equation.glyphs import EQUATION_FONTS
+from .equation.unicode import FALLBACK_FONT_CHAIN, to_unicode
 from .scene import Glyph, Image, Line, Page, Rect
 
 HU_PER_PT = 100.0
@@ -68,7 +69,7 @@ def _pt(value: float) -> str:
     return text if text not in ("", "-0") else "0"
 
 
-def _glyph(glyph: Glyph) -> str:
+def _glyph(glyph: Glyph, equation_fallback: bool = False) -> str:
     style = []
     if glyph.bold:
         style.append('font-weight="bold"')
@@ -77,7 +78,9 @@ def _glyph(glyph: Glyph) -> str:
     if glyph.color != "#000000":
         style.append(f'fill="{glyph.color}"')
     attrs = " ".join(style)
-    if glyph.font_family in EQUATION_FONTS:
+    if glyph.font_family in EQUATION_FONTS and equation_fallback:
+        family, text = quoteattr(FALLBACK_FONT_CHAIN), escape(to_unicode(glyph.char))
+    elif glyph.font_family in EQUATION_FONTS:
         # 수식 글꼴 PUA는 옛한글이 아니라 수식 기호라 그대로 찍는다.
         family, text = quoteattr(glyph.font_family), escape(glyph.char)
     else:
@@ -148,7 +151,13 @@ def _image(image: Image, index: int) -> str:
     )
 
 
-def page_to_svg(page: Page) -> str:
+def equation_fonts(page: Page) -> set[str]:
+    """쪽에 수식 글꼴로 찍은 글자가 있으면 그 글꼴 이름들."""
+    return {glyph.font_family for glyph in page.glyphs if glyph.font_family in EQUATION_FONTS}
+
+
+def page_to_svg(page: Page, equation_fallback: bool = False) -> str:
+    """equation_fallback이면 수식 글꼴 PUA를 유니코드로 바꿔 OFL 수학 글꼴 이름 사슬로 그린다(수식 글꼴이 없는 PC용)."""
     width, height = _pt(page.width), _pt(page.height)
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}pt" height="{height}pt" '
@@ -157,7 +166,7 @@ def page_to_svg(page: Page) -> str:
     ]
     for index, item in enumerate(page.items):
         if isinstance(item, Glyph):
-            parts.append(_glyph(item))
+            parts.append(_glyph(item, equation_fallback))
         elif isinstance(item, Line):
             parts.append(_line(item))
         elif isinstance(item, Rect):
