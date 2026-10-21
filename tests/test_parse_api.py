@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import struct
 
+import olefile
 import pytest
 from corpus_paths import CORPUS_ROOT
 from ole_builder import build_ole, deflate, file_header, record
@@ -11,6 +12,7 @@ from ole_builder import build_ole, deflate, file_header, record
 from rea_hwp import (
     BinDataItem,
     ControlChar,
+    CorruptEncryptedStreamError,
     CorruptFileError,
     HwpDocument,
     LimitExceededError,
@@ -181,6 +183,24 @@ def test_distributed_document_reads_view_text_sections():
     assert (document.header.distributed, document.body_storage) == (True, "ViewText")
     assert document.section_numbers == list(range(len(document.sections)))
     assert document.section_records(0)[0].tag == tags.PARA_HEADER
+
+
+@pytest.mark.skipif(DISTRIBUTED_DOC is None, reason="distribution sample not available")
+def test_distributed_document_without_view_text_is_unreadable_not_empty():
+    with olefile.OleFileIO(DISTRIBUTED_DOC) as ole:
+        streams = {"/".join(path): ole.openstream(path).read() for path in ole.listdir(streams=True)}
+    assert "BodyText/Section0" in streams
+    stripped = {name: data for name, data in streams.items() if not name.startswith("ViewText/")}
+    with pytest.raises(CorruptEncryptedStreamError, match="no ViewText/Section streams"):
+        HwpDocument.open(build_ole(stripped))
+
+
+def test_plain_document_without_body_text_stays_corrupt_file():
+    docinfo = record(tags.DOCUMENT_PROPERTIES, 0, bytes(26))
+    data = build_ole({"FileHeader": file_header(), "DocInfo": deflate(docinfo)})
+    with pytest.raises(CorruptFileError, match="BodyText has no Section streams") as raised:
+        HwpDocument.open(data)
+    assert not isinstance(raised.value, CorruptEncryptedStreamError)
 
 
 @needs_corpus

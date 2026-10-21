@@ -13,6 +13,7 @@ import olefile
 
 from . import crypto, tags
 from .errors import (
+    CorruptEncryptedStreamError,
     CorruptFileError,
     DrmProtectedError,
     LimitExceededError,
@@ -130,6 +131,11 @@ class HwpContainer:
         self.password = password
         if "DocInfo" not in raw_streams:
             raise CorruptFileError("DocInfo stream is missing; the file is damaged")
+        if not self.section_names() and self.header.distributed:
+            # 배포용 문서의 BodyText에는 「이 뷰어로는 읽을 수 없는 배포용 문서」 안내문만 있어 그쪽을 읽지 않는다.
+            raise CorruptEncryptedStreamError(
+                "distributed document has no ViewText/Section streams; its body cannot be read"
+            )
         if not self.section_names():
             raise CorruptFileError(f"{self.body_storage} has no Section streams; the file is damaged")
 
