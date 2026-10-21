@@ -146,12 +146,7 @@ class HwpDocument:
         """구역 번호 section의 레코드를 스트림에 나온 차례 그대로 담은 목록. 같은 문서에서는 같은 목록을 돌려준다."""
         cache = self.__dict__.setdefault("_section_records", {})
         if section not in cache:
-            stream = self._section_stream(section)
-            models_by_record = {id(node.record): node.model for node in stream.walk()}
-            cache[section] = [
-                RecordView(index, record.tag, record.level, record.payload, models_by_record[id(record)])
-                for index, record in enumerate(stream.stream.records)
-            ]
+            cache[section] = _record_views(self._section_stream(section))
         return cache[section]
 
     def paragraph(self, section: int, index: int) -> Paragraph:
@@ -211,6 +206,14 @@ class HwpDocument:
             for node in stream.walk()
             if isinstance(node.model, RawRecord)
         ]
+
+
+def _record_views(stream: DecodedStream) -> list[RecordView]:
+    models_by_record = {id(node.record): node.model for node in stream.walk()}
+    return [
+        RecordView(index, record.tag, record.level, record.payload, models_by_record[id(record)])
+        for index, record in enumerate(stream.stream.records)
+    ]
 
 
 def _section_number(stream_name: str) -> int:
