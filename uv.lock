@@ -306,7 +306,7 @@ wheels = [
 
 [[package]]
 name = "rea-hwp"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
