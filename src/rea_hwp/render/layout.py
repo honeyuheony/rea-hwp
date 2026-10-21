@@ -1444,6 +1444,18 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         runs[context] = ParagraphBorderRun.start(state.page, fill, area.x, area.width, top, opened)
         runs[context].extend(view.node, shape, bottom, last_line)
 
+    def paragraph_id(self, view: ParagraphView) -> str | None:
+        """글줄이 속한 문단의 원본 위치. 바탕쪽 글은 쪽마다 되풀이되므로 위치를 정하지 않는다."""
+        if self.__dict__.get("in_master_page"):
+            return None
+        return self.document.record_id(view.node.record)
+
+    def note_placed(self, page: Page, node: Node | None) -> None:
+        """표·그림 레코드가 page에 놓였다고 적는다. 바탕쪽 개체와 이미 적은 개체는 건너뛴다."""
+        located = None if node is None or self.__dict__.get("in_master_page") else self.document.record_id(node.record)
+        if located is not None and located not in page.objects:
+            page.objects.append(located)
+
     def draw_line(self, state: PageState, view: ParagraphView, index: int, area: Area) -> None:
         segment = view.segments[index]
         first, last = view.line_range(index)
@@ -1596,7 +1608,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         self.line_pieces = outer_pieces
         text = "".join(pieces)
         if text.strip():
-            state.page.text_lines.append(TextLine(text.rstrip(), line_start, baseline, x - line_start, max(sizes)))
+            state.page.text_lines.append(
+                TextLine(text.rstrip(), line_start, baseline, x - line_start, max(sizes), self.paragraph_id(view))
+            )
 
     def draw_vertical_line(
         self, state: PageState, view: ParagraphView, index: int, right: float, top: float, rotate_latin: bool
@@ -2005,7 +2019,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 self.append_glyph(state, char, sub, slot, device_round(sub_x), sub_baseline)
             sub_x += self.measurer.advance(char, sub, slot)
         if sub_text.strip():
-            state.page.text_lines.append(TextLine(sub_text, x + offset, sub_baseline, sub_width, sub.base_size))
+            state.page.text_lines.append(
+                TextLine(sub_text, x + offset, sub_baseline, sub_width, sub.base_size, self.paragraph_id(view))
+            )
 
     def place_overlap(self, state: PageState, model: OverlapCtrl, shape: CharShape, x: float, baseline: float) -> None:
         """글자 겹침. 한글 2022 PDF 실측(글자겹침 견본·kr_156369074·수출입 현황·table-vpos-01·k-water-rfp).

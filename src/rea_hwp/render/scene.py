@@ -85,6 +85,8 @@ class TextLine:
     width: float
     #: 줄에서 가장 큰 글자 크기.
     size: float
+    #: 이 줄이 속한 문단 PARA_HEADER의 원본 위치 "구역:index"(rea_hwp.RecordView.index). 바탕쪽·쪽 번호 글은 None.
+    paragraph: str | None = None
 
 
 @dataclass
@@ -111,6 +113,8 @@ class Page:
     text_lines: list[TextLine] = field(default_factory=list)
     #: 그리지 못하고 빠뜨린 개체. excluded(채점에서 빼는 영역)와 달리 이유를 함께 남긴다.
     missing: list[MissingObject] = field(default_factory=list)
+    #: 이 쪽에 놓은 표(TABLE)·그림(SHAPE_COMPONENT_PICTURE)의 원본 위치 "구역:index". 여러 쪽에 걸친 표는 첫 쪽에만.
+    objects: list[str] = field(default_factory=list)
 
     @property
     def glyphs(self) -> list[Glyph]:

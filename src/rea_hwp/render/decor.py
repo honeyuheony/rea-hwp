@@ -110,7 +110,11 @@ class DecorMixin:
         if master is not None and not hide & 0x04:
             area = Area(geometry.body_left, geometry.body_top, geometry.body_width)
             with self.painting_list(MASTER_LIST):
-                self.place_paragraphs(state, master, area)
+                self.in_master_page = True
+                try:
+                    self.place_paragraphs(state, master, area)
+                finally:
+                    self.in_master_page = False
         header = carry.headers.get(odd)
         footer = carry.footers.get(odd)
         with self.painting_list(BAND_LIST):

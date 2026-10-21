@@ -284,6 +284,8 @@ class ObjectsMixin:
                 self.draw_component(state, component, left, top, width, height)
         elif ctrl.record.payload[:4] == tags.TABLE_CTRL.to_bytes(4, "little"):
             placed = self.draw_table(state, ctrl, left, top)
+            if placed is not None:
+                self.note_placed(placed.first_state.page, ctrl.find(tags.TABLE))
             if placed is not None and placed.last_state is not state and self.in_body and _is_top_and_bottom(model):
                 self.continue_stacked_box(state, placed.last_state, placed.bottom + margins[3])
             if placed is not None and anchor_state is not state and placed.last_state is placed.first_state:
@@ -688,6 +690,7 @@ class ObjectsMixin:
         picture = component.find(tags.SHAPE_COMPONENT_PICTURE)
         if picture is not None and isinstance(picture.model, ShapePicture):
             self.draw_picture(state, picture.model, left, top, width, height)
+            self.note_placed(state.page, picture)
         textart = component.find(tags.SHAPE_COMPONENT_TEXTART)
         if textart is not None:
             drawing, reason = self.textart_result(textart, width, height)
