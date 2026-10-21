@@ -149,6 +149,12 @@ class HwpDocument:
             cache[section] = _record_views(self._section_stream(section))
         return cache[section]
 
+    def docinfo_records(self) -> list[RecordView]:
+        """DocInfo 레코드를 스트림에 나온 차례 그대로 담은 목록. index는 section_records와 같은 규칙으로 센다."""
+        if "_docinfo_records" not in self.__dict__:
+            self._docinfo_records = _record_views(self.doc_info)
+        return self._docinfo_records
+
     def paragraph(self, section: int, index: int) -> Paragraph:
         """section_records(section)[index]가 PARA_HEADER인 문단의 글·글자 모양 구간·문단 모양·스타일."""
         return read_paragraph(self.section_records(section), section, index)

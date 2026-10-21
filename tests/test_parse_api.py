@@ -128,6 +128,20 @@ def test_section_records_model_is_typed_or_raw_bytes():
 
 
 @needs_corpus
+@pytest.mark.parametrize("path", [SIMPLE_DOC, FOOTNOTE_DOC, VIEWTEXT_WITHOUT_FLAG_DOC, DISTRIBUTED_DOC])
+def test_docinfo_records_follow_doc_info_stream_order(path):
+    document = HwpDocument.open(path)
+    records = document.docinfo_records()
+    assert [(view.index, view.tag, view.level, view.payload) for view in records] == [
+        (index, item.tag, item.level, item.payload) for index, item in enumerate(document.doc_info.stream.records)
+    ]
+    models = [node.model for node in document.doc_info.walk()]
+    assert all(view.model is model for view, model in zip(records, models, strict=True))
+    assert records[0].tag == tags.DOCUMENT_PROPERTIES
+    assert document.docinfo_records() is records
+
+
+@needs_corpus
 def test_real_footnote_paragraphs_point_at_footnote_ctrl_headers():
     document = HwpDocument.open(FOOTNOTE_DOC)
     records = document.section_records(0)

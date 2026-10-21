@@ -16,11 +16,11 @@ from .models.shapes import ShapePicture
 
 @dataclass(frozen=True)
 class RecordView:
-    """구역 스트림의 레코드 하나.
+    """구역 스트림 또는 DocInfo 스트림의 레코드 하나.
 
-    index는 구역 스트림(압축·암호를 푼 BodyText/SectionN, 배포용 문서는 ViewText/SectionN)의 레코드 머리를 앞에서부터
-    차례로 읽은 평평한 목록에서 0부터 센 위치다. level로 트리를 짜기 전, 스트림에 나온 차례 그대로 세며, 모델로
-    해석하지 못한 레코드도 하나로 센다. 이 규칙은 바꾸지 않는다.
+    index는 구역 스트림(압축·암호를 푼 BodyText/SectionN, 배포용 문서는 ViewText/SectionN)이나 DocInfo 스트림의 레코드
+    머리를 앞에서부터 차례로 읽은 평평한 목록에서 0부터 센 위치다. level로 트리를 짜기 전, 스트림에 나온 차례 그대로
+    세며, 모델로 해석하지 못한 레코드도 하나로 센다. 이 규칙은 바꾸지 않는다.
     """
 
     index: int
