@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .. import tags
+from ..document import Node
 from ..models.controls import ObjectCtrlHeader, TextWrap, VertRelTo
 from ..models.docinfo import CharShape, ParaShape
 from ..models.paragraph import LINE_BREAK, ControlChar, LineSeg
@@ -569,9 +571,15 @@ def flow_end(view: ParagraphView, objects: bool = True) -> int:
     """다음 문단이 이어질 세로 위치(문단 아래 간격 제외). objects면 위아래 배치 개체가 줄보다 길 때 개체 아래다."""
     last = view.segments[-1]
     end = last.vertical_pos + last.line_height + last.line_spacing
+    return max(end, objects_end(view)) if objects else end
+
+
+def objects_end(view: ParagraphView, model_of: Callable[[Node], ObjectCtrlHeader] | None = None) -> int:
+    """문단 기준 위아래 배치 개체 아래 끝 가운데 가장 아래(없으면 0). model_of는 개체 머리를 바꿔 준다(크기 재계산)."""
+    end = 0
     top = view.segments[0].vertical_pos
-    for ctrl in view.controls.values() if objects else ():
-        model = ctrl.model
+    for ctrl in view.controls.values():
+        model = model_of(ctrl) if model_of is not None and isinstance(ctrl.model, ObjectCtrlHeader) else ctrl.model
         if (
             isinstance(model, ObjectCtrlHeader)
             and not model.treat_as_char

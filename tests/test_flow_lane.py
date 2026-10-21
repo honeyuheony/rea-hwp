@@ -773,3 +773,10 @@ def test_square_wrapped_object_stays_below_lines_before_its_anchor():
     page = _open("oss/rhwp/3-10월_교육_통합_2022.hwp")[3]
     tops = [item.y1 / 100 for item in page.items if isinstance(item, Line) and item.y1 == item.y2 and item.x1 > 49000]
     assert any(abs(top - 171.05) < 0.3 for top in tops), sorted(tops)[:5]
+
+
+@needs_corpus
+def test_text_after_resized_top_and_bottom_table_moves_up():
+    # 한글 2022 PDF 12쪽 미주: 수식 칸 때문에 3771 → 3546으로 줄어든 위아래 배치 표 뒤 문단은 그 차이만큼 올라간다.
+    page = _open("oss/rhwp/3-11월_실전_통합_2022.hwp")[11]
+    assert _glyphs_at(page, "따", 301.92, 686.64)

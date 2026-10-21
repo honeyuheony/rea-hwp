@@ -587,7 +587,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             if stored_view is not None:
                 # 다시 짠 줄이 저장 줄보다 길거나 짧으면 그만큼 뒤 줄을 옮긴다. 앞 줄 비교값은 저장 줄 기준이다.
                 old = stored_view.segments[-1]
-                shift = _line_end(view.segments[-1]) - _line_end(old)
+                shift = self.relaid_shift(view, stored_view)
                 state.zone_top += shift
                 relaid_shift += shift
                 previous_vpos = old.vertical_pos
@@ -1137,7 +1137,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             relaid = self.equation_relaid(view)
             if relaid is not None:
                 # 수식 크기로 길어지거나 짧아진 만큼 뒤 문단을 옮긴다(본문 layout_section과 같다).
-                shift += _line_end(relaid.segments[-1]) - _line_end(view.segments[-1])
+                shift += self.relaid_shift(relaid, view)
                 views.append(relaid)
                 last_vpos = relaid.segments[-1].vertical_pos
                 continue
@@ -1341,6 +1341,16 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             view.chars, view.positions, boxes, view.para_shape, int(width), empty_height, start, shifts
         )
         return dataclasses.replace(view, segments=segments)
+
+    def relaid_shift(self, relaid: ParagraphView, stored: ParagraphView) -> int:
+        """다시 짠 문단 때문에 뒤 문단이 옮겨 갈 거리. 뒤 문단은 줄 끝과 위아래 배치 개체 아래 중 아래에서 시작한다.
+
+        크기가 바뀐 표가 그 자리를 정하면 표 높이 차이만큼 옮긴다(재저장본 3-11월_실전_통합_2022 미주: 표 3771 → 3546,
+        다음 문단 14514 → 14176 = 수식 줄 −113 + 표 −225).
+        """
+        old = max(_line_end(stored.segments[-1]), reflow.objects_end(stored))
+        new = max(_line_end(relaid.segments[-1]), reflow.objects_end(relaid, self.object_model))
+        return new - old
 
     def equation_relaid(self, view: ParagraphView) -> ParagraphView | None:
         """크기가 바뀐 수식(또는 그런 수식을 셀에 담은 표)이 든 문단을 한글처럼 다시 짠 보기. 없으면 None.
