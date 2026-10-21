@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from . import tags
@@ -12,6 +13,31 @@ from .errors import CorruptFileError
 from .models.base import RecordModel
 from .models.paragraph import ControlChar, ParaCharShape, ParaHeader, ParaText
 from .models.shapes import ShapePicture
+
+
+class DeferredModel:
+    """RecordView.model 자리에 두면 그 모델을 처음 읽을 때 load()로 해석한다."""
+
+    __slots__ = ("load",)
+
+    def __init__(self, load: Callable[[], RecordModel]) -> None:
+        self.load = load
+
+
+class _ModelField:
+    """RecordView.model 필드. 값은 인스턴스 __dict__["model"]에 두고, DeferredModel이면 처음 읽을 때 바꿔 넣는다."""
+
+    def __get__(self, instance: RecordView | None, owner: type | None = None) -> RecordModel:
+        if instance is None:
+            # dataclass가 기본값을 물을 때다. 기본값이 없는 필드로 둔다.
+            raise AttributeError("model")
+        value = instance.__dict__["model"]
+        if isinstance(value, DeferredModel):
+            value = instance.__dict__["model"] = value.load()
+        return value
+
+    def __set__(self, instance: RecordView, value: RecordModel | DeferredModel) -> None:
+        instance.__dict__["model"] = value
 
 
 @dataclass(frozen=True)
@@ -28,8 +54,12 @@ class RecordView:
     level: int
     #: 레코드 머리를 뺀 원본 바이트.
     payload: bytes
-    #: 타입 모델. 모델이 없거나 해석 결과가 원본과 다르면 원본 바이트를 담은 RawRecord다.
-    model: RecordModel
+    #: 타입 모델. 모델이 없거나 해석 결과가 원본과 다르면 원본 바이트를 담은 RawRecord다. 문서에서 꺼낸 목록은 이 값을
+    #: 처음 읽을 때 해석한다.
+    model: RecordModel = _ModelField()  # type: ignore[assignment]
+
+    def __getstate__(self) -> dict:
+        return {**self.__dict__, "model": self.model}
 
 
 def subtree_end(records: list[RecordView], index: int) -> int:

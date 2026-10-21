@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pickle
 import struct
 
 import olefile
@@ -22,6 +23,7 @@ from rea_hwp import (
     subtree_end,
     tags,
 )
+from rea_hwp.document import MAX_NESTING
 from rea_hwp.models.base import RawRecord
 from rea_hwp.models.docinfo import IdMappings
 from rea_hwp.record import parse_records
@@ -285,3 +287,42 @@ def test_truncated_picture_record_is_corrupt_file():
     document = _single_record_document(tags.SHAPE_COMPONENT_PICTURE, bytes(10))
     with pytest.raises(CorruptFileError):
         picture_bin_data_id(document.section_records(0)[0])
+
+
+def test_record_models_are_decoded_when_first_read_and_shared_with_the_tree(monkeypatch):
+    import rea_hwp.document as document_module
+
+    calls = []
+    original = document_module.decode_record
+    monkeypatch.setattr(document_module, "decode_record", lambda *args: calls.append(args[0].tag) or original(*args))
+    document = _tab_and_footnote_document()
+    records = document.section_records(0)
+    assert calls == []
+    assert [view.tag for view in records[:2]] == [tags.PARA_HEADER, tags.PARA_TEXT] and calls == []
+    text = records[1].model
+    assert calls == [tags.PARA_TEXT]
+    assert records[1].model is text and calls == [tags.PARA_TEXT]
+    nodes = list(document.sections[0].walk())
+    assert nodes[1].model is text
+    assert all(view.model is node.model for view, node in zip(records, nodes, strict=True))
+    assert len(calls) == len(records)
+
+
+def test_record_view_with_deferred_model_pickles_and_compares_with_decoded_model():
+    view = _tab_and_footnote_document().section_records(0)[1]
+    restored = pickle.loads(pickle.dumps(view))
+    assert restored == view and restored.model == view.model
+
+
+def _nested_document(depth: int) -> bytes:
+    section = b"".join(
+        record(tags.PARA_HEADER if level == 0 else tags.CTRL_HEADER, level, bytes(4)) for level in range(depth)
+    )
+    docinfo = record(tags.DOCUMENT_PROPERTIES, 0, bytes(26))
+    return build_ole({"FileHeader": file_header(), "DocInfo": deflate(docinfo), "BodyText/Section0": deflate(section)})
+
+
+def test_records_nested_deeper_than_the_limit_are_rejected_when_opening():
+    assert len(HwpDocument.open(_nested_document(MAX_NESTING + 1)).sections[0].nodes) == 1
+    with pytest.raises(CorruptFileError, match="nested too deeply"):
+        HwpDocument.open(_nested_document(MAX_NESTING + 2))
