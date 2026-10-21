@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib.metadata
 import struct
 
 import pytest
 from corpus_paths import CORPUS_ROOT
 
+import rea_hwp
 from rea_hwp import crypto
 from rea_hwp.cli import main as cli_main
 from rea_hwp.container import HwpContainer, HwpFormatError
@@ -111,3 +113,7 @@ def test_text_layer_places_line_text_by_page_ratio():
         '<div class="text-layer"><span style="left: 10%; top: 5.75%; font-size: 10.0000cqw" '
         'data-w="0.300000">가 &lt;나&gt;</span><br></div>'
     )
+
+
+def test_package_version_matches_installed_metadata():
+    assert rea_hwp.__version__ == importlib.metadata.version("rea-hwp")
