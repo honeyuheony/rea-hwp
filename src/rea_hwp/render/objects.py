@@ -635,7 +635,18 @@ class ObjectsMixin:
         vert_offset = vertical_offset(model)
         top = _align(ref_y, ref_h, height, model.vert_align, vert_offset)
         line = _anchor_line(view, anchor)
-        if self.in_body and model.vert_rel_to == REL_COLUMN_OR_PARA and model.text_wrap == TextWrap.SQUARE and line:
+        if (
+            model.vert_rel_to == REL_COLUMN_OR_PARA
+            and model.text_wrap == TextWrap.TOP_AND_BOTTOM
+            and line
+            and view.segments[line].vertical_pos > view.segments[0].vertical_pos
+        ):
+            # 위아래 배치 개체는 조판 부호가 든 줄 위를 기준으로 오프셋만큼 내려 놓는다. 코퍼스에서 부호가 둘째 줄
+            # 이후인 문단 기준 위아래 배치 5개(본문 3, 셀 2)는 문단 위 기준이면 저장 줄과 겹쳐 밀려야 하지만 밀린 줄이
+            # 없고, 부호 줄 위 기준이면 모두 겹치지 않는다(정책연구용역 중간진도보고서: 부호 셋째 줄 12000 + 오프셋
+            # 3618 = 넷째 줄 끝 15000 아래). 부호 줄이 다음 쪽으로 되감긴 문단은 그 쪽을 여기서 몰라 그대로 둔다.
+            top = _align(area.y + view.segments[line].vertical_pos, ref_h, height, model.vert_align, vert_offset)
+        elif self.in_body and model.vert_rel_to == REL_COLUMN_OR_PARA and model.text_wrap == TextWrap.SQUARE and line:
             # 한글은 줄을 차례로 짜다 조판 부호가 든 줄에서 개체를 놓아, 이미 짠 앞 줄 위로는 올리지 않는다(코퍼스 본문
             # 문단 기준 어울림 개체 중 오프셋 0이고 부호가 둘째 줄 이후인 53개: 49개는 처음 좁아진 저장 줄이 부호 줄,
             # 4개는 앞 개체가 먼저 좁힘. 3-10월_교육_통합_2022 4쪽 표 위 선 171.05pt = 둘째 줄 위).

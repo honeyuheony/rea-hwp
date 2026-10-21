@@ -811,3 +811,11 @@ def test_stored_paragraph_after_reflowed_heading_follows_it():
     # 위 간격을 두고 이어진다(정답 「완」 기준선 190.6pt, 잘못 이으면 25.6pt 아래).
     page = _open("oss/hwp-rs/crates__hwp__tests__integration__hancom__files__한글문서파일형식_수식_revision1.3.hwp")[6]
     assert _glyphs_at(page, "완", 107.04, 190.57)
+
+
+@needs_corpus
+def test_top_and_bottom_object_follows_its_anchor_line():
+    # 한글 2022 PDF 12쪽 그림 7: 부호가 문단 넷째 줄에 있는 위아래 배치 표(오프셋 3618)는 그 줄 위 기준이라
+    # 캡션 「도」 기준선이 403.8pt다(문단 위 기준이면 60pt 위).
+    page = _open(POLICY_REPORT)[11]
+    assert _glyphs_at(page, "도", 346.8, 403.81)
