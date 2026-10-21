@@ -16,11 +16,14 @@ from .models.shapes import ShapePicture
 
 
 class DeferredModel:
-    """RecordView.model 자리에 두면 그 모델을 처음 읽을 때 load()로 해석한다."""
+    """RecordView.model 자리에 두면 그 모델을 처음 읽을 때 load(RecordView.index)로 해석한다.
+
+    한 스트림의 RecordView들이 하나를 나눠 쓴다(레코드마다 만들면 레코드 수에 비례해 메모리가 는다).
+    """
 
     __slots__ = ("load",)
 
-    def __init__(self, load: Callable[[], RecordModel]) -> None:
+    def __init__(self, load: Callable[[int], RecordModel]) -> None:
         self.load = load
 
 
@@ -33,7 +36,7 @@ class _ModelField:
             raise AttributeError("model")
         value = instance.__dict__["model"]
         if isinstance(value, DeferredModel):
-            value = instance.__dict__["model"] = value.load()
+            value = instance.__dict__["model"] = value.load(instance.index)
         return value
 
     def __set__(self, instance: RecordView, value: RecordModel | DeferredModel) -> None:

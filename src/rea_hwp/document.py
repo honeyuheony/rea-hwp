@@ -75,7 +75,10 @@ class DecodedStream:
             stack.append(index)
 
     def model(self, index: int) -> RecordModel:
-        """stream.records[index]의 타입 모델. 한 번 해석한 모델은 nodes와 RecordView가 같은 객체로 나눠 쓴다."""
+        """stream.records[index]의 타입 모델. 한 번 해석한 모델은 nodes와 RecordView가 같은 객체로 나눠 쓴다.
+
+        잠그지 않는다. 여러 스레드가 같은 레코드를 처음 동시에 꺼내면 두 번 해석해 값은 같고 객체는 다를 수 있다.
+        """
         model = self._models[index]
         if model is None:
             records = self.stream.records
@@ -245,10 +248,9 @@ class HwpDocument:
 
 
 def _record_views(stream: DecodedStream) -> list[RecordView]:
+    deferred = DeferredModel(stream.model)
     return [
-        RecordView(
-            index, record.tag, record.level, record.payload, DeferredModel(functools.partial(stream.model, index))
-        )
+        RecordView(index, record.tag, record.level, record.payload, deferred)
         for index, record in enumerate(stream.stream.records)
     ]
 

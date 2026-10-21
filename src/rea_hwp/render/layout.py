@@ -1471,9 +1471,9 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
 
     @functools.cached_property
     def cell_table_records(self) -> frozenset[int]:
-        """표 칸 안 어딘가에 든 TABLE 레코드의 id.
+        """다른 표 개체 안(칸·캡션) 어딘가에 든 TABLE 레코드의 id.
 
-        칸 문단은 칸 LIST_HEADER의 자식이 아니라 같은 수준의 형제라, 표 개체 아래에서 자기 TABLE 말고는 모두 칸 안이다.
+        칸 문단은 칸 LIST_HEADER의 자식이 아니라 같은 수준의 형제라, 표 개체 아래에서 자기 TABLE 말고는 모두 표 안이다.
         """
         found: set[int] = set()
         pending = [(node, False) for stream in self.document.sections for node in stream.nodes]

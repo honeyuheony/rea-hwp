@@ -25,8 +25,8 @@ def paragraph_pages(pages: list[Page]) -> dict[str, int]:
 def table_row_pages(pages: list[Page]) -> dict[str, dict[int, int]]:
     """표(TABLE) 원본 위치 → {행 번호(0부터, 셀의 행 주소): 그 행이 처음 놓인 쪽 번호(Page.number)}.
 
-    쪽 경계에서 나뉜 행은 처음 놓인 쪽이다. 셀 안 표와 바탕쪽 표는 키가 없다(셀 안 표는 그것을 담은 바깥 표 행으로
-    센다). 표의 첫 행 쪽은 paragraph_pages의 표 쪽과 같다.
+    쪽 경계에서 나뉜 행은 처음 놓인 쪽이다. 표 안(칸·캡션)의 표와 바탕쪽 표는 키가 없다(칸 안 표는 그것을 담은 바깥 표
+    행으로 센다). 머리말·꼬리말 표는 처음 놓인 쪽이다. 표의 첫 행 쪽은 paragraph_pages의 표 쪽과 같다.
     """
     first_pages: dict[str, dict[int, int]] = {}
     for page in sorted(pages, key=lambda page: page.number):
