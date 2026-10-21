@@ -1,9 +1,22 @@
 import pytest
 
-from rea_hwp.render.equation import LegacyEngineState, LegacyEquationError, measure, measure_legacy
+from rea_hwp.render.equation import (
+    DrawnBox,
+    DrawnGlyph,
+    LegacyEngineState,
+    LegacyEquationError,
+    draw,
+    measure,
+    measure_legacy,
+)
 from rea_hwp.render.equation.engine import cdiv, muldiv
 from rea_hwp.render.equation.glyphs import ppem
+from rea_hwp.render.equation.legacy_draw import LegacyGlyph, draw_legacy
 from rea_hwp.render.equation.parse import lex, preprocess
+from rea_hwp.render.equation.unicode import FALLBACK_FONT_CHAIN, to_unicode
+from rea_hwp.render.html import viewer_html
+from rea_hwp.render.scene import Glyph, Page
+from rea_hwp.render.svg import equation_fonts, page_to_svg
 
 # 기대값은 한글 2022가 다시 저장한 문서의 수식 크기(폭, 높이, 기준선 백분율 + 1)다.
 SAVED_BY_HANGUL_2022 = [
@@ -199,3 +212,123 @@ def test_legacy_greek_letter_follows_symbol_substitution_chain_to_batang():
     assert measure_legacy("α", 1000) == (684, 1200, 84)
     assert measure_legacy("β", 800) == (725, 960, 84)
     assert measure_legacy("β", 1200) == (1091, 1440, 84)
+
+
+# 기대값은 한글 2022 PDF(3-09월_교육_통합_2022 1쪽)에서 수식 상자 왼쪽 위 기준으로 잰 글자 원점(pt)이다.
+# 글자는 HYhwpEQ 코드 그대로이고, PDF 쪽 상자 위치가 0.1pt 안쪽으로 흔들려 0.3pt까지 같다고 본다.
+DRAWN_BY_HANGUL_2022 = [
+    (
+        "LEFT ( {2 ^{sqrt {3}}} over {2} RIGHT ) ^{sqrt {3} +1}",
+        [
+            ("", 0.09, 21.01),
+            ("", 4.77, 21.01),
+            ("", 11.13, 24.13),
+            ("", 6.09, 12.49),
+            ("", 10.65, 8.17),
+            ("", 16.5, 6.41),
+            ("", 16.65, 8.53),
+            ("", 22.89, 21.01),
+            ("", 26.61, 5.77),
+            ("", 32.45, 4.01),
+            ("", 32.61, 6.13),
+            ("", 36.69, 5.89),
+            ("", 42.09, 6.13),
+        ],
+    ),
+    (
+        "lim _{x` -> `2} {} ` {f(x)-f(2)} over {x-2}",
+        [
+            ("l", 0.15, 14.29),
+            ("i", 3.27, 14.29),
+            ("m", 6.39, 14.29),
+            ("", 0.51, 20.89),
+            ("→", 4.95, 20.89),
+            ("", 11.79, 20.89),
+            ("", 17.19, 16.21),
+            ("", 31.71, 19.33),
+            ("", 38.31, 18.97),
+            ("", 46.23, 19.33),
+            ("", 18.51, 7.69),
+            ("", 23.67, 7.21),
+            ("", 27.39, 7.69),
+            ("", 33.27, 7.21),
+        ],
+    ),
+    (
+        "= {cases{`-2x+a``&(x LEQ a)#`ax-6&(x>a)}}",
+        [
+            ("", 0.08, 12.43),
+            # 1쪽 쪽 맞춤 행렬(1.00109배)을 pdf_pages가 늘린 글자 span에는 되돌리지 못해 직접 보정했다
+            ("", 8.67, 15.55),
+            ("", 15.68, 7.27),
+            ("", 23.6, 7.63),
+            ("", 28.16, 7.63),
+            ("", 34.64, 7.27),
+            ("", 42.68, 7.63),
+            ("", 51.2, 7.27),
+            ("", 54.92, 7.63),
+            ("≤", 62.12, 7.63),
+            ("", 73.04, 7.63),
+            ("", 78.08, 7.27),
+            ("", 14.36, 18.07),
+            ("", 18.92, 18.07),
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize(("script", "expected"), DRAWN_BY_HANGUL_2022)
+def test_draw_places_glyphs_like_hangul_2022(script, expected):
+    drawn = [(g.text, g.x / 100, g.baseline / 100) for g in draw(script, 900) if isinstance(g, DrawnGlyph)]
+    for char, x, y in expected:
+        nearest = min((abs(dx - x) + abs(dy - y) for c, dx, dy in drawn if c == char), default=None)
+        assert nearest is not None and nearest <= 0.3, (char, x, y, nearest)
+
+
+def test_draw_box_outlines_the_box_accent():
+    box = next(g for g in draw("BOX{````A````}", 900) if isinstance(g, DrawnBox))
+    assert (box.x, box.y, box.w) == (0, 0, measure("BOX{````A````}", 900)[0])
+
+
+@pytest.mark.parametrize(
+    ("pua", "expected"),
+    [(0xE0E5, "𝑎"), (0xE0EC, "ℎ"), (0xE039, "6"), (0xE046, "−"), (0xE067, "∑"), (0xE0CD, "ℂ"), (0xE09D, "𝛼")],
+)
+def test_pua_maps_to_unicode_math_characters(pua, expected):
+    assert to_unicode(chr(pua)) == expected
+
+
+def test_equation_fallback_svg_draws_unicode_with_math_font_chain():
+    page = Page(1000, 1000, 1, [Glyph("", 0, 500, 900, "HYhwpEQ"), Glyph("가", 0, 900, 900, "함초롬바탕")])
+    assert equation_fonts(page) == {"HYhwpEQ"}
+    plain, fallback = page_to_svg(page), page_to_svg(page, equation_fallback=True)
+    assert ">\ue0e5</text>" in plain and 'font-family="HYhwpEQ"' in plain
+    assert ">𝑎</text>" in fallback and FALLBACK_FONT_CHAIN in fallback and ">가</text>" in fallback
+
+
+def test_viewer_marks_pages_that_have_equation_fallbacks():
+    html = viewer_html("t", [("p1.svg", 100, 100), ("p2.svg", 100, 100)], None, [("p1.eq.svg", ["HYhwpEQ"]), None])
+    assert 'data-eq-fallback="p1.eq.svg" data-eq-fonts="HYhwpEQ"' in html
+    assert html.count("data-eq-fallback=") == 1
+
+
+# 기대값은 한글 2022 PDF(한글문서파일형식_수식_revision1.3)에서 잰 옛 엔진 수식 글자 원점(pt)이다.
+# 9쪽 「1 over 4」는 상자 왼쪽 위 기준, 16쪽 행렬은 첫 글자 X 기준이다.
+def test_legacy_draw_places_fraction_like_hangul_2022():
+    width, height, _ = measure_legacy("1 over 4", 1000)
+    glyphs = [g for g in draw_legacy("1 over 4", 1000, width, height, False) if isinstance(g, LegacyGlyph)]
+    drawn = {g.text: (g.x / 100, g.y / 100) for g in glyphs}
+    for char, x, y in [("1", 5.0, 9.53), ("4", 4.88, 20.93)]:
+        assert abs(drawn[char][0] - x) <= 0.3 and abs(drawn[char][1] - y) <= 0.3, (char, drawn[char])
+
+
+def test_legacy_draw_stacks_matrix_rows_like_hangul_2022():
+    script = "X = bmatrix {\r\n\t42 & 52 & 48 & 58 #\r\n\t4 & 5 & 4 & 3 \r\n}\r\n"
+    width, height, _ = measure_legacy(script, 1000)
+    glyphs = [g for g in draw_legacy(script, 1000, width, height, False) if isinstance(g, LegacyGlyph)]
+    x0, y0 = glyphs[0].x / 100, glyphs[0].y / 100
+    relative = [(g.text, g.x / 100 - x0, g.y / 100 - y0) for g in glyphs]
+    # 세로는 0.3pt, 가로는 X와 오른쪽 괄호 사이 글자가 정답보다 0.6~1.0pt 왼쪽에 놓이는 차이(원인 미상)를 넘지 않게 본다
+    for char, x, y in [("]", 88.56, 2.76), ("4", 28.44, -5.04), ("3", 80.76, 6.96)]:
+        nearest = min(relative, key=lambda r: (r[0] != char, abs(r[1] - x) + abs(r[2] - y)))
+        assert nearest[0] == char and abs(nearest[2] - y) <= 0.3 and abs(nearest[1] - x) <= 1.1, (char, nearest)

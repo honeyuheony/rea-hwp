@@ -49,10 +49,12 @@ from .common import (
     TextChar,
     column_layout,
 )
-from .equation import LegacyEngineState, LegacyEquationError, measure_legacy
+from .equation import DrawnBox, DrawnGlyph, LegacyEngineState, LegacyEquationError, measure_legacy
+from .equation import draw as draw_equation
 from .equation import measure as measure_equation
 from .equation.engine import muldiv
 from .equation.glyphs import EQUATION_FONT, glyph_table
+from .equation.legacy_draw import LegacyLine, draw_legacy
 from .forms import draw_form
 from .ole import content_metafile, has_ooxml_chart
 from .ooxml_chart import draw_ooxml_chart, ooxml_chart_contents
@@ -75,6 +77,8 @@ PARALLEL_COLUMNS = 2
 CAPTION_LEFT, CAPTION_RIGHT, CAPTION_TOP, CAPTION_BOTTOM = range(4)
 #: 한글 2022 수식 엔진(HwpPlugin)의 버전 문자열. 다른 버전은 HwpApp 옛 엔진(FUN_106578c0)이 계산한다.
 NEW_EQUATION_ENGINE = "Equation Version 60"
+#: 수식 BOX 테두리 굵기(HWPUNIT). 기본 펜(폭 0)은 장치 1점이라 정답 PDF(600dpi)에서 0.12pt다.
+EQUATION_PEN = 12
 
 
 @dataclass
@@ -114,8 +118,98 @@ class ObjectsMixin:
             node = stack.pop()
             stack.extend(reversed(node.children))
             if _is_legacy_equation(node):
+                self.equation_boxes[("legacy_flags", id(node))] = state.flags
                 self.equation_boxes[id(node)] = _recomputed_equation(node, state)
         self.equation_boxes[_LEGACY_DONE] = None
+
+    def equation_glyphs(self, ctrl: Node) -> list[DrawnGlyph | DrawnBox] | None:
+        """새 엔진 수식의 글자(상자 왼쪽 위 기준). 수식이 아니거나 아직 그리지 못하는 수식이면 None."""
+        key = ("glyphs", id(ctrl))
+        if key not in self.equation_boxes:
+            equation = ctrl.find(tags.EQEDIT) if _is_equation(ctrl) else None
+            glyphs = None
+            if (
+                equation is not None
+                and isinstance(equation.model, EqEdit)
+                and equation.model.version == NEW_EQUATION_ENGINE
+                and self.equation_box(ctrl) is not None
+            ):
+                model = equation.model
+                try:
+                    glyphs = draw_equation(model.script or "", model.font_size, model.font_name or EQUATION_FONT)
+                except (KeyError, NotImplementedError):
+                    # 글리프 표에 없는 글자와 아직 옮기지 않은 객체는 그리지 않고 범위 밖으로 남긴다.
+                    glyphs = None
+            self.equation_boxes[key] = glyphs
+        return self.equation_boxes[key]
+
+    def draw_equation(self, state: PageState, ctrl: Node, left: float, top: float, width: float, height: float) -> None:
+        if _is_legacy_equation(ctrl):
+            self.draw_legacy_equation(state, ctrl, left, top, width, height)
+            return
+        glyphs = self.equation_glyphs(ctrl)
+        if glyphs is None:
+            return
+        model = ctrl.find(tags.EQEDIT).model
+        # EQEDIT attr bit 0이 켜져 있으면 저장 폭을 그대로 두고 계산한 상자를 그 가운데에 둔다(_recomputed_equation).
+        box_width = measure_equation(model.script or "", model.font_size, model.font_name or EQUATION_FONT)[0]
+        left += (width - box_width) / 2 if model.attr & 1 else 0
+        color = _colorref(model.color)
+        for glyph in glyphs:
+            if isinstance(glyph, DrawnBox):
+                # 기본 펜은 장치 1점 선이다(정답 PDF: 600dpi에서 0.12pt).
+                rect = Rect(left + glyph.x, top + glyph.y, glyph.w, glyph.h, "#ffffff", "#000000", EQUATION_PEN)
+                state.page.items.append(rect)
+                continue
+            if not glyph.text.strip():
+                continue
+            state.page.items.append(
+                Glyph(
+                    glyph.text,
+                    left + glyph.x,
+                    top + glyph.baseline,
+                    glyph.height,
+                    glyph.font,
+                    color,
+                    glyph.bold,
+                    glyph.italic,
+                    scale_x=glyph.width * 2 / glyph.height if glyph.height else 1.0,
+                )
+            )
+
+    def draw_legacy_equation(
+        self, state: PageState, ctrl: Node, left: float, top: float, width: float, height: float
+    ) -> None:
+        """옛 엔진 수식. 상자에 맞춰 늘리거나(attr 0) 가운데에 둔다(FUN_1026ea60 방식 2·3)."""
+        if self.equation_box(ctrl) is None:
+            return
+        model = ctrl.find(tags.EQEDIT).model
+        flags = self.equation_boxes.get(("legacy_flags", id(ctrl)), 0)
+        try:
+            size = (round(width), round(height))
+            drawn = draw_legacy(model.script or "", model.font_size, *size, model.attr != 0, flags)
+        except KeyError:
+            # 옛 수식 글꼴 표에 없는 글자는 그리지 않고 범위 밖으로 남긴다(크기 계산과 같은 조건).
+            return
+        color = _colorref(model.color)
+        for item in drawn:
+            if isinstance(item, LegacyLine):
+                line = Line(left + item.x1, top + item.y1, left + item.x2, top + item.y2, item.width, color)
+                state.page.items.append(line)
+            elif item.text.strip():
+                state.page.items.append(
+                    Glyph(
+                        item.text,
+                        left + item.x,
+                        top + item.y,
+                        item.height,
+                        item.font,
+                        color,
+                        item.bold,
+                        item.italic,
+                        scale_x=item.ratio / 100,
+                    )
+                )
 
     def resized_equation(self, ctrl: Node) -> bool:
         box = self.equation_box(ctrl)
@@ -278,6 +372,7 @@ class ObjectsMixin:
         first, last, bottom = state, state, top + height
         if self.out_of_scope(ctrl, (width, height)):
             state.page.excluded.append((left, top, width, height))
+            self.draw_equation(state, ctrl, left, top, width, height)
             component = ctrl.find(tags.SHAPE_COMPONENT)
             if component is not None:
                 # 옮기지 못한 개체도 그릴 수 있는 만큼(새 차트의 표현 그림 등)은 그리고 채점에서만 뺀다.

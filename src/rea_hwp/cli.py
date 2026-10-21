@@ -11,7 +11,7 @@ from .document import HwpDocument
 from .render.html import text_layer, viewer_html
 from .render.layout import layout_document
 from .render.options import RenderOptions
-from .render.svg import HU_PER_PT, page_glyph_table, page_to_svg
+from .render.svg import HU_PER_PT, equation_fonts, page_glyph_table, page_to_svg
 
 
 def render(args: argparse.Namespace) -> int:
@@ -22,13 +22,23 @@ def render(args: argparse.Namespace) -> int:
     listing = []
     layers = []
     glyphs = []
+    fallbacks = []
     for page in pages:
         name = f"page-{page.number:04d}.svg"
         (output / name).write_text(page_to_svg(page), encoding="utf-8")
         listing.append((name, page.width / HU_PER_PT, page.height / HU_PER_PT))
         layers.append(text_layer(page.text_lines, page.width, page.height))
         glyphs.append(page_glyph_table(page))
-    (output / "index.html").write_text(viewer_html(Path(args.file).name, listing, layers), encoding="utf-8")
+        fonts = equation_fonts(page)
+        if fonts:
+            # 수식 글꼴이 없는 PC에서 뷰어가 바꿔 보여 줄 쪽(유니코드 글자 + OFL 수학 글꼴 이름 사슬)
+            fallback = f"page-{page.number:04d}.eq.svg"
+            (output / fallback).write_text(page_to_svg(page, equation_fallback=True), encoding="utf-8")
+            fallbacks.append((fallback, sorted(fonts)))
+        else:
+            fallbacks.append(None)
+    html = viewer_html(Path(args.file).name, listing, layers, fallbacks)
+    (output / "index.html").write_text(html, encoding="utf-8")
     if args.glyphs:
         (output / "glyphs.json").write_text(json.dumps(glyphs, ensure_ascii=False), encoding="utf-8")
     print(f"{len(pages)} pages -> {output / 'index.html'}")

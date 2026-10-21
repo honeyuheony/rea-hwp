@@ -281,12 +281,13 @@ def lex(buf: list[int], p: int) -> tuple[int, list[int]]:
 class Node:
     """0x40바이트 노드. text는 +0x2c부터 wchar 10개이고 그 뒤쪽 칸을 다른 필드로도 쓴다(+0x3a, +0x3c, +0x3e)."""
 
-    __slots__ = ("kind", "child", "next", "sup", "sub", "size", "top", "bottom", "x", "width", "text")
+    __slots__ = ("kind", "child", "next", "sup", "sub", "size", "y", "top", "bottom", "x", "width", "text")
 
     def __init__(self) -> None:
         self.kind = 0
         self.child = self.next = self.sup = self.sub = 0
         self.size = 0  # +0x14, 글자 크기 백분율
+        self.y = 0  # +0x18, 기준선 높이(글자 크기 백분율, 위가 +). 그리기에만 쓴다
         self.top = self.bottom = 0  # +0x1c, +0x20
         self.x = self.width = 0  # +0x24, +0x28
         self.text = [0] * 10
@@ -823,7 +824,7 @@ class FontTables:
             return self.general[code]
         return self.pairs.get(code, NO_HCHAR)
 
-    def width(self, code: int, height: int, italic: bool, bold: bool) -> int:
+    def width(self, code: int, height: int, italic: bool, bold: bool, ratio: int = 100) -> int:
         """GetTextExtentPointW cx. ppem = 반올림(높이/75), 폭 = 반올림(em폭 x ppem / em) 픽셀(시험 496건으로 확인).
 
         글꼴은 HncBaseDraw FUN_10055910처럼 글자 언어의 "수식" 사슬을 앞에서부터 찾는다.
@@ -854,7 +855,27 @@ class FontTables:
             # em폭에 (em+10)/20을 더한다.
             # 수식 글꼴 계열에는 굵은 파일이 없다. 대체 글꼴 파일의 꼴은 표에 없어 같은 식을 쓴다(확인하지 못함)
             em_width += (em + 10) // 20
-        return (em_width * ppem * 2 + em) // (2 * em) * UNITS_PER_PIXEL
+        # 검증 안 됨: 장평(그리기의 늘린 괄호·악센트)은 em폭에 곱해 같은 식으로 반올림한다고 보았다
+        return (em_width * ratio * ppem * 2 + em * 100) // (2 * em * 100) * UNITS_PER_PIXEL
+
+    def family(self, code: int, italic: bool) -> str:
+        """width()와 같은 사슬에서 그 글자를 가진 글꼴의 이름(HFT는 글꼴 family, TTF는 면 이름)."""
+        hchar = self.hchar(code)
+        for step in self.chains[char_language(code)]:
+            if "ttf" in step:
+                if self._ttf_has(step["ttf"], code):
+                    return step["ttf"]
+                continue
+            font = self.fonts[step["italic" if italic else "regular"]]
+            if self._find([font], hchar) is not None:
+                return font["family"]
+        for font in self.fallback:
+            if self._find([font], hchar) is not None:
+                return font["family"]
+        raise KeyError(f"옛 수식 글꼴에 U+{code:04X} 글자가 없습니다")
+
+    def _ttf_has(self, face: str, code: int) -> bool:
+        return face == self.ttf["face"] and any(first <= code <= last for first, last, _ in self.ttf["runs"])
 
     def _ttf_width(self, face: str, code: int, ppem: int, bold: bool) -> int | None:
         """사슬의 TTF 글꼴 GDI 전진 폭(픽셀). 그 글꼴에 없는 글자는 None.
@@ -909,12 +930,13 @@ class Layout:
         self.flags = carried_flags  # DAT_1089372c: 비트0 기울임, 비트1 굵게(FUN_10657830)
         self.in_pile = 0  # +0x34
         self.height = font_size  # DAT_10893710, 다음에 만들 글꼴의 높이
-        self.font = (font_size, bool(self.flags & 1), bool(self.flags & 2))  # +0x60, 마지막으로 만든 글꼴
+        self.ratio = 100  # DAT_1089371b, 장평(그리기에서만 바뀐다)
+        self.font = (font_size, bool(self.flags & 1), bool(self.flags & 2), 100)  # +0x60, 마지막으로 만든 글꼴
         self.tables = font_tables()
 
     def create_font(self) -> None:
         """FUN_10650f40: 지금 높이·플래그로 글꼴을 다시 만든다. 굵게(비트1)는 lfWeight 700이다."""
-        self.font = (self.height, bool(self.flags & 1), bool(self.flags & 2))
+        self.font = (self.height, bool(self.flags & 1), bool(self.flags & 2), self.ratio)
 
     def measure(self, code: int) -> int:
         return self.tables.width(code, *self.font)
@@ -1144,7 +1166,8 @@ class Layout:
             if first:
                 pile.bottom = offset
             first = False
-            self.shift(row_index, offset)
+            # 0x10653eaf: 줄 머리가 아니라 줄 내용(머리의 다음 칸)을 옮긴다. 머리의 자식(다음 줄)까지 옮기지 않는다
+            self.shift(row.next, offset)
             prev_bottom = row.bottom
             row_index = row.child
         middle = pile.bottom
@@ -1154,13 +1177,21 @@ class Layout:
             half = cdiv(middle + offset, 2)
             row_index = pile.child
             while row_index:
-                self.shift(row_index, -half)
+                self.shift(nodes[row_index].next, -half)
                 row_index = nodes[row_index].child
             pile.top -= half
             pile.bottom -= half
 
     def shift(self, index: int, dy: int) -> None:
         """FUN_10654190: 목록 전체와 자식의 y 이동(그리기용). 크기 계산에는 쓰이지 않는다."""
+        nodes = self.nodes
+        while index:
+            node = nodes[index]
+            node.y += dy
+            for child in (node.child, node.sup, node.sub):
+                if child:
+                    self.shift(child, dy)
+            index = node.next
 
     # FUN_10652ed0
     def horizontal(self, index: int) -> None:
@@ -1394,8 +1425,8 @@ class LegacyEngineState:
     flags: int = 0
 
 
-def measure_legacy(script: str, font_size: int, state: LegacyEngineState | None = None) -> tuple[int, int, int]:
-    """(폭, 높이, 저장 기준선 백분율). 해석에 실패하면 LegacyEquationError. state를 주면 플래그를 이어받고 남긴다."""
+def laid_out_legacy(script: str, font_size: int, flags: int) -> tuple[Layout, int]:
+    """FUN_106578c0의 해석·세로·가로 배치. (배치 문맥, 뿌리 노드 번호). 해석에 실패하면 LegacyEquationError."""
     data = clean_script(script).encode("utf-16-le")
     source = [int.from_bytes(data[i : i + 2], "little") for i in range(0, len(data), 2)]
     buf = preprocess([ord(ch) for ch in PREFIX]) + preprocess(source) + [RBRACE]
@@ -1405,9 +1436,16 @@ def measure_legacy(script: str, font_size: int, state: LegacyEngineState | None 
     error = parser.parse_list(root, 100)
     if error:
         raise LegacyEquationError(f"옛 수식 해석 실패(오류 {error})")
-    layout = Layout(parser, font_size, state.flags if state is not None else 0)
+    layout = Layout(parser, font_size, flags)
     layout.vertical(root)
     layout.horizontal(root)
+    return layout, root
+
+
+def measure_legacy(script: str, font_size: int, state: LegacyEngineState | None = None) -> tuple[int, int, int]:
+    """(폭, 높이, 저장 기준선 백분율). 해석에 실패하면 LegacyEquationError. state를 주면 플래그를 이어받고 남긴다."""
+    layout, _ = laid_out_legacy(script, font_size, state.flags if state is not None else 0)
+    parser = layout.parser
     if state is not None:
         state.flags = layout.flags
     top, bottom = parser.nodes[0].top, parser.nodes[0].bottom

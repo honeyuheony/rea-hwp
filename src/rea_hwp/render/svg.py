@@ -12,6 +12,8 @@ from collections.abc import Callable
 from importlib import resources
 from xml.sax.saxutils import escape, quoteattr
 
+from .equation.glyphs import EQUATION_FONTS
+from .equation.unicode import FALLBACK_FONT_CHAIN, LEGACY_EQUATION_FAMILY, to_unicode
 from .scene import Glyph, Image, Line, Page, Rect
 
 HU_PER_PT = 100.0
@@ -84,7 +86,7 @@ def _pt(value: float) -> str:
     return text if text not in ("", "-0") else "0"
 
 
-def _glyph(glyph: Glyph) -> str:
+def _glyph(glyph: Glyph, equation_fallback: bool = False) -> str:
     style = []
     if glyph.bold:
         style.append('font-weight="bold"')
@@ -93,10 +95,18 @@ def _glyph(glyph: Glyph) -> str:
     if glyph.color != "#000000":
         style.append(f'fill="{glyph.color}"')
     attrs = " ".join(style)
-    family = quoteattr(xml_safe(display_font(glyph.char, glyph.font_family)))
-    # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
-    # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
-    text = escape(xml_safe(display_text(glyph.char).replace("\u00ad", "-")))
+    if glyph.font_family in EQUATION_FONTS and equation_fallback:
+        family, text = quoteattr(FALLBACK_FONT_CHAIN), escape(xml_safe(to_unicode(glyph.char)))
+    elif glyph.font_family in EQUATION_FONTS:
+        # 수식 글꼴 PUA는 옛한글이 아니라 수식 기호라 그대로 찍는다.
+        family, text = quoteattr(xml_safe(glyph.font_family)), escape(xml_safe(glyph.char))
+    elif glyph.font_family == LEGACY_EQUATION_FAMILY:
+        family, text = quoteattr(f"'{LEGACY_EQUATION_FAMILY}', {FALLBACK_FONT_CHAIN}"), escape(xml_safe(glyph.char))
+    else:
+        family = quoteattr(xml_safe(display_font(glyph.char, glyph.font_family)))
+        # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
+        # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
+        text = escape(xml_safe(display_text(glyph.char).replace("\u00ad", "-")))
     if abs(glyph.scale_x - 1.0) > 0.001 or glyph.rotation:
         # 장평은 가로로만 줄이거나 늘린다. 원점을 기준으로 변환해 x 위치가 흔들리지 않게 한다.
         rotate = f" rotate({-glyph.rotation:g})" if glyph.rotation else ""
@@ -160,6 +170,11 @@ def _image(image: Image, index: int, href: str) -> str:
     )
 
 
+def equation_fonts(page: Page) -> set[str]:
+    """쪽에 수식 글꼴로 찍은 글자가 있으면 그 글꼴 이름들."""
+    return {glyph.font_family for glyph in page.glyphs if glyph.font_family in EQUATION_FONTS}
+
+
 #: 그림 바이트와 mime을 받아 SVG <image href>에 넣을 주소를 돌려주는 함수.
 ImageHref = Callable[[bytes, str], str]
 
@@ -175,8 +190,10 @@ def image_data(href: str) -> tuple[bytes, str] | None:
     return urllib.parse.unquote_to_bytes(payload), mime or "text/plain"
 
 
-def page_to_svg(page: Page, *, image_href: ImageHref | None = None) -> str:
-    """image_href를 주면 그림마다 (바이트, mime)으로 불러 돌려준 주소를 쓰고, 주지 않으면 data: URI를 그대로 넣는다.
+def page_to_svg(page: Page, equation_fallback: bool = False, *, image_href: ImageHref | None = None) -> str:
+    """equation_fallback이면 수식 글꼴 PUA를 유니코드로 바꿔 OFL 수학 글꼴 이름 사슬로 그린다(수식 글꼴이 없는 PC용).
+
+    image_href를 주면 그림마다 (바이트, mime)으로 불러 돌려준 주소를 쓰고, 주지 않으면 data: URI를 그대로 넣는다.
 
     mime은 래스터 그림이면 image/png·image/jpeg·image/gif 등(BMP·TIFF·PCX는 PNG로 바꿔 넘긴다, 바꾸지 못한 BMP는
     image/bmp), 그리기 도형·WMF·글맵시를 옮긴 벡터 그림이면 image/svg+xml이다. 같은 그림은 같은 바이트로 넘어온다.
@@ -199,7 +216,7 @@ def page_to_svg(page: Page, *, image_href: ImageHref | None = None) -> str:
     ]
     for index, item in enumerate(page.items):
         if isinstance(item, Glyph):
-            parts.append(_glyph(item))
+            parts.append(_glyph(item, equation_fallback))
         elif isinstance(item, Line):
             parts.append(_line(item))
         elif isinstance(item, Rect):
