@@ -5,7 +5,7 @@ from __future__ import annotations
 from html import escape
 
 from .scene import TextLine
-from .svg import display_text
+from .svg import copy_text
 
 #: 줄 글 층의 글자 위 끝 = 기준선 − 글자 크기 × 이 비율(그리는 글자의 기준선 비율과 같다).
 _ASCENT = 0.85
@@ -83,7 +83,7 @@ def text_layer(lines: list[TextLine], width: float, height: float) -> str:
     for line in lines:
         top = (line.baseline - line.size * _ASCENT) / height
         style = f"left: {_percent(line.x / width)}; top: {_percent(top)}; font-size: {line.size / width * 100:.4f}cqw"
-        text = escape(display_text(line.text))
+        text = escape(copy_text(line.text))
         spans.append(f'<span style="{style}" data-w="{line.width / width:.6f}">{text}</span><br>')
     return f'<div class="text-layer">{"".join(spans)}</div>'
 

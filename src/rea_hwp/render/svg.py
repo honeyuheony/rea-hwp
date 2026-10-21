@@ -5,12 +5,17 @@ from __future__ import annotations
 import functools
 import gzip
 import json
+import re
 from importlib import resources
 from xml.sax.saxutils import escape, quoteattr
 
 from .scene import Glyph, Image, Line, Page, Rect
 
 HU_PER_PT = 100.0
+#: XML 1.0이 허용하지 않는 글자: 탭·줄바꿈·CR을 뺀 C0 제어 문자, 짝 없는 대리 코드, U+FFFE·U+FFFF.
+_XML_FORBIDDEN = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+#: 한글 글자 코드 30(묶음 빈칸)·31(고정폭 빈칸)은 빈칸으로 보이므로 복사할 글에서는 지우지 않고 빈칸으로 바꾼다.
+_SPACE_CONTROLS = str.maketrans({"\x1e": " ", "\x1f": " "})
 
 
 @functools.cache
@@ -62,6 +67,15 @@ def display_text(text: str) -> str:
     return "".join(table.get(ord(char), char) for char in text)
 
 
+def xml_safe(text: str) -> str:
+    return _XML_FORBIDDEN.sub("", text)
+
+
+def copy_text(text: str) -> str:
+    """복사·검색용 줄 글: 보여 주는 글(display_text)에서 빈칸 제어 문자는 빈칸으로, 나머지 XML 금지 글자는 지운다."""
+    return xml_safe(display_text(text).translate(_SPACE_CONTROLS))
+
+
 def _pt(value: float) -> str:
     text = f"{value / HU_PER_PT:.3f}".rstrip("0").rstrip(".")
     return text if text not in ("", "-0") else "0"
@@ -76,10 +90,10 @@ def _glyph(glyph: Glyph) -> str:
     if glyph.color != "#000000":
         style.append(f'fill="{glyph.color}"')
     attrs = " ".join(style)
-    family = quoteattr(display_font(glyph.char, glyph.font_family))
+    family = quoteattr(xml_safe(display_font(glyph.char, glyph.font_family)))
     # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
     # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
-    text = escape(display_text(glyph.char).replace("\u00ad", "-"))
+    text = escape(xml_safe(display_text(glyph.char).replace("\u00ad", "-")))
     if abs(glyph.scale_x - 1.0) > 0.001 or glyph.rotation:
         # 장평은 가로로만 줄이거나 늘린다. 원점을 기준으로 변환해 x 위치가 흔들리지 않게 한다.
         rotate = f" rotate({-glyph.rotation:g})" if glyph.rotation else ""
@@ -125,7 +139,7 @@ def _rect(rect: Rect, index: int) -> str:
 
 
 def _image(image: Image, index: int) -> str:
-    href = quoteattr(image.href)
+    href = quoteattr(xml_safe(image.href))
     if image.crop is None:
         return (
             f'<image x="{_pt(image.x)}" y="{_pt(image.y)}" width="{_pt(image.width)}" height="{_pt(image.height)}" '
