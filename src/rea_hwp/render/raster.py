@@ -25,6 +25,9 @@ _INVERT = bytes(255 - value for value in range(256))
 _BMP_FILE_HEADER = 14
 _BMP_INFO_HEADER = 40
 _BI_RGB = 0
+#: 이보다 큰 BMP는 그대로 둔다. 행마다 객체를 만들어 폭 1·높이 수백만 BMP가 입력의 수십 배 메모리를 쓰기 때문이다.
+#: 검증 안 됨: A4 600dpi(4960×7016)의 네 배 남짓으로 정한 값, 말뭉치 BMP는 모두 이 안이다.
+_BMP_MAX_SIDE = 32768
 
 
 def png_from_raster(data: bytes) -> bytes | None:
@@ -206,6 +209,8 @@ def _bmp_to_png(data: bytes) -> bytes | None:
     if header_size < _BMP_INFO_HEADER or compression != _BI_RGB or bits not in (1, 4, 8, 24, 32) or width <= 0:
         return None
     top_down, height = height < 0, abs(height)
+    if width > _BMP_MAX_SIDE or height > _BMP_MAX_SIDE:
+        return None
     stride = (width * bits + 31) // 32 * 4
     row_bytes = (width * bits + 7) // 8
     if height == 0 or pixel_offset + stride * height > len(data):

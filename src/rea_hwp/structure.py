@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import tags
+from .errors import CorruptFileError
 from .models.base import RecordModel
 from .models.paragraph import ControlChar, ParaCharShape, ParaHeader, ParaText
 from .models.shapes import ShapePicture
@@ -33,6 +34,8 @@ class RecordView:
 
 def subtree_end(records: list[RecordView], index: int) -> int:
     """records[index]의 하위 범위(뒤따르는 level이 더 큰 레코드들) 바로 다음 위치. 하위가 없으면 index + 1이다."""
+    if not 0 <= index < len(records):
+        raise IndexError(f"record index {index} is outside 0..{len(records) - 1}")
     level = records[index].level
     end = index + 1
     while end < len(records) and records[end].level > level:
@@ -82,9 +85,13 @@ class Paragraph:
 
 
 def read_paragraph(records: list[RecordView], section: int, index: int) -> Paragraph:
+    if not 0 <= index < len(records):
+        raise IndexError(f"section {section} has records 0..{len(records) - 1}, not {index}")
     header = records[index]
     if header.tag != tags.PARA_HEADER or not isinstance(header.model, ParaHeader):
         raise ValueError(f"record {index} of section {section} is not a PARA_HEADER (tag {header.tag})")
+    if header.model.para_shape_id is None or header.model.style_id is None:
+        raise CorruptFileError(f"PARA_HEADER {section}:{index} is truncated; the file is damaged")
     items: list[tuple[int, str | ControlChar]] = []
     runs: list[tuple[int, int]] = []
     controls: list[int] = []
@@ -104,6 +111,8 @@ def picture_bin_data_id(record: RecordView) -> int:
     """그림 개체 레코드(SHAPE_COMPONENT_PICTURE)가 가리키는 BinData ID(1부터, DocInfo BIN_DATA 차례)."""
     if record.tag != tags.SHAPE_COMPONENT_PICTURE or not isinstance(record.model, ShapePicture):
         raise ValueError(f"record {record.index} is not a SHAPE_COMPONENT_PICTURE (tag {record.tag})")
+    if record.model.bin_data_id is None:
+        raise CorruptFileError(f"picture record {record.index} is truncated; the file is damaged")
     return record.model.bin_data_id
 
 

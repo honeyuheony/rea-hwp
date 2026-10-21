@@ -361,3 +361,18 @@ def test_internal_paths_used_by_existing_callers_still_work():
     assert written > 0
     assert all("data:" not in svg for svg in svgs)
     assert sum(svg.count('href="images/') for svg in svgs) == written
+
+
+def test_ole_stream_declaring_more_than_the_file_is_rejected_before_reading():
+    data = bytearray(_hwp(extra={"BinData/BIN0001.png": bytes(8192)}))
+    entry = data.index("BIN0001.png".encode("utf-16-le"))
+    # 디렉터리 항목 128바이트의 116번째 바이트부터 시작 섹터·크기다. 크기를 64MB로 부풀린다.
+    data[entry + 120 : entry + 124] = (64 << 20).to_bytes(4, "little")
+    tracemalloc.start()
+    try:
+        with pytest.raises(CorruptFileError, match="declare"):
+            HwpDocument.open(bytes(data))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 << 20

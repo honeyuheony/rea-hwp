@@ -11,6 +11,7 @@ from ole_builder import build_ole, deflate, file_header, record
 from rea_hwp import (
     BinDataItem,
     ControlChar,
+    CorruptFileError,
     HwpDocument,
     LimitExceededError,
     Limits,
@@ -220,4 +221,33 @@ def test_picture_records_name_bin_data_that_can_be_read():
     ids = [picture_bin_data_id(view) for view in pictures]
     assert ids and all(document.bin_data(bin_id).data for bin_id in ids)
     with pytest.raises(ValueError, match="not a SHAPE_COMPONENT_PICTURE"):
+        picture_bin_data_id(document.section_records(0)[0])
+
+
+def test_paragraph_and_subtree_end_reject_positions_outside_the_section():
+    document = _tab_and_footnote_document()
+    with pytest.raises(IndexError):
+        document.paragraph(0, -2)
+    with pytest.raises(IndexError):
+        document.paragraph(0, 7)
+    with pytest.raises(IndexError):
+        subtree_end(document.section_records(0), -1)
+
+
+def _single_record_document(tag: int, payload: bytes) -> HwpDocument:
+    section = record(tag, 0, payload)
+    docinfo = record(tags.DOCUMENT_PROPERTIES, 0, bytes(26))
+    return HwpDocument.open(
+        build_ole({"FileHeader": file_header(), "DocInfo": deflate(docinfo), "BodyText/Section0": deflate(section)})
+    )
+
+
+def test_truncated_para_header_is_corrupt_file():
+    with pytest.raises(CorruptFileError):
+        _single_record_document(tags.PARA_HEADER, bytes(6)).paragraph(0, 0)
+
+
+def test_truncated_picture_record_is_corrupt_file():
+    document = _single_record_document(tags.SHAPE_COMPONENT_PICTURE, bytes(10))
+    with pytest.raises(CorruptFileError):
         picture_bin_data_id(document.section_records(0)[0])

@@ -10,7 +10,7 @@ def paragraph_pages(pages: list[Page]) -> dict[str, int]:
     """원본 위치 → 그것이 놓인 첫 쪽 번호(Page.number, 1부터).
 
     키는 글줄이 있는 문단(PARA_HEADER)과 놓인 표(TABLE)·그림(SHAPE_COMPONENT_PICTURE)이다. 문단은 첫 글줄이 놓인 쪽,
-    표는 첫 조각이 놓인 쪽이다. 글줄이 없는 문단(빈 문단, 개체만 든 문단)과 바탕쪽 글은 들어가지 않는다.
+    표는 첫 조각이 놓인 쪽이다. 글줄이 없는 문단(빈 문단, 개체만 든 문단, 세로쓰기 문단)과 바탕쪽 글은 들어가지 않는다.
     """
     first_pages: dict[str, int] = {}
     for page in sorted(pages, key=lambda page: page.number):

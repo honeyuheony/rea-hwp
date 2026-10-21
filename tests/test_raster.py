@@ -166,3 +166,8 @@ def test_bmp_run_length_and_os2_headers_are_left_as_bmp() -> None:
     os2 = bytearray(bmp(1, 1, 24, [bytes(3)]))
     os2[14:18] = struct.pack("<I", 12)
     assert png_from_raster(bytes(os2)) is None
+
+
+def test_bmp_taller_than_limit_is_left_as_bmp() -> None:
+    assert png_from_raster(bmp(1, 40000, 1, [bytes(1)] * 40000, palette=bytes(8))) is None
+    assert png_from_raster(bmp(1, 30000, 1, [bytes(1)] * 30000, palette=bytes(8))) is not None

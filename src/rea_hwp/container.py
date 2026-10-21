@@ -24,7 +24,7 @@ from .errors import HwpFormatError as HwpFormatError  # 예전 경로 rea_hwp.co
 
 SIGNATURE = b"HWP Document File"
 _MB = 1 << 20
-#: 한 번에 풀어 받는 크기. 다 푼 뒤 합치면 상한 근처에서 복사본이 하나 더 생겨 메모리를 두 배로 쓴다.
+#: 한 번에 풀어 받는 크기. 상한을 넘는 입력은 상한 + 이 크기에서 멈춘다(다 푼 결과는 bytes로 한 번 더 복사한다).
 _INFLATE_CHUNK = _MB
 _SECTION_NAME = re.compile(r"(BodyText|ViewText)/Section(\d+)")
 
@@ -145,7 +145,17 @@ class HwpContainer:
         # 깨진 그릇에서 olefile은 OleFileError 말고도 IndexError·OverflowError·struct.error 등을 낸다.
         try:
             with olefile.OleFileIO(io.BytesIO(data)) as ole:
-                streams = {"/".join(path): ole.openstream(path).read() for path in ole.listdir(streams=True)}
+                paths = ole.listdir(streams=True)
+                # 섹터가 자기 자신을 가리키면 olefile은 선언한 크기만큼 같은 섹터를 되풀이해 읽는다. 스트림은 파일 안에
+                # 들어 있으므로 크기 합이 파일보다 크면 읽기 전에 거절한다.
+                declared = sum(ole.get_size(path) for path in paths)
+                if declared > len(data):
+                    raise CorruptFileError(
+                        f"OLE streams declare {declared} bytes in a {len(data)}-byte file; the file is damaged"
+                    )
+                streams = {"/".join(path): ole.openstream(path).read() for path in paths}
+        except (CorruptFileError, MemoryError):
+            raise
         except Exception as error:
             raise CorruptFileError(
                 f"OLE container is damaged ({type(error).__name__}); the file cannot be read"
