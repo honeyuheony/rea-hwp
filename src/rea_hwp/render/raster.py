@@ -1,6 +1,7 @@
-"""브라우저가 그리지 못하는 비트맵(TIFF, PCX)을 PNG로 바꾼다.
+"""브라우저가 그리지 못하는 비트맵(TIFF, PCX)과 크기만 큰 비압축 BMP를 PNG로 바꾼다.
 
 범위: TIFF 첫 IFD의 비압축·LZW(예측자 2), 1·8비트 회색과 RGB(A), strip 배치. PCX 1비트·8비트 팔레트·24비트.
+BMP는 BITMAPINFOHEADER 이후 머리의 비압축(BI_RGB) 1·4·8·24·32비트만 바꾸고 RLE·비트필드·OS/2 머리는 그대로 둔다.
 """
 
 from __future__ import annotations
@@ -21,12 +22,17 @@ _TYPE_FORMATS = {1: "B", 3: "H", 4: "I"}
 # PNG 색 형식: 회색, RGB, 팔레트, 회색+알파, RGBA
 _PNG_GRAY, _PNG_RGB, _PNG_PALETTE, _PNG_GRAY_ALPHA, _PNG_RGBA = 0, 2, 3, 4, 6
 _INVERT = bytes(255 - value for value in range(256))
+_BMP_FILE_HEADER = 14
+_BMP_INFO_HEADER = 40
+_BI_RGB = 0
 
 
 def png_from_raster(data: bytes) -> bytes | None:
-    """TIFF·PCX면 같은 그림의 PNG, 다른 형식이거나 옮기지 않은 배치면 None."""
+    """TIFF·PCX·BMP면 같은 그림의 PNG, 다른 형식이거나 옮기지 않은 배치면 None."""
     if data.startswith(_TIFF_SIGNATURES):
         return _tiff_to_png(data)
+    if data.startswith(b"BM"):
+        return _bmp_to_png(data)
     if len(data) > 128 and data[0] == _PCX_MANUFACTURER and data[2] == 1:
         return _pcx_to_png(data)
     return None
@@ -190,6 +196,43 @@ def _pcx_to_png(data: bytes) -> bytes | None:
             rgb_rows.append(bytes(rgb))
         return _png(width, height, 8, _PNG_RGB, rgb_rows)
     return None
+
+
+def _bmp_to_png(data: bytes) -> bytes | None:
+    if len(data) < _BMP_FILE_HEADER + _BMP_INFO_HEADER:
+        return None
+    pixel_offset, header_size = struct.unpack_from("<II", data, 10)
+    width, height, _, bits, compression = struct.unpack_from("<iiHHI", data, 18)
+    if header_size < _BMP_INFO_HEADER or compression != _BI_RGB or bits not in (1, 4, 8, 24, 32) or width <= 0:
+        return None
+    top_down, height = height < 0, abs(height)
+    stride = (width * bits + 31) // 32 * 4
+    row_bytes = (width * bits + 7) // 8
+    if height == 0 or pixel_offset + stride * height > len(data):
+        return None
+    starts = [pixel_offset + stride * row for row in (range(height) if top_down else range(height - 1, -1, -1))]
+    if bits <= 8:
+        (colors_used,) = struct.unpack_from("<I", data, 46)
+        count = min(colors_used or 1 << bits, 1 << bits)
+        table = data[_BMP_FILE_HEADER + header_size : _BMP_FILE_HEADER + header_size + 4 * count]
+        if len(table) < 4 * count:
+            return None
+        # 팔레트 칸은 B, G, R, 예약 순서다. 팔레트 밖 번호도 읽히도록 2^bits칸까지 검정으로 채운다.
+        palette = bytearray(3 << bits)
+        palette[0 : 3 * count : 3], palette[1 : 3 * count : 3], palette[2 : 3 * count : 3] = (
+            table[2::4],
+            table[1::4],
+            table[0::4],
+        )
+        return _png(width, height, bits, _PNG_PALETTE, (data[start : start + row_bytes] for start in starts), palette)
+    pixels = b"".join(data[start : start + row_bytes] for start in starts)
+    step = bits // 8
+    rgb = bytearray(width * height * 3)
+    # 32비트 BI_RGB의 넷째 바이트는 예약 칸이라 버린다(GDI도 알파로 쓰지 않는다, 검증 안 됨: 브라우저별 차이).
+    rgb[0::3], rgb[1::3], rgb[2::3] = pixels[2::step], pixels[1::step], pixels[0::step]
+    del pixels
+    line = width * 3
+    return _png(width, height, 8, _PNG_RGB, (rgb[start : start + line] for start in range(0, len(rgb), line)))
 
 
 def _png(

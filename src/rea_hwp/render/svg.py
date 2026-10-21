@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import functools
 import gzip
 import json
 import re
+import urllib.parse
+from collections.abc import Callable
 from importlib import resources
 from xml.sax.saxutils import escape, quoteattr
 
@@ -138,8 +141,8 @@ def _rect(rect: Rect, index: int) -> str:
     )
 
 
-def _image(image: Image, index: int) -> str:
-    href = quoteattr(xml_safe(image.href))
+def _image(image: Image, index: int, href: str) -> str:
+    href = quoteattr(xml_safe(href))
     if image.crop is None:
         return (
             f'<image x="{_pt(image.x)}" y="{_pt(image.y)}" width="{_pt(image.width)}" height="{_pt(image.height)}" '
@@ -157,7 +160,37 @@ def _image(image: Image, index: int) -> str:
     )
 
 
-def page_to_svg(page: Page) -> str:
+#: 그림 바이트와 mime을 받아 SVG <image href>에 넣을 주소를 돌려주는 함수.
+ImageHref = Callable[[bytes, str], str]
+
+
+def image_data(href: str) -> tuple[bytes, str] | None:
+    """data: URI의 (바이트, mime). data: URI가 아니면 None."""
+    if not href.startswith("data:"):
+        return None
+    meta, _, payload = href[5:].partition(",")
+    mime, *parameters = meta.split(";")
+    if "base64" in parameters:
+        return base64.b64decode(payload), mime or "text/plain"
+    return urllib.parse.unquote_to_bytes(payload), mime or "text/plain"
+
+
+def page_to_svg(page: Page, *, image_href: ImageHref | None = None) -> str:
+    """image_href를 주면 그림마다 (바이트, mime)으로 불러 돌려준 주소를 쓰고, 주지 않으면 data: URI를 그대로 넣는다.
+
+    mime은 래스터 그림이면 image/png·image/jpeg·image/gif 등(BMP·TIFF·PCX는 PNG로 바꿔 넘긴다, 바꾸지 못한 BMP는
+    image/bmp), 그리기 도형·WMF·글맵시를 옮긴 벡터 그림이면 image/svg+xml이다. 같은 그림은 같은 바이트로 넘어온다.
+    """
+    resolved: dict[str, str] = {}
+
+    def href_of(image: Image) -> str:
+        if image_href is None:
+            return image.href
+        if image.href not in resolved:
+            decoded = image_data(image.href)
+            resolved[image.href] = image.href if decoded is None else image_href(*decoded)
+        return resolved[image.href]
+
     width, height = _pt(page.width), _pt(page.height)
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}pt" height="{height}pt" '
@@ -172,7 +205,7 @@ def page_to_svg(page: Page) -> str:
         elif isinstance(item, Rect):
             parts.append(_rect(item, index))
         elif isinstance(item, Image):
-            parts.append(_image(item, index))
+            parts.append(_image(item, index, href_of(item)))
     parts.append("</svg>")
     return "\n".join(parts)
 

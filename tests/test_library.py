@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import collections
+import hashlib
 import io
 import os
 import re
@@ -33,7 +36,7 @@ from rea_hwp.document import HwpDocument
 from rea_hwp.render.html import text_layer
 from rea_hwp.render.layout import layout_document
 from rea_hwp.render.options import RenderOptions
-from rea_hwp.render.scene import Glyph, Page, TextLine
+from rea_hwp.render.scene import Glyph, Image, Page, TextLine
 from rea_hwp.render.svg import page_to_svg
 
 CORPUS = CORPUS_ROOT
@@ -272,3 +275,69 @@ def test_render_options_from_environment_reads_only_the_three_variables(tmp_path
     assert RenderOptions.from_environment(environ) == RenderOptions(
         table_engine=False, engine_recompose=False, font_dirs=(tmp_path / "a", tmp_path / "b")
     )
+
+
+def _data_uri(mime: str, data: bytes) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def test_image_href_receives_bytes_and_mime_once_per_picture_and_replaces_data_uris():
+    raster, vector = b"\x89PNG fake", b"<svg xmlns='http://www.w3.org/2000/svg'/>"
+    page = Page(width=10000, height=10000, number=1)
+    page.items += [
+        Image(0, 0, 100, 100, _data_uri("image/png", raster)),
+        Image(200, 0, 100, 100, _data_uri("image/svg+xml", vector)),
+        Image(400, 0, 100, 100, _data_uri("image/png", raster)),
+        Image(600, 0, 100, 100, "already-stored.png"),
+    ]
+    calls = []
+
+    def store(data: bytes, mime: str) -> str:
+        calls.append((data, mime))
+        return f"pic-{len(calls)}{'.svg' if mime == 'image/svg+xml' else '.png'}"
+
+    svg = page_to_svg(page, image_href=store)
+    assert calls == [(raster, "image/png"), (vector, "image/svg+xml")]
+    hrefs = [element.get("href") for element in ET.fromstring(svg).iter() if element.tag.endswith("image")]
+    assert hrefs == ["pic-1.png", "pic-2.svg", "pic-1.png", "already-stored.png"]
+    assert "data:" not in svg
+
+
+def test_page_to_svg_without_image_href_keeps_data_uris():
+    page = Page(width=10000, height=10000, number=1, items=[Image(0, 0, 100, 100, _data_uri("image/png", b"x"))])
+    assert _data_uri("image/png", b"x") in page_to_svg(page)
+
+
+@needs_corpus
+def test_header_picture_repeated_on_every_page_arrives_as_the_same_bytes():
+    pages = layout_document(HwpDocument.open(CORPUS / "oss" / "rhwp" / "pic-in-head-01.hwp"))
+    stored: dict[str, tuple[bytes, str]] = {}
+    pages_by_digest: dict[str, set[int]] = collections.defaultdict(set)
+    for page in pages:
+
+        def store(data: bytes, mime: str, number: int = page.number) -> str:
+            digest = hashlib.sha256(data).hexdigest()
+            stored[digest] = (data, mime)
+            pages_by_digest[digest].add(number)
+            return f"{digest}.bin"
+
+        svg = page_to_svg(page, image_href=store)
+        assert "data:" not in svg
+        ET.fromstring(svg)
+    raster = [digest for digest, (_, mime) in stored.items() if mime == "image/png"]
+    assert any(pages_by_digest[digest] == {page.number for page in pages} for digest in raster)
+    assert {mime for _, mime in stored.values()} <= {"image/png", "image/jpeg", "image/gif", "image/svg+xml"}
+
+
+@needs_corpus
+@pytest.mark.parametrize(
+    "relative", ["oss/rhwp/issue5875__nested_table_text_caption.hwp", "oss/rhwp/issue2217__20200830.hwp"]
+)
+def test_bmp_pictures_reach_svg_as_png(relative):
+    document = HwpDocument.open(CORPUS / relative)
+    stored_bmp = [item for item in map(document.bin_data, range(1, len(document.styles.bin_data) + 1)) if item]
+    assert any(item.mime == "image/bmp" for item in stored_bmp)
+    mimes = []
+    for page in layout_document(document):
+        page_to_svg(page, image_href=lambda data, mime: mimes.append(mime) or "x")
+    assert "image/png" in mimes and "image/bmp" not in mimes
