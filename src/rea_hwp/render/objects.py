@@ -57,7 +57,7 @@ from .equation.glyphs import EQUATION_FONT, glyph_table
 from .forms import draw_form
 from .ole import content_metafile, has_ooxml_chart
 from .ooxml_chart import draw_ooxml_chart, ooxml_chart_contents
-from .raster import pixel_size, png_from_raster
+from .raster import image_mime, pixel_size, png_from_raster
 from .reflow import ASCENT_PERCENT, RANGE_GRID
 from .scene import Glyph, Image, Line, Rect
 from .table_flow import _margin_shift, is_block_table, vertical_offset
@@ -1041,7 +1041,7 @@ class ObjectsMixin:
             png = png_from_raster(data)
             if png is not None:
                 data, name = png, "converted.png"
-            href = f"data:{_mime(data, name)};base64,{base64.b64encode(data).decode('ascii')}"
+            href = f"data:{image_mime(data, name)};base64,{base64.b64encode(data).decode('ascii')}"
         self.image_cache[bin_data_id] = href
         return href
 
@@ -1216,20 +1216,6 @@ def _align(reference: float, span: float, size: float, align: int, offset: int) 
     if align in (ALIGN_END, 4):
         return reference + span - size - offset
     return reference + offset
-
-
-def _mime(data: bytes, name: str) -> str:
-    signatures = {
-        b"\x89PNG": "image/png",
-        b"\xff\xd8": "image/jpeg",
-        b"GIF8": "image/gif",
-        b"BM": "image/bmp",
-    }
-    for signature, mime in signatures.items():
-        if data.startswith(signature):
-            return mime
-    extension = name.rsplit(".", 1)[-1].lower()
-    return {"wmf": "image/wmf", "emf": "image/emf", "svg": "image/svg+xml"}.get(extension, "application/octet-stream")
 
 
 #: 글맵시 글꼴을 찾을 폴더. REA_HWP_FONT_DIRS(경로 구분자로 나눔)가 없으면 Windows 글꼴과 한컴 공용 TTF 가운데 있는 것.

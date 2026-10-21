@@ -32,6 +32,21 @@ def png_from_raster(data: bytes) -> bytes | None:
     return None
 
 
+def image_mime(data: bytes, name: str) -> str:
+    """머리 바이트로 래스터 형식을, 그 밖에는 저장 이름의 확장자로 mime을 정한다."""
+    signatures = {
+        b"\x89PNG": "image/png",
+        b"\xff\xd8": "image/jpeg",
+        b"GIF8": "image/gif",
+        b"BM": "image/bmp",
+    }
+    for signature, mime in signatures.items():
+        if data.startswith(signature):
+            return mime
+    extension = name.rsplit(".", 1)[-1].lower()
+    return {"wmf": "image/wmf", "emf": "image/emf", "svg": "image/svg+xml"}.get(extension, "application/octet-stream")
+
+
 def pixel_size(data: bytes) -> tuple[int, int] | None:
     """PNG·JPEG·GIF·BMP 머리에 적힌 (가로, 세로) 픽셀 수. 다른 형식이면 None."""
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
