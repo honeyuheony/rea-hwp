@@ -1568,14 +1568,17 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         line_start = x
         # 이 줄에서 place_text로 그린 생성 글(머리 기호·각주 표시·자동 번호)도 줄 글에 차례대로 들어간다.
         pieces: list[str] = []
-        outer_pieces = self.__dict__.get("line_pieces")
-        self.line_pieces = pieces
+        # pieces를 이은 글의 글자마다 (원점 x, 그린 Glyph 또는 None).
+        marks: list[tuple[float, Glyph | None]] = []
+        outer_pieces, outer_marks = self.__dict__.get("line_pieces"), self.__dict__.get("line_marks")
+        self.line_pieces, self.line_marks = pieces, marks
         if head is not None and index == 0:
             # 머리 글자도 가운데·오른쪽 정렬 이동량만큼 옮긴다(task2287 35쪽 PDF: 가운데 정렬 셀 「- 유, 초2」).
-            self.place_text(state, head.text, head.shape, x + head.marker_dx, baseline)
+            head_end = self.place_text(state, head.text, head.shape, x + head.marker_dx, baseline)
             line_start = x + head.marker_dx
             if not head.text.endswith((" ", "\t")):
                 pieces.append(" ")
+                marks.append((head_end, None))
         sizes = [self.styles.char_shapes[view.shape_ids[i]].base_size for i in items] or [0]
         # 그림자 글자는 글자 모양 구간마다 그림자 한 걸음씩 구간 전체를 찍은 뒤 본 글자를 찍는다(FUN_1017df40 →
         # FUN_1030c200, 구간 경계 FUN_10175e50: 글자 모양이 바뀌거나 컨트롤 문자를 만나면 끊고 공백에서는 끊지 않는다).
@@ -1595,8 +1598,13 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 pieces.append(item.char)
             elif item.code == TAB:
                 pieces.append("\t")
+                marks.append((x, None))
             elif char_index in view.controls:
-                pieces.append(_equation_copy_text(view.controls[char_index]))
+                script = _equation_copy_text(view.controls[char_index])
+                pieces.append(script)
+                # 수식 스크립트 글자는 그린 글자와 하나씩 맞지 않으므로 수식이 차지한 폭에 고르게 펼친다.
+                step = (width + extras[order]) / max(1, len(script))
+                marks.extend((x + k * step, None) for k in range(len(script)))
             if isinstance(item, TextChar):
                 shape = self.styles.char_shapes[item.shape_id]
                 if shade and shade[0] is not shape:
@@ -1609,13 +1617,15 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     self.extend_char_border(char_border, shape, device_round(x), width)
                 if shadow_run and (shape is not run_shape or _joins_previous_jamo(view, char_index)):
                     _flush_shadow_run(state.page, shadow_run)
+                glyph: Glyph | None = None
                 if (
                     _joins_previous_jamo(view, char_index)
                     and state.page.items
                     and isinstance(state.page.items[-1], Glyph)
                 ):
                     last = state.page.items[-1]
-                    state.page.items[-1] = dataclasses.replace(last, char=last.char + item.char)
+                    glyph = state.page.items[-1] = dataclasses.replace(last, char=last.char + item.char)
+                    marks[:] = [(mark_x, glyph if drawn is last else drawn) for mark_x, drawn in marks]
                 elif item.char.strip() and shape.shadow_type:
                     glyph = self.make_glyph(
                         item.char, shape, self.measurer.slot(item.char, shape), device_round(x), baseline
@@ -1624,7 +1634,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     run_shape = shape
                 elif item.char.strip():
                     slot = self.measurer.slot(item.char, shape)
-                    self.append_glyph(state, item.char, shape, slot, device_round(x), baseline)
+                    glyph = self.append_glyph(state, item.char, shape, slot, device_round(x), baseline)
+                marks.extend((glyph.x if glyph else device_round(x), glyph) for _ in item.char)
                 if underline and underline[0] is not shape:
                     self.flush_underline(state, underline, baseline)
                 # 자동으로 나뉜 줄 끝 공백에는 밑줄을 긋지 않는다(issue2007 2쪽 PDF: 공백으로 끝난 줄도 마지막 글자에서
@@ -1657,11 +1668,21 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         self.flush_strike(state, strike, line_top + segment.text_height / 2)
         self.flush_shade(state, shade, line_top, segment.line_height)
         self.flush_char_border(state, char_border, line_top, segment.text_height)
-        self.line_pieces = outer_pieces
-        text = "".join(pieces)
+        self.line_pieces, self.line_marks = outer_pieces, outer_marks
+        text = "".join(pieces).rstrip()
         if text.strip():
+            kept = marks[: len(text)]
             state.page.text_lines.append(
-                TextLine(text.rstrip(), line_start, baseline, x - line_start, max(sizes), self.paragraph_id(view))
+                TextLine(
+                    text,
+                    line_start,
+                    baseline,
+                    x - line_start,
+                    max(sizes),
+                    self.paragraph_id(view),
+                    [mark_x for mark_x, _ in kept],
+                    [drawn for _, drawn in kept],
+                )
             )
 
     def draw_vertical_line(
@@ -1812,11 +1833,14 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             return self.measurer.advance(item.char, shape, slot, spacing)
         return self.measurer.advance(item.char, shape, slot)
 
-    def append_glyph(self, state: PageState, char: str, shape: CharShape, slot: int, x: float, baseline: float) -> None:
-        """그림자가 있으면 그림자 글자를 본 글자보다 먼저(아래에) 넣는다."""
+    def append_glyph(
+        self, state: PageState, char: str, shape: CharShape, slot: int, x: float, baseline: float
+    ) -> Glyph:
+        """그림자가 있으면 그림자 글자를 본 글자보다 먼저(아래에) 넣는다. 넣은 본 글자를 돌려준다."""
         glyph = self.make_glyph(char, shape, slot, x, baseline)
         state.page.items.extend(self.shadow_strikes(glyph, shape))
         state.page.items.append(glyph)
+        return glyph
 
     def extend_underline(self, run: list, char: str, shape: CharShape, x: float) -> None:
         """run = [글자 모양, 시작 x, 끝 x]. 끝은 마지막 글자 x + 자간을 뺀 글자 폭이다."""
@@ -1951,16 +1975,31 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
     def place_text(self, state: PageState, text: str, shape: CharShape, x: float, baseline: float) -> float:
         """번호 같은 생성 글자를 놓고 끝 x를 돌려준다. 줄 밖(쪽 번호)이면 자기 줄 글을 남긴다."""
         start = x
+        marks: list[tuple[float, Glyph | None]] = []
         for char in text:
             slot = self.measurer.slot(char, shape)
-            if char.strip():
-                self.append_glyph(state, char, shape, slot, device_round(x), baseline)
+            glyph = self.append_glyph(state, char, shape, slot, device_round(x), baseline) if char.strip() else None
+            marks.append((glyph.x if glyph else x, glyph))
             x += self.measurer.advance(char, shape, slot)
         pieces = self.__dict__.get("line_pieces")
         if pieces is not None:
             pieces.append(text)
+            self.line_marks.extend(marks)
         elif text.strip():
-            state.page.text_lines.append(TextLine(text.strip(), start, baseline, x - start, shape.base_size))
+            lead = len(text) - len(text.lstrip())
+            kept = marks[lead : lead + len(text.strip())]
+            state.page.text_lines.append(
+                TextLine(
+                    text.strip(),
+                    start,
+                    baseline,
+                    x - start,
+                    shape.base_size,
+                    None,
+                    [mark_x for mark_x, _ in kept],
+                    [drawn for _, drawn in kept],
+                )
+            )
         return x
 
     def text_width(self, text: str, shape: CharShape) -> float:
@@ -2065,14 +2104,26 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         else:
             sub_baseline = baseline - shape.base_size * TAC_ASCENT - sub.base_size * 0.2
         sub_x = x + offset
+        sub_marks: list[tuple[float, Glyph | None]] = []
         for char in sub_text:
             slot = self.measurer.slot(char, sub)
-            if char.strip():
-                self.append_glyph(state, char, sub, slot, device_round(sub_x), sub_baseline)
+            glyph = (
+                self.append_glyph(state, char, sub, slot, device_round(sub_x), sub_baseline) if char.strip() else None
+            )
+            sub_marks.append((glyph.x if glyph else sub_x, glyph))
             sub_x += self.measurer.advance(char, sub, slot)
         if sub_text.strip():
             state.page.text_lines.append(
-                TextLine(sub_text, x + offset, sub_baseline, sub_width, sub.base_size, self.paragraph_id(view))
+                TextLine(
+                    sub_text,
+                    x + offset,
+                    sub_baseline,
+                    sub_width,
+                    sub.base_size,
+                    self.paragraph_id(view),
+                    [mark_x for mark_x, _ in sub_marks],
+                    [drawn for _, drawn in sub_marks],
+                )
             )
 
     def place_overlap(self, state: PageState, model: OverlapCtrl, shape: CharShape, x: float, baseline: float) -> None:
