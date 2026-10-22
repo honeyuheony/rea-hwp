@@ -38,8 +38,8 @@ from rea_hwp.render.svg import HU_PER_PT, page_glyph_table
 
 REFERENCE_ROOT = CORPUS_ROOT / "ref2022"
 
-#: 정답 PDF 글자 열을 줄로 끊는 기준선 차이(pt). 위·아래 첨자(글자 크기의 약 1/3)를 한 줄에 남기려는 추정값, 검증 안 됨.
-LINE_JUMP_PT = 4.0
+#: 오른쪽으로 이어져도 새 줄로 보는 기준선 차이(pt). 위·아래 첨자는 남기고 다음 단 첫 줄은 끊으려는 추정값, 검증 안 됨.
+LINE_JUMP_PT = 12.0
 #: 이보다 짧은 줄 글은 이웃 쪽에서 찾지 않는다(한두 글자는 아무 쪽에나 있다).
 NEIGHBOR_TEXT_MIN = 3
 
@@ -176,7 +176,10 @@ def install_trace() -> None:
 
 
 def reference_lines(chars: list[PlacedChar]) -> list[list[int]]:
-    """PDF에 찍힌 차례의 글자를 줄로 묶는다. 왼쪽으로 돌아가거나 기준선이 LINE_JUMP_PT 넘게 바뀌면 새 줄이다."""
+    """PDF에 찍힌 차례의 글자를 줄로 묶는다. 왼쪽으로 돌아가거나 기준선이 LINE_JUMP_PT 넘게 바뀌면 새 줄이다.
+
+    같은 기준선의 옆 칸 글은 한 줄로 묶인다. 줄 나눔 판정은 그래서 같은 문단의 렌더 줄끼리만 비교한다(classify).
+    """
     lines: list[list[int]] = []
     for index, char in enumerate(chars):
         if lines:
@@ -246,40 +249,51 @@ def glyph_lines(page, glyphs: list[object]) -> list[int | None]:
     return owners
 
 
-def classify(line, reference, rendered, pairs, owners, neighbor_texts) -> tuple[str, int | None]:
-    """시작 줄 하나의 원인 종류와 그 원인을 맡은 렌더 줄 번호."""
-    partners = [pairs.get(a) for a in line]
-    paired = [(a, b) for a, b in zip(line, partners, strict=True) if b is not None]
-    text = "".join(reference[a].char for a in line)
-    if len(paired) * 2 <= len(line):
-        if len(text) >= NEIGHBOR_TEXT_MIN:
+def classify(line, line_of, reference, rendered, pairs, owners, good, page, neighbor_texts):
+    """시작 줄의 첫 1pt 밖 글자로 원인 종류, 그 원인을 맡은 렌더 줄 번호, 그 렌더 줄에 든 (정답, 렌더) 쌍을 정한다."""
+    first_bad = next(a for a in line if a not in good)
+    start = pairs.get(first_bad)
+    if start is None:
+        rest = line[line.index(first_bad) :]
+        missing = [a for a in rest if a not in pairs]
+        text = "".join(reference[a].char for a in missing)
+        if len(missing) * 2 > len(rest) and len(text) >= NEIGHBOR_TEXT_MIN:
             for neighbor in neighbor_texts:
                 if neighbor is not None and text in neighbor[0]:
-                    at = neighbor[0].index(text)
-                    return "쪽 나눔 다름", ("이웃 쪽", neighbor[1][at])
-        return "글자 빠짐", owners[paired[0][1]] if paired else None
-    touched = collections.Counter(owners[b] for _, b in paired)
-    main = touched.most_common(1)[0][0]
+                    return "쪽 나눔 다름", ("이웃 쪽", neighbor[1][neighbor[0].index(text)]), []
+        before = [pairs[a] for a in line[: line.index(first_bad)] if a in pairs]
+        return "글자 빠짐", owners[before[-1]] if before else None, []
+    main = owners[start]
     if main is None:
-        return "줄 밖 글자", None
-    first_b, last_b = paired[0][1], paired[-1][1]
+        return "줄 밖 글자", None, []
+    sub = [(a, pairs[a]) for a in line if a in pairs and owners[pairs[a]] == main]
+    reverse = {b: a for a, b in pairs.items()}
     members = [b for b in range(len(rendered)) if owners[b] == main]
-    inside = set(range(min(first_b, last_b), max(first_b, last_b) + 1))
-    others = [b for b in members if b not in inside]
-    paired_out = set(pairs.values())
-    if len(touched) > 1 or any(b in paired_out for b in others):
-        return "줄 나눔 다름", main
-    if others or len(paired) < len(line):
-        return "글자 빠짐·더함", main
-    dys = [rendered[b].y - reference[a].y for a, b in paired]
-    if abs(statistics.median(dys)) > TOLERANCE_PT:
-        return "세로 밀림", main
-    first_dx = rendered[first_b].x - reference[paired[0][0]].x
-    if abs(first_dx) > TOLERANCE_PT:
-        return "줄 안 x 어긋남(시작)", main
-    if x_jump(paired, reference, rendered) is not None:
-        return "줄 안 x 어긋남(건너뜀)", main
-    return "줄 안 x 어긋남(누적)", main
+    # 렌더 줄이 한글의 다른 줄 글자를 품었다(한글은 거기서 나눴다).
+    if any(b in reverse and line_of[reverse[b]] != line_of[first_bad] for b in members):
+        return "줄 나눔 다름", main, sub
+    # 한글이 한 줄에 둔 같은 문단 글자를 다른 렌더 줄에 나눠 놓았다. 옆 칸(다른 문단) 글은 따지지 않는다.
+    paragraph = page.text_lines[main].paragraph
+    split = {
+        owners[pairs[a]]
+        for a in line
+        if a in pairs
+        and owners[pairs[a]] not in (main, None)
+        and paragraph is not None
+        and page.text_lines[owners[pairs[a]]].paragraph == paragraph
+    }
+    if split:
+        return "줄 나눔 다름", main, sub
+    span = line[line.index(sub[0][0]) : line.index(sub[-1][0]) + 1]
+    if any(b not in reverse for b in members) or any(a not in pairs for a in span):
+        return "글자 빠짐·더함", main, sub
+    if abs(statistics.median(rendered[b].y - reference[a].y for a, b in sub)) > TOLERANCE_PT:
+        return "세로 밀림", main, sub
+    if abs(rendered[sub[0][1]].x - reference[sub[0][0]].x) > TOLERANCE_PT:
+        return "줄 안 x 어긋남(시작)", main, sub
+    if x_jump(sub, reference, rendered) is not None:
+        return "줄 안 x 어긋남(건너뜀)", main, sub
+    return "줄 안 x 어긋남(누적)", main, sub
 
 
 def x_jump(paired, reference, rendered) -> int | None:
@@ -323,6 +337,7 @@ def page_onsets(page_index, reference_all, pages, neighbor) -> dict:
         )
         record["score_within"] = check.within
     lines = reference_lines(reference)
+    line_of = {a: number for number, line in enumerate(lines) for a in line}
     neighbor_texts = [neighbor(page_index - 1), neighbor(page_index + 1)]
     previous_good = True
     for number, line in enumerate(lines):
@@ -331,13 +346,14 @@ def page_onsets(page_index, reference_all, pages, neighbor) -> dict:
             previous_good = True
             continue
         if previous_good:
-            kind, owner = classify(line, reference, rendered, pairs, owners, neighbor_texts)
+            kind, owner, paired = classify(
+                line, line_of, reference, rendered, pairs, owners, good, page, neighbor_texts
+            )
             if isinstance(owner, tuple):
                 neighbor_page, neighbor_owner = owner[1]
                 where = _line_record(pages[neighbor_page], neighbor_owner) | {"neighbor_page": neighbor_page + 1}
             else:
                 where = _line_record(page, owner) if page is not None else {"container": "쪽 없음"}
-            paired = [(a, pairs[a]) for a in line if a in pairs]
             onset = {
                 "kind": kind,
                 "line": number,
