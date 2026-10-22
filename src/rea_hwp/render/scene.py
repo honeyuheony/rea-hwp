@@ -87,6 +87,10 @@ class TextLine:
     size: float
     #: 이 줄이 속한 문단 PARA_HEADER의 원본 위치 "구역:index"(rea_hwp.RecordView.index). 바탕쪽·쪽 번호 글은 None.
     paragraph: str | None = None
+    #: text 글자마다의 원점 x(공백·탭·수식 스크립트 글자 포함, 그린 글자는 Glyph.x와 같음). 비면 위치를 모르는 줄.
+    char_x: list[float] = field(default_factory=list)
+    #: text 글자마다 그린 Glyph(page.items 안 같은 객체, 이은 자모는 같은 Glyph). 그린 글리프가 없는 글자는 None.
+    glyphs: list[Glyph | None] = field(default_factory=list)
 
 
 @dataclass
