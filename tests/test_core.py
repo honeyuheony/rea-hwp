@@ -103,15 +103,15 @@ def test_cli_render_writes_pages_and_viewer(tmp_path):
     assert (tmp_path / "index.html").exists()
     assert sorted(p.name for p in tmp_path.glob("page-*.svg"))[0] == "page-0001.svg"
     assert (tmp_path / "glyphs.json").read_text(encoding="utf-8").startswith("[[")
-    assert '<div class="text-layer"><span ' in (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert '<svg class="text-layer" viewBox=' in (tmp_path / "index.html").read_text(encoding="utf-8")
 
 
-def test_text_layer_places_line_text_by_page_ratio():
+def test_text_layer_places_line_text_in_page_points():
     line = TextLine("가 <나>", x=1000, baseline=2000, width=3000, size=1000)
     layer = text_layer([line], width=10000, height=20000)
     assert layer == (
-        '<div class="text-layer"><span style="left: 10%; top: 5.75%; font-size: 10.0000cqw" '
-        'data-w="0.300000">가 &lt;나&gt;</span><br></div>'
+        '<svg class="text-layer" viewBox="0 0 100 200"><text class="ln fit" x="10" y="20" font-size="10" '
+        'textLength="30" lengthAdjust="spacingAndGlyphs">가 &lt;나&gt;</text></svg>'
     )
 
 

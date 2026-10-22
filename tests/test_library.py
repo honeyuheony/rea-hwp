@@ -62,12 +62,12 @@ def test_svg_drops_xml_forbidden_control_chars_from_glyph_text():
 
 def test_text_layer_drops_control_chars_but_keeps_tab():
     layer = text_layer([TextLine("가\x18\t나\x0b", x=0, baseline=1000, width=100, size=1000)], 10000, 10000)
-    assert ">가\t나</span>" in layer
+    assert ">가\t나</text>" in layer
 
 
 def test_text_layer_copies_bound_and_fixed_width_spaces_as_spaces():
     layer = text_layer([TextLine("가\x1e나\x1f다", x=0, baseline=1000, width=100, size=1000)], 10000, 10000)
-    assert ">가 나 다</span>" in layer
+    assert ">가 나 다</text>" in layer
 
 
 @needs_corpus
