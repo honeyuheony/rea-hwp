@@ -6,7 +6,7 @@ from html import escape
 from typing import NamedTuple
 
 from .scene import Glyph, TextLine
-from .svg import _pt, copy_text, display_font
+from .svg import copy_text, display_font, format_pt
 
 _TEMPLATE = """<!doctype html>
 <html lang="ko">
@@ -115,7 +115,7 @@ def _style_key(glyph: Glyph) -> tuple:
 
 def _font_attrs(key: tuple) -> str:
     family, size, bold, italic = key
-    attrs = f'font-family="{escape(family)}" font-size="{_pt(size)}"'
+    attrs = f'font-family="{escape(family)}" font-size="{format_pt(size)}"'
     if bold:
         attrs += ' font-weight="bold"'
     if italic:
@@ -126,9 +126,10 @@ def _font_attrs(key: tuple) -> str:
 def _fit_line(line: TextLine) -> str:
     """글자별 자리가 없거나 그린 글자와 하나씩 맞지 않는 줄(수식 스크립트)은 줄 폭에 맞춰 늘이거나 줄인다."""
     text = escape(copy_text(line.text))
-    length = f' textLength="{_pt(line.width)}" lengthAdjust="spacingAndGlyphs"' if line.width > 0 else ""
+    length = f' textLength="{format_pt(line.width)}" lengthAdjust="spacingAndGlyphs"' if line.width > 0 else ""
     return (
-        f'<text class="ln fit" x="{_pt(line.x)}" y="{_pt(line.baseline)}" font-size="{_pt(line.size)}"{length}>'
+        f'<text class="ln fit" x="{format_pt(line.x)}" y="{format_pt(line.baseline)}" '
+        f'font-size="{format_pt(line.size)}"{length}>'
         f"{text}</text>"
     )
 
@@ -187,11 +188,11 @@ def _transformed_text(group: list[_LayerChar], attrs: str = "") -> str:
     if scale == 1.0 and not rotation:
         transform, origin_x, origin_y = "", 0.0, 0.0
     elif not rotation:
-        transform, origin_y = f' transform="translate({_pt(origin_x)} 0) scale({scale:.4f} 1)"', 0.0
+        transform, origin_y = f' transform="translate({format_pt(origin_x)} 0) scale({scale:.4f} 1)"', 0.0
     else:
         scale = 1.0
         transform = (
-            f' transform="translate({_pt(origin_x)} {_pt(origin_y)}) '
+            f' transform="translate({format_pt(origin_x)} {format_pt(origin_y)}) '
             f'rotate({-rotation:g}) scale({group[0].transform[0]:.4f} 1)"'
         )
     # tspan 하나의 x·y 목록은 앞 글자들에만 주고, 목록보다 많은 뒤 글자(이은 자모)는 앞 글자에 이어 흐른다.
@@ -205,8 +206,8 @@ def _transformed_text(group: list[_LayerChar], attrs: str = "") -> str:
     spans = []
     for run in runs:
         placed = [char for char in run if char.x is not None]
-        xs = " ".join(_pt((char.x - origin_x) / scale) for char in placed)
-        ys = " ".join(_pt(char.y - origin_y) for char in placed)
+        xs = " ".join(format_pt((char.x - origin_x) / scale) for char in placed)
+        ys = " ".join(format_pt(char.y - origin_y) for char in placed)
         position = f'x="{xs}" y="{ys}" ' if placed else ""
         text = escape("".join(char.text for char in run))
         spans.append(f"<tspan {position}{_font_attrs(run[0].font)}>{text}</tspan>")
@@ -216,7 +217,7 @@ def _transformed_text(group: list[_LayerChar], attrs: str = "") -> str:
 def text_layer(lines: list[TextLine], width: float, height: float) -> str:
     """쪽 크기(width·height, HWPUNIT) viewBox의 투명한 SVG 글 층. 줄마다 .ln 하나이며 복사하면 줄이 나뉜다."""
     body = "".join(_glyph_line(line) or _fit_line(line) for line in lines)
-    return f'<svg class="text-layer" viewBox="0 0 {_pt(width)} {_pt(height)}">{body}</svg>'
+    return f'<svg class="text-layer" viewBox="0 0 {format_pt(width)} {format_pt(height)}">{body}</svg>'
 
 
 def _fallback_attrs(fallback: tuple[str, list[str]] | None) -> str:
