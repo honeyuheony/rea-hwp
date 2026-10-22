@@ -1171,7 +1171,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 shift += _line_end(rejudged.segments[-1]) - _line_end(view.segments[-1])
                 view = rejudged
                 last_vpos = view.segments[-1].vertical_pos
-            if textbox and view.segments and self.squeezed(view):
+            # 목록 안 번호 문단은 한글이 저장 줄을 버리고 다시 나눈다(재저장본 실측: task2287 셀 번호 문단 862개 중
+            # 346개 줄 시작이 바뀜, 머리 없는 문단 4,277개는 0개. 가로 구간이 같아 FUN_101dbcf0 판정으로는 설명 안 됨).
+            numbered = view.para_shape.head_type == heads.HEAD_NUMBER
+            if view.segments and (numbered or textbox and self.squeezed(view)):
                 previous = views[-1] if views else None
                 start = reflow.flow_end(previous) if previous else view.segments[0].vertical_pos
                 if previous:
