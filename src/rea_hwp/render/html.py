@@ -6,7 +6,7 @@ from html import escape
 from typing import NamedTuple
 
 from .scene import Glyph, TextLine
-from .svg import copy_text, display_font, format_pt
+from .svg import copy_text, format_pt, glyph_font_family, glyph_style_attrs
 
 _TEMPLATE = """<!doctype html>
 <html lang="ko">
@@ -110,17 +110,12 @@ for (const img of document.querySelectorAll('img[data-eq-fallback]')) {{
 
 
 def _style_key(glyph: Glyph) -> tuple:
-    return (display_font(glyph.char, glyph.font_family), glyph.size, glyph.bold, glyph.italic)
+    return (glyph_font_family(glyph), glyph.size, tuple(glyph_style_attrs(glyph)))
 
 
 def _font_attrs(key: tuple) -> str:
-    family, size, bold, italic = key
-    attrs = f'font-family="{escape(family)}" font-size="{format_pt(size)}"'
-    if bold:
-        attrs += ' font-weight="bold"'
-    if italic:
-        attrs += ' font-style="italic"'
-    return attrs
+    family, size, style = key
+    return " ".join([f'font-family={family} font-size="{format_pt(size)}"', *style])
 
 
 def _fit_line(line: TextLine) -> str:

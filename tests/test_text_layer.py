@@ -8,10 +8,13 @@ import pytest
 from corpus_paths import CORPUS_ROOT, USER_CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
+from rea_hwp.render.equation.unicode import LEGACY_EQUATION_FAMILY
 from rea_hwp.render.html import text_layer
 from rea_hwp.render.layout import layout_document
-from rea_hwp.render.scene import Glyph, TextLine
-from rea_hwp.render.svg import HU_PER_PT, copy_text
+from rea_hwp.render.scene import Glyph, Page, TextLine
+from rea_hwp.render.svg import HU_PER_PT, copy_text, page_to_svg
+
+SVG_NS = "http://www.w3.org/2000/svg"
 
 DOCUMENTS = [
     CORPUS_ROOT / "oss/pyhwp/tests__hwp5_tests__fixtures__multicolumns.hwp",
@@ -120,3 +123,14 @@ def test_text_layer_keeps_glyph_positions_when_dropped_control_char_has_no_glyph
     element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
     assert element.get("class") == "ln"
     assert [(span.get("x"), span.text) for span in element.findall("tspan")] == [("10 20", "가나")]
+
+
+@pytest.mark.parametrize(
+    ("font", "char"), [("바탕\x01", "가"), (LEGACY_EQUATION_FAMILY, "x"), ("바탕", "\U000f02b1")], ids=repr
+)
+def test_text_layer_uses_same_font_family_as_drawn_glyph(font, char):
+    glyph = Glyph(char, 1000, 2000, 1000, font, bold=True)
+    line = TextLine(char, 1000, 2000, 1000, 1000, None, [1000], [glyph])
+    span = ET.fromstring(text_layer([line], 10000, 10000)).find("text/tspan")
+    drawn = ET.fromstring(page_to_svg(Page(10000, 10000, 1, items=[glyph]))).find(f"{{{SVG_NS}}}text")
+    assert (span.get("font-family"), span.get("font-weight")) == (drawn.get("font-family"), drawn.get("font-weight"))
