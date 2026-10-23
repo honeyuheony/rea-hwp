@@ -254,3 +254,12 @@ def test_corpus_page_pushed_down_by_table_is_vertical_shift_and_others_pass(brea
     broken = {page["page"]: page["kinds"] for page in result["page_records"] if page["kinds"]}
     assert result["status"] == "ok"
     assert broken == {25: ["세로 밀림", "빠짐"]}
+
+
+def test_overlap_with_new_engine_equation_glyph_is_not_counted(breakage):
+    reference = _line("가나다", 50, 100)
+    rendered = _line("가나다", 50, 100) + [("", 52, 99, 10)]
+    data = _page(breakage, reference, rendered, owners=[0, 0, 0, 1])
+    data.glyphs[3].font_family = "HancomEQN"
+
+    assert breakage.judge_page(data) == []

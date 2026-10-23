@@ -56,6 +56,8 @@ OVERLAP_RATIO = 0.3
 BIG_GLYPH_SLACK = 0.1
 
 KINDS = ("세로 밀림", "겹침", "빠짐", "넘침")
+#: 렌더 수식 글자의 글꼴 이름 앞부분(대문자). 옛 엔진은 HYhwpEQ, 새 엔진은 HancomEQN으로 그린다.
+EQUATION_GLYPH_FONTS = ("HYHWPEQ", "HANCOMEQN")
 #: 단·칸 맨 아래 조각만 밀린 경우. 꼬리말·쪽 번호가 쪽마다 밀려 문서 전체가 깨짐으로 잡히지 않게 깨짐과 따로 센다.
 TAIL_SHIFT = "꼬리 밀림"
 
@@ -267,7 +269,7 @@ def judge_page(data: PageInput) -> list[dict]:
         or near_equation.nearest(char, max(VERTICAL_SHIFT_PT, sizes[b] * BIG_GLYPH_SLACK)) is not None
         for b, char in enumerate(rendered)
     ]
-    equation_glyph = [glyph.font_family.upper().startswith(EQUATION_FONTS[1]) for glyph in data.glyphs]
+    equation_glyph = [glyph.font_family.upper().startswith(EQUATION_GLYPH_FONTS) for glyph in data.glyphs]
     events: list[dict] = []
 
     def text_of(number: float) -> str:
