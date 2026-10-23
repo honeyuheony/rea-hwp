@@ -87,15 +87,19 @@ def format_pt(value: float) -> str:
     return text if text not in ("", "-0") else "0"
 
 
-def glyph_font_family(glyph: Glyph, equation_fallback: bool = False) -> str:
-    """글자를 그릴 font-family 속성 값(따옴표 포함). 쪽 SVG와 뷰어 글 층이 같은 글꼴을 고르도록 함께 쓴다."""
+def glyph_family_and_text(glyph: Glyph, equation_fallback: bool = False) -> tuple[str, str]:
+    """(font-family 속성 값(따옴표 포함), 그릴 글). 쪽 SVG와 뷰어 글 층이 같은 글꼴을 고르도록 함께 쓴다."""
     if glyph.font_family in EQUATION_FONTS and equation_fallback:
-        return quoteattr(FALLBACK_FONT_CHAIN)
+        return quoteattr(FALLBACK_FONT_CHAIN), escape(xml_safe(to_unicode(glyph.char)))
     if glyph.font_family in EQUATION_FONTS:
-        return quoteattr(xml_safe(glyph.font_family))
+        # 수식 글꼴 PUA는 옛한글이 아니라 수식 기호라 그대로 찍는다.
+        return quoteattr(xml_safe(glyph.font_family)), escape(xml_safe(glyph.char))
     if glyph.font_family == LEGACY_EQUATION_FAMILY:
-        return quoteattr(f"'{LEGACY_EQUATION_FAMILY}', {FALLBACK_FONT_CHAIN}")
-    return quoteattr(xml_safe(display_font(glyph.char, glyph.font_family)))
+        return quoteattr(f"'{LEGACY_EQUATION_FAMILY}', {FALLBACK_FONT_CHAIN}"), escape(xml_safe(glyph.char))
+    # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
+    # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
+    family = quoteattr(xml_safe(display_font(glyph.char, glyph.font_family)))
+    return family, escape(xml_safe(display_text(glyph.char).replace("\u00ad", "-")))
 
 
 def glyph_style_attrs(glyph: Glyph) -> list[str]:
@@ -107,23 +111,12 @@ def glyph_style_attrs(glyph: Glyph) -> list[str]:
     return style
 
 
-def _glyph_text(glyph: Glyph, equation_fallback: bool) -> str:
-    if glyph.font_family in EQUATION_FONTS and equation_fallback:
-        return escape(xml_safe(to_unicode(glyph.char)))
-    if glyph.font_family in EQUATION_FONTS or glyph.font_family == LEGACY_EQUATION_FAMILY:
-        # 수식 글꼴 PUA는 옛한글이 아니라 수식 기호라 그대로 찍는다.
-        return escape(xml_safe(glyph.char))
-    # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
-    # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
-    return escape(xml_safe(display_text(glyph.char).replace("\u00ad", "-")))
-
-
 def _glyph(glyph: Glyph, equation_fallback: bool = False) -> str:
     style = glyph_style_attrs(glyph)
     if glyph.color != "#000000":
         style.append(f'fill="{glyph.color}"')
     attrs = " ".join(style)
-    family, text = glyph_font_family(glyph, equation_fallback), _glyph_text(glyph, equation_fallback)
+    family, text = glyph_family_and_text(glyph, equation_fallback)
     if abs(glyph.scale_x - 1.0) > 0.001 or glyph.rotation:
         # 장평은 가로로만 줄이거나 늘린다. 원점을 기준으로 변환해 x 위치가 흔들리지 않게 한다.
         rotate = f" rotate({-glyph.rotation:g})" if glyph.rotation else ""
