@@ -199,7 +199,7 @@ def test_glyph_line_band_leaves_edges_to_script_with_line_end():
     glyphs = [Glyph("가", 1000, 2000, 1000, "바탕"), Glyph("나", 2000, 2000, 1000, "바탕")]
     line = TextLine("가나", 1000, 2000, 2000, 1000, None, [1000, 2000], glyphs)
     element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
-    assert (element.get("data-end"), element.get("data-edges")) == ("30", None)
+    assert (element.get("data-end"), element.get("data-x")) == ("30", None)
 
 
 def test_band_spans_layout_line_top_to_bottom():
@@ -214,26 +214,26 @@ def test_band_falls_back_to_glyph_box_without_layout_line():
     assert element.get("data-band") == "13 20"
 
 
-def test_fit_line_band_edges_follow_char_x_and_utf16_units():
+def test_fit_line_band_starts_follow_char_x_and_leave_out_astral_low_unit():
     line = TextLine("\U0001d465가", 1000, 2000, 3000, 1000, None, [1000, 2500], [None, None])
     element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
-    assert (element.get("class"), element.get("data-edges")) == ("ln fit", "10 25 25 40")
+    assert (element.get("class"), element.get("data-x"), element.get("data-end")) == ("ln fit", "10 - 25", "40")
 
 
-def test_fit_line_band_edges_spread_line_width_without_char_x():
+def test_fit_line_band_starts_spread_line_width_without_char_x():
     element = ET.fromstring(text_layer([TextLine("가나다", 1000, 2000, 3000, 1000)], 10000, 10000)).find("text")
-    assert element.get("data-edges") == "10 20 30 40"
+    assert (element.get("data-x"), element.get("data-end")) == ("10 20 30", "40")
 
 
 def test_zero_width_fit_line_keeps_browser_selection_without_band():
     element = ET.fromstring(text_layer([TextLine("가", 1000, 2000, 0, 1000)], 10000, 10000)).find("text")
-    assert (element.get("data-band"), element.get("data-edges")) == (None, None)
+    assert (element.get("data-band"), element.get("data-x")) == (None, None)
 
 
 def test_carriage_return_goes_to_html_as_char_reference():
     layer = text_layer([TextLine("가\r나", 1000, 2000, 3000, 1000)], 10000, 10000)
     assert "\r" not in layer and "가&#13;나" in layer
-    assert ET.fromstring(layer).find("text").get("data-edges") == "10 20 30 40"
+    assert ET.fromstring(layer).find("text").get("data-x") == "10 20 30"
 
 
 def _utf16_len(text: str) -> int:
@@ -293,11 +293,9 @@ def test_band_edge_data_matches_text_line(band_pages):
                 continue
             end = (line.x + line.width) / HU_PER_PT
             if "fit" in element.get("class").split():
-                edges = [float(edge) for edge in element.get("data-edges").split()]
-                assert len(edges) == _utf16_len("".join(element.itertext())) + 1, (page.number, line.text)
-                assert edges[-1] == pytest.approx(end, abs=0.001), (page.number, line.text)
-            else:
-                assert float(element.get("data-end")) == pytest.approx(end, abs=0.001), (page.number, line.text)
+                starts = element.get("data-x").split()
+                assert len(starts) == _utf16_len("".join(element.itertext())), (page.number, line.text)
+            assert float(element.get("data-end")) == pytest.approx(end, abs=0.001), (page.number, line.text)
 
 
 def test_band_widens_to_glyph_raised_above_line_top():

@@ -111,7 +111,7 @@ def test_text_layer_places_line_text_in_page_points():
     layer = text_layer([line], width=10000, height=20000)
     assert layer == (
         '<svg class="text-layer" viewBox="0 0 100 200"><text class="ln fit" x="10" y="20" font-size="10" '
-        'textLength="30" lengthAdjust="spacingAndGlyphs" data-edges="10 16 22 28 34 40" data-band="11.5 10">'
+        'textLength="30" lengthAdjust="spacingAndGlyphs" data-x="10 16 22 28 34" data-end="40" data-band="11.5 10">'
         "가 &lt;나&gt;</text></svg>"
     )
 

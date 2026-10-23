@@ -87,45 +87,56 @@ document.addEventListener('copy', (event) => {{
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const shownPages = new Set();
 const bandedPages = new Set();
-const lineEdges = new WeakMap();
+const lineUnits = new WeakMap();
 let bandFrame = 0;
 function scheduleBands() {{
   if (!bandFrame) bandFrame = requestAnimationFrame(drawBands);
 }}
-// 줄 글 UTF-16 위치마다 경계 x. data-edges가 없는 글리프 줄은 tspan x와 장평 transform, 줄 끝(data-end)으로 만든다.
-function edgesOf(line) {{
-  let edges = lineEdges.get(line);
-  if (edges) return edges;
-  if (line.dataset.edges) {{
-    edges = line.dataset.edges.split(' ').map(Number);
-  }} else {{
-    // tspan의 x 목록은 앞 글자들에만 있고, 목록 뒤 글자(이은 자모)와 대리쌍 뒤 단위는 다음 경계를 쓴다.
-    const starts = [];
-    for (const text of line.matches('text') ? [line] : line.querySelectorAll('text')) {{
-      // 장평 transform(translate·scale)을 읽기만 해서 곱한다. consolidate()는 transform 속성을 고쳐 쓴다.
-      const transforms = text.transform.baseVal;
-      let origin = 0, scale = 1;
-      for (let k = 0; k < transforms.numberOfItems; k += 1) {{
-        const matrix = transforms.getItem(k).matrix;
-        origin += scale * matrix.e;
-        scale *= matrix.a;
-      }}
-      for (const span of text.querySelectorAll('tspan')) {{
-        const xs = span.x.baseVal;
-        let k = 0;
-        for (const char of span.textContent) {{
-          starts.push(k < xs.numberOfItems ? origin + scale * xs.getItem(k).value : null);
-          if (char.length === 2) starts.push(null);
-          k += 1;
-        }}
+// 글리프 줄의 UTF-16 단위별 시작 x. tspan x 목록 뒤 글자(이은 자모)와 대리쌍 뒤 단위는 null이다.
+function glyphStarts(line) {{
+  const starts = [];
+  for (const text of line.matches('text') ? [line] : line.querySelectorAll('text')) {{
+    // 장평 transform(translate·scale)을 읽기만 해서 곱한다. consolidate()는 transform 속성을 고쳐 쓴다.
+    const transforms = text.transform.baseVal;
+    let origin = 0, scale = 1;
+    for (let k = 0; k < transforms.numberOfItems; k += 1) {{
+      const matrix = transforms.getItem(k).matrix;
+      origin += scale * matrix.e;
+      scale *= matrix.a;
+    }}
+    for (const span of text.querySelectorAll('tspan')) {{
+      const xs = span.x.baseVal;
+      let k = 0;
+      for (const char of span.textContent) {{
+        starts.push(k < xs.numberOfItems ? origin + scale * xs.getItem(k).value : null);
+        if (char.length === 2) starts.push(null);
+        k += 1;
       }}
     }}
-    edges = [Number(line.dataset.end)];
-    for (let k = starts.length - 1; k >= 0; k -= 1) edges.push(starts[k] ?? edges[edges.length - 1]);
-    edges.reverse();
   }}
-  lineEdges.set(line, edges);
-  return edges;
+  return starts;
+}}
+// 줄 글 UTF-16 단위마다 그 단위가 든 글자 묶음의 시작 x(lefts)와 끝 x(rights, 다음 묶음 시작 또는 줄 끝).
+function unitsOf(line) {{
+  let units = lineUnits.get(line);
+  if (units) return units;
+  const fitStarts = line.dataset.x && line.dataset.x.split(' ').map((x) => (x === '-' ? null : Number(x)));
+  const starts = fitStarts || glyphStarts(line);
+  const end = Number(line.dataset.end);
+  const lefts = [], rights = [];
+  let left = starts.find((x) => x !== null) ?? end;
+  for (const x of starts) {{
+    if (x !== null) left = x;
+    lefts.push(left);
+  }}
+  let right = end;
+  for (let k = starts.length - 1; k >= 0; k -= 1) {{
+    rights[k] = right;
+    if (starts[k] !== null) right = starts[k];
+  }}
+  units = {{lefts, rights}};
+  lineUnits.set(line, units);
+  return units;
 }}
 // 범위 경계점(node, offset)이 줄 글의 몇째 UTF-16 위치인지. 줄 앞이면 0, 줄 뒤면 글 길이.
 function offsetInLine(lineRange, length, node, offset) {{
@@ -149,12 +160,9 @@ function lineBand(line, lineRange, range) {{
   const start = offsetInLine(lineRange, length, range.startContainer, range.startOffset);
   const end = offsetInLine(lineRange, length, range.endContainer, range.endOffset);
   if (start >= end) return null;
-  const edges = edgesOf(line);
-  const span = edges.slice(start, end + 1);
-  let left = Math.min(...span), right = Math.max(...span);
-  // 이은 자모·대리쌍의 뒤쪽만 골라 경계가 접히면 그 글자 묶음 전체(앞 경계부터)로 넓힌다.
-  if (right <= left) left = edges.slice(0, start).findLast((edge) => edge < right) ?? left;
-  if (right <= left) right = edges.slice(end).find((edge) => edge > left) ?? right;
+  // 고른 단위가 든 글자 묶음을 모두 덮는다(이은 자모·대리쌍의 일부만 골라도 묶음 전체).
+  const {{lefts, rights}} = unitsOf(line);
+  const left = Math.min(...lefts.slice(start, end)), right = Math.max(...rights.slice(start, end));
   if (right <= left) return null;
   const [top, height] = line.dataset.band.split(' ').map(Number);
   const rect = document.createElementNS(SVG_NS, 'rect');
@@ -277,8 +285,8 @@ def _bands(lines: list[TextLine]) -> list[str]:
     return [f' data-band="{format_pt(top)} {format_pt(bottom - top)}"' for top, bottom in spans]
 
 
-def _fit_edges(line: TextLine, shown: str) -> list[float] | None:
-    """줄 폭 맞춤 줄의 UTF-16 위치별 경계. char_x가 있으면 글자 x, 없으면 줄 폭을 고르게 나눈다. 폭이 없으면 None."""
+def _fit_starts(line: TextLine, shown: str) -> list[float | None] | None:
+    """줄 폭 맞춤 줄의 UTF-16 단위별 시작 x(글자 안 뒤 단위는 None). char_x가 없으면 고르게 나눈다. 폭이 없으면 None."""
     unit_x: list[float | None] = []
     if len(line.char_x) == len(line.text):
         for char, x in zip(line.text, line.char_x, strict=True):
@@ -287,20 +295,20 @@ def _fit_edges(line: TextLine, shown: str) -> list[float] | None:
     if len(unit_x) != _utf16_len(shown):
         count = _utf16_len(shown)
         unit_x = [line.x + line.width * k / count for k in range(count)]
-    # 경계 k는 단위 k 앞이고, 글자 안쪽 경계(대리쌍 뒤 단위 등)는 그 글자 끝으로 올린다.
-    edges = [line.x + line.width]
-    for x in reversed(unit_x):
-        edges.append(edges[-1] if x is None else x)
-    edges.reverse()
-    return edges if max(edges) > min(edges) else None
+    placed = [x for x in unit_x if x is not None] + [line.x + line.width]
+    return unit_x if max(placed) > min(placed) else None
 
 
 def _fit_line(line: TextLine, band: str = "") -> str:
     """글자별 자리가 없거나 그린 글자와 하나씩 맞지 않는 줄(수식 스크립트)은 줄 폭에 맞춰 늘이거나 줄인다."""
     shown = copy_text(line.text)
-    edges = _fit_edges(line, shown)
+    starts = _fit_starts(line, shown)
     # 띠를 그릴 수 없는 줄(폭 0)은 띠 자료를 넣지 않아 브라우저 선택 칠하기를 그대로 둔다.
-    band = f' data-edges="{" ".join(format_pt(edge) for edge in edges)}"{band}' if edges is not None and band else ""
+    if starts is not None and band:
+        xs = " ".join("-" if x is None else format_pt(x) for x in starts)
+        band = f' data-x="{xs}" data-end="{format_pt(line.x + line.width)}"{band}'
+    else:
+        band = ""
     length = f' textLength="{format_pt(line.width)}" lengthAdjust="spacingAndGlyphs"' if line.width > 0 else ""
     return (
         f'<text class="ln fit" x="{format_pt(line.x)}" y="{format_pt(line.baseline)}" '
