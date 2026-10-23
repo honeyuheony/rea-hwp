@@ -19,9 +19,11 @@ from pathlib import Path
 
 import pymupdf
 from accuracy import (
+    DEVICE_PT,
     EQUATION_FONTS,
     TOLERANCE_PT,
     PlacedChar,
+    _fit_scale,
     _inside,
     merge_effect_strikes,
     pdf_pages,
@@ -33,17 +35,21 @@ from rea_hwp import tags
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.controls import CaptionListHeader, CellListHeader, ObjectCtrlHeader, TextBoxListHeader
 from rea_hwp.models.paragraph import TAB, ControlChar
-from rea_hwp.render import layout
+from rea_hwp.render import layout, table_flow, tables
 from rea_hwp.render.options import RenderOptions
-from rea_hwp.render.scene import Line
 from rea_hwp.render.svg import HU_PER_PT, page_glyph_table
 
 REFERENCE_ROOT = CORPUS_ROOT / "ref2022"
 
 #: 오른쪽으로 이어져도 새 줄로 보는 기준선 차이(pt). 위·아래 첨자는 남기고 다음 단 첫 줄은 끊으려는 추정값, 검증 안 됨.
 LINE_JUMP_PT = 12.0
-#: 이보다 짧은 줄 글은 이웃 쪽에서 찾지 않는다(한두 글자는 아무 쪽에나 있다).
+#: 이보다 짧은 줄 글은 다른 쪽에서 찾지 않는다(한두 글자는 아무 쪽에나 있다). 검증 안 됨: 고른 값.
 NEIGHBOR_TEXT_MIN = 3
+#: 정답 PDF 가로선: 양 끝 y 차이 상한, 선을 채운 사각형의 높이 상한(pt). 검증 안 됨: 굵은 표 선 1pt 안팎을 보고 고름.
+RULE_FLAT_PT = 0.2
+RULE_THICK_PT = 1.5
+#: 칸 위 경계로 볼 가로선이 칸 폭을 덮어야 하는 비율. 밑줄·글자 테두리를 빼려는 값, 검증 안 됨.
+RULE_COVER = 0.9
 
 _CONTAINERS = {
     tags.TABLE_CTRL: "셀",
@@ -57,6 +63,8 @@ _OBJECT_KINDS = {tags.TABLE_CTRL: "표", tags.GSO_CTRL: "개체", tags.EQUATION_
 #: 표·개체 아래 목록은 컨트롤이 아니라 목록 머리 종류로 가른다(표 캡션은 셀이 아니다).
 _LIST_KINDS = {CellListHeader: "셀", CaptionListHeader: "캡션", TextBoxListHeader: "글상자"}
 
+#: 쪽 id → 그 쪽에 그린 칸 상자 (칸 문단 레코드 id 집합, 왼쪽, 위, 폭, 높이 HU). 렌더러 draw_cell_boxes에서 적는다.
+_CELL_BOXES: dict[int, list[tuple[frozenset[int], float, float, float, float]]] = {}
 #: 그린 TextLine의 id → (그 TextLine, 줄 특징). TextLine을 함께 쥐어 id가 다른 객체에 다시 쓰이지 않게 한다.
 _TRACED: dict[int, tuple[object, dict]] = {}
 #: 문서 id → 문단 레코드 id → (담은 목록 종류, 앞 문단 종류, 자기 문단 개체 종류).
@@ -106,7 +114,8 @@ def _paragraph_context(document) -> dict[int, tuple[str, str, str, str | None]]:
         if node.tag == tags.PARA_HEADER and parent in list_kind:
             inner = _CONTAINERS.get(_ctrl_id(node), list_kind[parent])
         table_node = node.find(tags.TABLE) if _ctrl_id(node) == tags.TABLE_CTRL else None
-        inner_table = document.record_id(table_node.record) if table_node is not None else table
+        # 겹친 표 칸 문단도 쪽에 놓인 바깥 표로 센다(page.table_rows는 바깥 표만 담는다).
+        inner_table = document.record_id(table_node.record) if table_node is not None and table is None else table
         pending.extend((child, inner, id(node), inner_table) for child in reversed(node.children))
     return found
 
@@ -170,6 +179,7 @@ def _line_info(engine, view, index: int) -> dict:
         container = "바탕쪽"
     return {
         "paragraph": engine.document.record_id(view.node.record),
+        "record_key": id(view.node.record),
         "container": container,
         "previous": previous,
         "own_objects": own,
@@ -198,6 +208,17 @@ def install_trace() -> None:
 
     traced.traced = True
     layout.DocumentLayout.draw_line = traced
+    draw_cell_boxes = tables.draw_cell_boxes
+
+    def traced_boxes(boxes, page, styles):
+        _CELL_BOXES.setdefault(id(page), []).extend(
+            (frozenset(id(p.record) for p in cell.paragraphs), left, top, width, height)
+            for cell, left, top, width, height in boxes
+        )
+        return draw_cell_boxes(boxes, page, styles)
+
+    tables.draw_cell_boxes = traced_boxes
+    table_flow.draw_cell_boxes = traced_boxes
 
 
 def reference_lines(chars: list[PlacedChar]) -> list[list[int]]:
@@ -348,33 +369,61 @@ def _line_record(page, index: int | None) -> dict:
     return info
 
 
-def _horizontal_rules(page) -> list[float]:
-    """렌더 쪽 가로선의 y(pt)."""
-    return sorted({item.y1 / HU_PER_PT for item in page.items if isinstance(item, Line) and abs(item.y1 - item.y2) < 1})
+def _cell_box(page, onset: dict):
+    """시작 줄 렌더 줄이 든 칸 상자(pt: 왼쪽, 위, 폭, 높이). 기준선을 담은 칸 가운데 가장 안쪽(높이가 작은) 것."""
+    key, baseline = onset.get("record_key"), onset.get("baseline_pt")
+    if key is None or baseline is None:
+        return None
+    found = [
+        (left / HU_PER_PT, top / HU_PER_PT, width / HU_PER_PT, height / HU_PER_PT)
+        for keys, left, top, width, height in _CELL_BOXES.get(id(page), [])
+        if key in keys and top / HU_PER_PT <= baseline <= (top + height) / HU_PER_PT
+    ]
+    return min(found, key=lambda box: box[3]) if found else None
 
 
-def _rule_above(rules: list[float], y: float) -> float | None:
-    """y 바로 위(60pt 안)의 가로선 y. 칸 글 줄의 위 칸 경계로 본다."""
-    above = [rule for rule in rules if y - 60 <= rule < y]
-    return max(above) if above else None
+def _reference_cell_top(rules, box, y: float) -> float | None:
+    """정답 줄 y 위로 칸 높이 안에서, 칸 폭을 RULE_COVER 넘게 덮는 가장 가까운 가로선 y. 없으면 None."""
+    left, _, width, height = box
+    covering = [
+        rule_y
+        for x0, x1, rule_y in rules
+        if y - height <= rule_y < y and min(x1, left + width) - max(x0, left) >= RULE_COVER * width
+    ]
+    return max(covering) if covering else None
 
 
 def vertical_detail(onset: dict, page_index: int, pages, reference_rules) -> dict:
-    """세로 밀림 시작 줄의 하위 특징: 바로 위 칸 경계 어긋남, 같은 쪽 앞 표와 자기 표가 앞 쪽에서 이어졌는가."""
+    """세로 밀림 시작 줄의 하위 특징: 자기 칸 위 경계 어긋남, 같은 쪽 앞 표와 자기 표가 앞 쪽에서 이어졌는가."""
     page = pages[page_index]
     detail = {}
-    ref_rule = _rule_above(reference_rules(page_index), onset["reference_y"])
-    our_rule = _rule_above(_horizontal_rules(page), onset.get("baseline_pt", onset["reference_y"]))
-    if ref_rule is not None and our_rule is not None:
-        detail["rule_dy"] = round(our_rule - ref_rule, 2)
+    box = _cell_box(page, onset)
+    if box is not None:
+        # 두 쪽 모두 「그 줄이 든 칸」의 위 경계를 본다. 정답 칸을 찾지 못하면 맞대지 않는다(칸 경계 모름).
+        ref_top = _reference_cell_top(reference_rules(page_index), box, onset["reference_y"])
+        if ref_top is not None:
+            detail["rule_dy"] = round(box[1] - ref_top, 2)
     table = onset.get("table")
     if table is not None and table in page.table_rows:
         previous = pages[page_index - 1].table_rows if page_index else {}
-        placed = list(page.table_rows)
+        tops = _table_tops(page)
+        here = tops.get(table)
+        earlier = [t for t in page.table_rows if t != table and here is not None and tops.get(t, here) < here]
         detail["table_continued"] = table in previous
-        detail["earlier_table_carried"] = any(t in previous for t in placed[: placed.index(table)])
-        detail["earlier_table_here"] = placed.index(table) > 0
+        detail["earlier_table_carried"] = any(t in previous for t in earlier)
+        detail["earlier_table_here"] = bool(earlier)
     return detail
+
+
+def _table_tops(page) -> dict[str, float]:
+    """이 쪽에 놓인 바깥 표마다 그 칸 상자의 가장 위 y(HU). 표 차례를 넣은 차례가 아니라 쪽 위아래로 정한다."""
+    context = next(iter(_PARAGRAPH_CONTEXT.values()), {})
+    tops: dict[str, float] = {}
+    for keys, _, top, _, _ in _CELL_BOXES.get(id(page), []):
+        table = next((context[key][3] for key in keys if key in context and context[key][3]), None)
+        if table is not None:
+            tops[table] = min(top, tops.get(table, top))
+    return tops
 
 
 def _vertical_key(onset: dict) -> str:
@@ -401,7 +450,7 @@ def _vertical_key(onset: dict) -> str:
     return f"{onset.get('container', '모름')} / {edge} / {carried}"
 
 
-def page_onsets(page_index, reference_all, pages, neighbor, reference_rules) -> dict:
+def page_onsets(page_index, reference_all, pages, neighbor, reference_rules, far_page) -> dict:
     page = pages[page_index] if page_index < len(pages) else None
     boxes = [tuple(v / 100 for v in box) for box in page.excluded] if page is not None else []
     reference = [c for c in reference_all if not c.font.startswith(EQUATION_FONTS) and not _inside(c, boxes)]
@@ -418,6 +467,9 @@ def page_onsets(page_index, reference_all, pages, neighbor, reference_rules) -> 
         "reference_chars": len(reference),
         "bad": len(reference) - len(good),
         "onsets": [],
+        #: 시작 줄로 세지 않고 따로 센 1pt 밖 글자: 같은 자리 표기 차이, ±1쪽 밖으로 옮겨진 줄.
+        "glyph_form": 0,
+        "far_page": 0,
     }
     if page is not None:
         check = score_page(
@@ -432,6 +484,20 @@ def page_onsets(page_index, reference_all, pages, neighbor, reference_rules) -> 
         bad = [a for a in line if a not in good]
         if not bad:
             previous_good = True
+            continue
+        # 채점 기준은 그대로 두고, 위치는 맞는데 표기만 다른 줄과 먼 쪽으로 옮겨진 줄은 시작 줄 셈에서 뺀다.
+        if _glyph_form_only(bad, reference, rendered, pairs):
+            record["glyph_form"] += len(bad)
+            continue
+        run = [reference[a].char for a in line if a not in pairs]
+        if (
+            page is not None
+            and len(run) == len(line)
+            and len(run) >= NEIGHBOR_TEXT_MIN
+            and not any(n is not None and _find_run(n[0], run) is not None for n in neighbor_texts)
+            and far_page(run, page_index) is not None
+        ):
+            record["far_page"] += len(bad)
             continue
         if previous_good:
             kind, owner, paired = classify(
@@ -473,6 +539,20 @@ def page_onsets(page_index, reference_all, pages, neighbor, reference_rules) -> 
     return record
 
 
+def _glyph_form_only(bad: list[int], reference, rendered, pairs) -> bool:
+    """1pt 밖 글자가 모두 짝이 없고 같은 자리(1pt 안)에 짝 없는 다른 표기 렌더 글자가 있는가(PUA ↔ 옛한글 자모 등)."""
+    taken = set(pairs.values())
+    free = [b for b in range(len(rendered)) if b not in taken]
+    for a in bad:
+        if a in pairs:
+            return False
+        if not any(
+            math.dist((rendered[b].x, rendered[b].y), (reference[a].x, reference[a].y)) <= TOLERANCE_PT for b in free
+        ):
+            return False
+    return True
+
+
 def diverge(entry) -> dict:
     reference_path = REFERENCE_ROOT / entry.path.relative_to(CORPUS_ROOT).with_suffix(".pdf")
     if not reference_path.exists():
@@ -496,17 +576,26 @@ def _diverge_pages(pages, reference, reference_path) -> dict:
     texts: dict[int, tuple[list[str], list] | None] = {}
     rules: dict[int, list[float]] = {}
 
-    def reference_rules(index: int) -> list[float]:
+    def reference_rules(index: int) -> list[tuple[float, float, float]]:
+        """정답 쪽 가로선 (x0, x1, y) pt. 글자처럼 쪽 맞춤 축척을 되돌린다(accuracy.pdf_pages).
+
+        검증 안 됨: 선도 글자와 같은 행렬로 찍혔다고 본다.
+        """
         if index not in rules:
-            with pymupdf.open(str(reference_path)) as document:
-                found = set()
-                for drawing in document[index].get_drawings():
-                    for item in drawing["items"]:
-                        if item[0] == "l" and abs(item[1].y - item[2].y) < 0.2:
-                            found.add(item[1].y)
-                        elif item[0] == "re" and item[1].height < 1.5:
-                            found.add((item[1].y0 + item[1].y1) / 2)
-                rules[index] = sorted(found)
+            page = reference_document[index]
+            fit = _fit_scale(page)
+            sx, sy = (DEVICE_PT / fit[0], DEVICE_PT / fit[1]) if fit is not None else (1.0, 1.0)
+            found = set()
+            for drawing in page.get_drawings():
+                for item in drawing["items"]:
+                    if item[0] == "l" and abs(item[1].y - item[2].y) < RULE_FLAT_PT:
+                        x0, x1, y = min(item[1].x, item[2].x), max(item[1].x, item[2].x), item[1].y
+                    elif item[0] == "re" and item[1].height < RULE_THICK_PT and item[1].width > item[1].height:
+                        x0, x1, y = item[1].x0, item[1].x1, (item[1].y0 + item[1].y1) / 2
+                    else:
+                        continue
+                    found.add((x0 * sx, x1 * sx, y * sy))
+            rules[index] = sorted(found)
         return rules[index]
 
     def neighbor(index: int):
@@ -518,7 +607,18 @@ def _diverge_pages(pages, reference, reference_path) -> dict:
             texts[index] = ([c.char for c in chars], [(index, owner) for owner in owners])
         return texts[index]
 
-    records = [page_onsets(index, chars, pages, neighbor, reference_rules) for index, chars in enumerate(reference)]
+    def far_page(run: list[str], index: int) -> int | None:
+        """run 글자 목록이 든 렌더 쪽 번호(±1쪽 밖). 없으면 None."""
+        for other in range(len(pages)):
+            if abs(other - index) > 1 and _find_run(neighbor(other)[0], run) is not None:
+                return other
+        return None
+
+    with pymupdf.open(str(reference_path)) as reference_document:
+        records = [
+            page_onsets(index, chars, pages, neighbor, reference_rules, far_page)
+            for index, chars in enumerate(reference)
+        ]
     return {"status": "ok", "pages": len(pages), "reference_pages": len(reference), "page_records": records}
 
 
@@ -596,7 +696,9 @@ def markdown(ranked: dict[str, list[dict]], totals: dict, limit: int) -> str:
     out = ["# 코퍼스 어긋남 시작 줄 집계", ""]
     out.append(
         f"문서 {totals['documents']}, 채점 {totals['checked']}, render-error {totals['errors']}, "
-        f"검사불가 {totals['check_errors']}, "
+        f"검사불가 {totals['check_errors']}, 시작 줄로 세지 않은 1pt 밖 글자: "
+        f"같은 자리 표기 차이 {totals['glyph_form']}, "
+        f"±1쪽 밖 쪽 나눔 {totals['far_page']}, "
         f"정답 글자 {totals['reference_chars']}, 1pt 밖 {totals['bad']}, 시작 줄 {totals['onsets']}, "
         f"score_page와 맞은 글자 수가 다른 쪽 {totals['score_mismatch_pages']}"
     )
@@ -656,6 +758,8 @@ def main() -> int:
         "reference_chars": sum(p["reference_chars"] for p in page_records),
         "bad": sum(p["bad"] for p in page_records),
         "onsets": sum(len(p["onsets"]) for p in page_records),
+        "glyph_form": sum(p.get("glyph_form", 0) for p in page_records),
+        "far_page": sum(p.get("far_page", 0) for p in page_records),
         "score_mismatch_pages": sum(
             "score_within" in p and p["score_within"] != p["reference_chars"] - p["bad"] for p in page_records
         ),
