@@ -11,6 +11,7 @@ from corpus_paths import CORPUS_ROOT, USER_CORPUS_ROOT
 from rea_hwp import tags
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.controls import EqEdit
+from rea_hwp.render.common import TAC_ASCENT
 from rea_hwp.render.equation.unicode import LEGACY_EQUATION_FAMILY
 from rea_hwp.render.html import text_layer, viewer_html
 from rea_hwp.render.layout import layout_document
@@ -54,6 +55,49 @@ def test_text_line_char_x_keeps_spaces_in_order():
     for line in lines:
         assert line.char_x == sorted(line.char_x), line.text
         assert all(glyph is None for char, glyph in zip(line.text, line.glyphs, strict=True) if not char.strip())
+
+
+@pytest.mark.parametrize("path", DOCUMENTS, ids=lambda path: path.name)
+def test_text_line_top_bottom_hold_baseline(path):
+    lines = [line for page in layout_document(HwpDocument.open(path)) for line in page.text_lines]
+    placed = [line for line in lines if line.top is not None]
+    assert placed
+    for line in placed:
+        assert line.top <= line.baseline <= line.bottom, line.text
+
+
+@pytest.mark.parametrize("path", [DOCUMENTS[0], DOCUMENTS[2]], ids=lambda path: path.name)
+def test_text_line_bottom_meets_next_line_top_in_paragraph(path):
+    pairs = 0
+    for page in layout_document(HwpDocument.open(path)):
+        for above, below in zip(page.text_lines, page.text_lines[1:], strict=False):
+            same = above.paragraph is not None and above.paragraph == below.paragraph
+            if same and above.top is not None and below.top is not None and below.top > above.top:
+                assert below.top == above.bottom, (page.number, above.text, below.text)
+                pairs += 1
+    assert pairs
+
+
+@pytest.mark.parametrize("path", [DOCUMENTS[2], DOCUMENTS[4]], ids=lambda path: path.name)
+def test_paragraph_last_line_bottom_leaves_out_line_spacing(path):
+    document = HwpDocument.open(path)
+    pending = [node for stream in document.sections for node in stream.nodes]
+    one_line = set()
+    while pending:
+        node = pending.pop()
+        segments = node.find(tags.PARA_LINE_SEG) if node.tag == tags.PARA_HEADER else None
+        if segments is not None and len(segments.model.segments) == 1:
+            one_line.add(document.record_id(node.record))
+        pending.extend(node.children)
+    checked = 0
+    for page in layout_document(document):
+        for line in page.text_lines:
+            # 기준선이 글자 크기 × 0.85에 있는 보통 글 줄(수식·개체로 높아진 줄 제외)은 줄 높이 = 글자 크기다.
+            plain = line.top is not None and line.baseline - line.top == round(line.size * TAC_ASCENT)
+            if plain and line.paragraph in one_line:
+                assert line.bottom - line.top == line.size, line.text
+                checked += 1
+    assert checked
 
 
 def _layer_lines(page) -> list[ET.Element]:
