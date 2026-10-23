@@ -30,7 +30,7 @@ from corpus import CORPUS_ROOT, load_corpus
 
 from rea_hwp import tags
 from rea_hwp.document import HwpDocument
-from rea_hwp.models.controls import ObjectCtrlHeader
+from rea_hwp.models.controls import CaptionListHeader, CellListHeader, ObjectCtrlHeader, TextBoxListHeader
 from rea_hwp.models.paragraph import TAB, ControlChar
 from rea_hwp.render import layout
 from rea_hwp.render.options import RenderOptions
@@ -52,6 +52,8 @@ _CONTAINERS = {
     tags.ENDNOTE_CTRL: "미주",
 }
 _OBJECT_KINDS = {tags.TABLE_CTRL: "표", tags.GSO_CTRL: "개체", tags.EQUATION_CTRL: "수식"}
+#: 표·개체 아래 목록은 컨트롤이 아니라 목록 머리 종류로 가른다(표 캡션은 셀이 아니다).
+_LIST_KINDS = {CellListHeader: "셀", CaptionListHeader: "캡션", TextBoxListHeader: "글상자"}
 
 #: 그린 TextLine의 id → (그 TextLine, 줄 특징). TextLine을 함께 쥐어 id가 다른 객체에 다시 쓰이지 않게 한다.
 _TRACED: dict[int, tuple[object, dict]] = {}
@@ -84,18 +86,22 @@ def _paragraph_context(document) -> dict[int, tuple[str, str, str]]:
     found: dict[int, tuple[str, str, str]] = {}
     roots = [node for section in document.sections for node in section.nodes]
     pending = [(node, "본문", 0) for node in reversed(roots)]
-    #: 목록(부모 Node id, 최상위는 0)마다 마지막으로 본 문단의 종류.
+    #: 목록(부모 Node id, 최상위는 0)마다 마지막으로 본 문단의 종류와 지금 목록의 종류.
     previous: dict[int, str] = {}
+    list_kind: dict[int, str] = {}
     while pending:
         node, container, parent = pending.pop()
         if node.tag == tags.PARA_HEADER:
             own = _objects_of(node)
-            found[id(node.record)] = (container, previous.get(parent, "목록 처음"), own)
+            found[id(node.record)] = (list_kind.get(parent, container), previous.get(parent, "목록 처음"), own)
             previous[parent] = own
         elif node.tag == tags.LIST_HEADER:
-            # 셀·글상자 문단은 LIST_HEADER 뒤에 같은 수준으로 이어지므로 새 목록은 여기서 시작한다.
+            # 셀·글상자·캡션 문단은 LIST_HEADER 뒤에 같은 수준으로 이어지므로 새 목록은 여기서 시작한다.
             previous.pop(parent, None)
+            list_kind[parent] = _LIST_KINDS.get(type(node.model), container)
         inner = _CONTAINERS.get(_ctrl_id(node), container)
+        if node.tag == tags.PARA_HEADER and parent in list_kind:
+            inner = _CONTAINERS.get(_ctrl_id(node), list_kind[parent])
         pending.extend((child, inner, id(node)) for child in reversed(node.children))
     return found
 
@@ -106,12 +112,17 @@ def _line_state(view, index: int) -> str:
     stored = seg_node.model.__dict__.get("segments") if seg_node is not None else None
     if not stored:
         return "저장 줄 없음"
-    if index >= len(stored) or len(stored) != len(view.segments):
+    if index >= len(stored):
         return "다시 나눔"
     drawn, saved = view.segments[index], stored[index]
     if drawn == saved:
         return "저장 줄 그대로"
-    if drawn.text_start != saved.text_start:
+
+    # 줄 수가 달라도 이 줄의 시작과 끝(다음 줄 시작)이 저장 줄과 같으면 다시 나눈 줄이 아니다.
+    def end(segments) -> int | None:
+        return segments[index + 1].text_start if index + 1 < len(segments) else None
+
+    if drawn.text_start != saved.text_start or end(view.segments) != end(stored):
         return "다시 나눔"
     if (drawn.column_start, drawn.segment_width) != (saved.column_start, saved.segment_width):
         return "저장 줄 가로 바꿈"
@@ -125,11 +136,19 @@ def _line_flags(view, index: int) -> list[str]:
     if any(isinstance(c, ControlChar) and c.code == TAB for c in chars):
         flags.append("탭")
     in_line = {_ctrl_id(view.controls[i]) for i in range(first, last) if i in view.controls}
+    inline_objects = [
+        view.controls[i]
+        for i in range(first, last)
+        if i in view.controls
+        and _ctrl_id(view.controls[i]) in (tags.TABLE_CTRL, tags.GSO_CTRL)
+        and isinstance(view.controls[i].model, ObjectCtrlHeader)
+        and view.controls[i].model.treat_as_char
+    ]
     if tags.AUTO_NUMBER_CTRL in in_line:
         flags.append("자동 번호")
     if tags.EQUATION_CTRL in in_line:
         flags.append("수식")
-    if in_line & {tags.TABLE_CTRL, tags.GSO_CTRL}:
+    if inline_objects:
         flags.append("줄 안 개체")
     if index == 0 and view.para_shape.head_type:
         flags.append("문단 머리")
@@ -249,6 +268,15 @@ def glyph_lines(page, glyphs: list[object]) -> list[int | None]:
     return owners
 
 
+def _find_run(haystack: list[str], needle: list[str]) -> int | None:
+    """needle 글자 목록이 haystack 글자 목록에 처음 나오는 자리. 글자 하나가 여러 코드 포인트여도 자리가 맞는다."""
+    first = needle[0]
+    for at, char in enumerate(haystack):
+        if char == first and haystack[at : at + len(needle)] == needle:
+            return at
+    return None
+
+
 def classify(line, line_of, reference, rendered, pairs, owners, good, page, neighbor_texts):
     """시작 줄의 첫 1pt 밖 글자로 원인 종류, 그 원인을 맡은 렌더 줄 번호, 그 렌더 줄에 든 (정답, 렌더) 쌍을 정한다."""
     first_bad = next(a for a in line if a not in good)
@@ -256,11 +284,12 @@ def classify(line, line_of, reference, rendered, pairs, owners, good, page, neig
     if start is None:
         rest = line[line.index(first_bad) :]
         missing = [a for a in rest if a not in pairs]
-        text = "".join(reference[a].char for a in missing)
-        if len(missing) * 2 > len(rest) and len(text) >= NEIGHBOR_TEXT_MIN:
+        run = [reference[a].char for a in missing]
+        if len(missing) * 2 > len(rest) and len(run) >= NEIGHBOR_TEXT_MIN:
             for neighbor in neighbor_texts:
-                if neighbor is not None and text in neighbor[0]:
-                    return "쪽 나눔 다름", ("이웃 쪽", neighbor[1][neighbor[0].index(text)]), []
+                at = _find_run(neighbor[0], run) if neighbor is not None else None
+                if at is not None:
+                    return "쪽 나눔 다름", ("이웃 쪽", neighbor[1][at]), []
         before = [pairs[a] for a in line[: line.index(first_bad)] if a in pairs]
         return "글자 빠짐", owners[before[-1]] if before else None, []
     main = owners[start]
@@ -371,7 +400,7 @@ def page_onsets(page_index, reference_all, pages, neighbor) -> dict:
             }
             jump = x_jump(paired, reference, rendered) if kind.startswith("줄 안 x") else None
             if jump is not None:
-                onset["x_jump"] = reference[paired[jump - 1][0]].char + reference[paired[jump][0]].char
+                onset["x_jump"] = [reference[paired[jump - 1][0]].char, reference[paired[jump][0]].char]
                 onset["x_jump_pt"] = round(
                     (rendered[paired[jump][1]].x - reference[paired[jump][0]].x)
                     - (rendered[paired[jump - 1][1]].x - reference[paired[jump - 1][0]].x),
@@ -394,8 +423,16 @@ def diverge(entry) -> dict:
         pages = layout.layout_document(HwpDocument.open(entry.path, entry.password), RenderOptions.from_environment())
     except Exception as error:  # 렌더링 실패는 실패로 센다(evaluate.py와 같다).
         return {"status": "render-error", "reason": f"{type(error).__name__}: {error}"}
-    reference = pdf_pages(str(reference_path))
-    texts: dict[int, tuple[str, list] | None] = {}
+    try:
+        return _diverge_pages(pages, pdf_pages(str(reference_path)))
+    except Exception as error:  # 한 문서의 집계 실패가 전체 집계를 끝내지 않게 검사불가로 따로 센다.
+        return {"status": "check-error", "reason": f"{type(error).__name__}: {error}"}
+    finally:
+        _TRACED.clear()
+
+
+def _diverge_pages(pages, reference) -> dict:
+    texts: dict[int, tuple[list[str], list] | None] = {}
 
     def neighbor(index: int):
         if not 0 <= index < len(pages):
@@ -403,11 +440,10 @@ def diverge(entry) -> dict:
         if index not in texts:
             chars, glyphs = rendered_chars(pages[index])
             owners = glyph_lines(pages[index], glyphs)
-            texts[index] = ("".join(c.char for c in chars), [(index, owner) for owner in owners])
+            texts[index] = ([c.char for c in chars], [(index, owner) for owner in owners])
         return texts[index]
 
     records = [page_onsets(index, chars, pages, neighbor) for index, chars in enumerate(reference)]
-    _TRACED.clear()
     return {"status": "ok", "pages": len(pages), "reference_pages": len(reference), "page_records": records}
 
 
@@ -430,7 +466,7 @@ def _feature_keys(onset: dict) -> dict[str, str]:
     keys = {}
     if "x_jump" in onset:
         before, after = onset["x_jump"]
-        keys["x 건너뜀 글자 종류"] = f"{_char_class(before)} 뒤 {_char_class(after)}"
+        keys["x 건너뜀 글자 종류"] = f"{_char_class(before[0])} 뒤 {_char_class(after[0])}"
         keys["x 건너뜀 글자 쌍"] = f"{before!r} 뒤 {after!r}"
     return keys | {
         "종류": onset["kind"],
@@ -483,6 +519,7 @@ def markdown(ranked: dict[str, list[dict]], totals: dict, limit: int) -> str:
     out = ["# 코퍼스 어긋남 시작 줄 집계", ""]
     out.append(
         f"문서 {totals['documents']}, 채점 {totals['checked']}, render-error {totals['errors']}, "
+        f"검사불가 {totals['check_errors']}, "
         f"정답 글자 {totals['reference_chars']}, 1pt 밖 {totals['bad']}, 시작 줄 {totals['onsets']}, "
         f"score_page와 맞은 글자 수가 다른 쪽 {totals['score_mismatch_pages']}"
     )
@@ -537,6 +574,7 @@ def main() -> int:
         "documents": len(results),
         "checked": len(checked),
         "errors": sum(r["status"] == "render-error" for r in results.values()),
+        "check_errors": sum(r["status"] == "check-error" for r in results.values()),
         "reference_chars": sum(p["reference_chars"] for p in page_records),
         "bad": sum(p["bad"] for p in page_records),
         "onsets": sum(len(p["onsets"]) for p in page_records),
@@ -549,8 +587,8 @@ def main() -> int:
     ranked = ranking(results)
     (args.out / "ranking.md").write_text(markdown(ranked, totals, args.rows), encoding="utf-8")
     for path, result in results.items():
-        if result["status"] == "render-error":
-            print(f"render-error: {path}: {result['reason']}")
+        if result["status"] in ("render-error", "check-error"):
+            print(f"{result['status']}: {path}: {result['reason']}")
     print(json.dumps(totals, ensure_ascii=False))
     return 0
 
