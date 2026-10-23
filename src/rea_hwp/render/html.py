@@ -155,21 +155,22 @@ def _glyph_line(line: TextLine) -> str | None:
     chars: list[_LayerChar] = []
     # 공백·탭은 앞 글자(줄 머리면 뒤 글자) 모양으로 기준선에 둔다.
     style: Glyph = drawn[0]
+    font, transform = _style_key(style), (round(style.scale_x, 4), style.rotation)
     previous: Glyph | None = None
     for char, x, glyph in pairs:
         shown = copy_text(char)
         joined = glyph is not None and glyph is previous
         previous = glyph
-        if glyph is not None:
+        if glyph is not None and glyph is not style:
             style = glyph
+            font, transform = _style_key(style), (round(style.scale_x, 4), style.rotation)
         if not shown:
             continue
         y = glyph.y if glyph is not None else line.baseline
-        transform = (round(style.scale_x, 4), style.rotation)
         # 이은 자모와 여러 자모로 풀린 옛한글 PUA의 뒤 글자에도 같은 x를 주면 Chrome이 자모를 하나씩 겹쳐 놓는다.
         for k, part in enumerate(shown):
             own_x = None if joined or k else x
-            chars.append(_LayerChar(part, own_x, y, _style_key(style), transform))
+            chars.append(_LayerChar(part, own_x, y, font, transform))
     groups: list[list[_LayerChar]] = []
     for char in chars:
         if groups and groups[-1][0].transform == char.transform and not char.transform[1]:
