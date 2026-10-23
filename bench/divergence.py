@@ -563,20 +563,29 @@ def _glyph_form_only(bad: list[int], reference, rendered, pairs, free: list[int]
     """1pt 밖 글자마다 1pt 안에 쌍 없는 렌더 글자가 하나씩 따로 있는가(PUA ↔ 옛한글 자모 등). 맞으면 free에서 뺀다."""
     if any(a in pairs for a in bad):
         return False
-    used = []
-    for a in bad:
-        distance, near = min(
-            (
-                (math.dist((rendered[b].x, rendered[b].y), (reference[a].x, reference[a].y)), b)
-                for b in free
-                if b not in used
-            ),
-            default=(math.inf, None),
-        )
-        if distance > TOLERANCE_PT:
-            return False
-        used.append(near)
-    free[:] = [b for b in free if b not in used]
+    near = {
+        a: [
+            b
+            for b in free
+            if math.dist((rendered[b].x, rendered[b].y), (reference[a].x, reference[a].y)) <= TOLERANCE_PT
+        ]
+        for a in bad
+    }
+    owner: dict[int, int] = {}
+
+    def augment(a: int, seen: set[int]) -> bool:
+        # 증가 경로 이분 매칭: 줄 하나의 글자 수만큼이라 작다.
+        for b in near[a]:
+            if b not in seen:
+                seen.add(b)
+                if b not in owner or augment(owner[b], seen):
+                    owner[b] = a
+                    return True
+        return False
+
+    if not all(augment(a, set()) for a in bad):
+        return False
+    free[:] = [b for b in free if b not in owner]
     return True
 
 
@@ -607,8 +616,8 @@ def _clear_traces() -> None:
 
 def _diverge_pages(pages, reference, reference_path) -> dict:
     texts: dict[int, tuple[list[str], list] | None] = {}
+    chars_of: dict[int, tuple[list, list, list[str]]] = {}
     rules: dict[int, list[tuple[float, float, float]]] = {}
-    plain: dict[int, list[str]] = {}
 
     def reference_rules(index: int) -> list[tuple[float, float, float]]:
         """정답 쪽 가로선 (x0, x1, y) pt. 쪽 맞춤 행렬로 찍힌 선만 글자처럼 장치 좌표로 되돌린다(accuracy.pdf_pages)."""
@@ -634,10 +643,17 @@ def _diverge_pages(pages, reference, reference_path) -> dict:
         if not 0 <= index < len(pages):
             return None
         if index not in texts:
-            chars, glyphs = rendered_chars(pages[index])
+            _, glyphs, letters = page_chars(index)
             owners = glyph_lines(pages[index], glyphs)
-            texts[index] = ([c.char for c in chars], [(index, owner) for owner in owners])
+            texts[index] = (letters, [(index, owner) for owner in owners])
         return texts[index]
+
+    def page_chars(index: int) -> tuple[list, list, list[str]]:
+        """쪽 index의 렌더 글자, 글리프, 글자 문자열 목록. 쪽마다 한 번 만든다."""
+        if index not in chars_of:
+            chars, glyphs = rendered_chars(pages[index])
+            chars_of[index] = (chars, glyphs, [c.char for c in chars])
+        return chars_of[index]
 
     def far_page(run: list[str], index: int) -> int | None:
         """run 글이 든 렌더 쪽 번호(±1쪽 밖, 이웃 쪽과 같은 _find_run). 없거나 둘 이상의 쪽에 있으면 None."""
@@ -645,10 +661,8 @@ def _diverge_pages(pages, reference, reference_path) -> dict:
         for other in range(len(pages)):
             if abs(other - index) <= 1:
                 continue
-            if other not in plain:
-                # 줄 번호(glyph_lines)는 쪽 나눔 판정에만 쓰므로 여기서는 글자만 쪽마다 한 번 꺼낸다.
-                plain[other] = [c.char for c in rendered_chars(pages[other])[0]]
-            if _find_run(plain[other], run) is not None:
+            # 줄 번호(glyph_lines)는 이웃 쪽 판정에만 쓰므로 여기서는 page_chars의 글자만 본다.
+            if _find_run(page_chars(other)[2], run) is not None:
                 if found is not None:
                     return None
                 found = other
