@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 
 import pytest
 from corpus_paths import CORPUS_ROOT, USER_CORPUS_ROOT
 
+from rea_hwp import tags
 from rea_hwp.document import HwpDocument
+from rea_hwp.models.controls import EqEdit
 from rea_hwp.render.equation.unicode import LEGACY_EQUATION_FAMILY
 from rea_hwp.render.html import text_layer, viewer_html
 from rea_hwp.render.layout import layout_document
@@ -140,8 +143,10 @@ def test_viewer_puts_every_text_layer_in_page_from_start():
     layer = text_layer([TextLine("가", 1000, 2000, 1000, 1000)], 59528, 84188)
     html = viewer_html("t", [("p1.svg", 595.28, 841.88), ("p2.svg", 841.88, 595.28)], [layer, layer])
     figures = html.split('<figure class="page"')[1:]
-    assert all(layer in figure and "aspect-ratio" in figure.split(">")[0] for figure in figures)
+    assert all(layer in figure for figure in figures)
     assert "<template" not in html
+    ratios = [re.search(r"aspect-ratio: ([\d.]+) / ([\d.]+)", figure.split(">")[0]).groups() for figure in figures]
+    assert [(float(width), float(height)) for width, height in ratios] == [(595.28, 841.88), (841.88, 595.28)]
 
 
 def test_text_layer_falls_back_to_line_fit_for_rotated_glyph():
@@ -149,3 +154,24 @@ def test_text_layer_falls_back_to_line_fit_for_rotated_glyph():
     line = TextLine("가나", 1000, 2000, 2000, 1000, None, [1000, 1000], glyphs)
     element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
     assert (element.get("class"), "".join(element.itertext())) == ("ln fit", "가나")
+
+
+def _equation_scripts(document: HwpDocument) -> list[str]:
+    scripts = []
+    pending = [node for stream in document.sections for node in stream.nodes]
+    while pending:
+        node = pending.pop()
+        if node.tag == tags.EQEDIT and isinstance(node.model, EqEdit) and node.model.script:
+            scripts.append(re.sub(r"[\r\n\t]+", " ", node.model.script).strip())
+        pending.extend(node.children)
+    return [script for script in scripts if script]
+
+
+@pytest.mark.parametrize("path", DOCUMENTS, ids=lambda path: path.name)
+def test_only_equation_script_lines_fall_back_to_line_fit(path):
+    document = HwpDocument.open(path)
+    scripts = _equation_scripts(document)
+    for page in layout_document(document):
+        for line, element in zip(page.text_lines, _layer_lines(page), strict=True):
+            if "fit" in element.get("class").split():
+                assert any(script in line.text for script in scripts), (page.number, line.text)
