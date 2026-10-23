@@ -140,8 +140,8 @@ class _LayerChar(NamedTuple):
     x: float | None
     y: float
     font: tuple
-    #: (장평, 회전 각도).
-    transform: tuple[float, float]
+    #: 장평. 줄 글 글리프는 make_glyph로만 만들어 회전이 없다(회전 글자는 세로쓰기·그리기 개체·차트뿐, 줄 글 없음).
+    scale: float
 
 
 def _glyph_line(line: TextLine) -> str | None:
@@ -155,7 +155,7 @@ def _glyph_line(line: TextLine) -> str | None:
     chars: list[_LayerChar] = []
     # 공백·탭은 앞 글자(줄 머리면 뒤 글자) 모양으로 기준선에 둔다.
     style: Glyph = drawn[0]
-    font, transform = _style_key(style), (round(style.scale_x, 4), style.rotation)
+    font, scale = _style_key(style), round(style.scale_x, 4)
     previous: Glyph | None = None
     for char, x, glyph in pairs:
         shown = copy_text(char)
@@ -163,17 +163,17 @@ def _glyph_line(line: TextLine) -> str | None:
         previous = glyph
         if glyph is not None and glyph is not style:
             style = glyph
-            font, transform = _style_key(style), (round(style.scale_x, 4), style.rotation)
+            font, scale = _style_key(style), round(style.scale_x, 4)
         if not shown:
             continue
         y = glyph.y if glyph is not None else line.baseline
         # 이은 자모와 여러 자모로 풀린 옛한글 PUA의 뒤 글자에도 같은 x를 주면 Chrome이 자모를 하나씩 겹쳐 놓는다.
         for k, part in enumerate(shown):
             own_x = None if joined or k else x
-            chars.append(_LayerChar(part, own_x, y, font, transform))
+            chars.append(_LayerChar(part, own_x, y, font, scale))
     groups: list[list[_LayerChar]] = []
     for char in chars:
-        if groups and groups[-1][0].transform == char.transform and not char.transform[1]:
+        if groups and groups[-1][0].scale == char.scale:
             groups[-1].append(char)
         else:
             groups.append([char])
@@ -184,18 +184,13 @@ def _glyph_line(line: TextLine) -> str | None:
 
 def _transformed_text(group: list[_LayerChar], attrs: str = "") -> str:
     """장평은 원점을 첫 글자 x에 두고 가로로만 줄이므로 글자 x를 그 비율로 나눈다(그린 글자와 같은 폭)."""
-    scale, rotation = group[0].transform
-    origin_x, origin_y = group[0].x or 0.0, group[0].y
-    if scale == 1.0 and not rotation:
-        transform, origin_x, origin_y = "", 0.0, 0.0
-    elif not rotation:
-        transform, origin_y = f' transform="translate({format_pt(origin_x)} 0) scale({scale:.4f} 1)"', 0.0
+    scale = group[0].scale
+    if scale == 1.0:
+        origin_x, transform = 0.0, ""
     else:
-        scale = 1.0
-        transform = (
-            f' transform="translate({format_pt(origin_x)} {format_pt(origin_y)}) '
-            f'rotate({-rotation:g}) scale({group[0].transform[0]:.4f} 1)"'
-        )
+        # 장평이 바뀌는 곳은 글리프가 바뀌는 곳이라 묶음 첫 글자는 늘 자기 x가 있다.
+        origin_x = group[0].x or 0.0
+        transform = f' transform="translate({format_pt(origin_x)} 0) scale({scale:.4f} 1)"'
     # tspan 하나의 x·y 목록은 앞 글자들에만 주고, 목록보다 많은 뒤 글자(이은 자모)는 앞 글자에 이어 흐른다.
     runs: list[list[_LayerChar]] = []
     for char in group:
@@ -208,7 +203,7 @@ def _transformed_text(group: list[_LayerChar], attrs: str = "") -> str:
     for run in runs:
         placed = [char for char in run if char.x is not None]
         xs = " ".join(format_pt((char.x - origin_x) / scale) for char in placed)
-        ys = " ".join(format_pt(char.y - origin_y) for char in placed)
+        ys = " ".join(format_pt(char.y) for char in placed)
         position = f'x="{xs}" y="{ys}" ' if placed else ""
         text = escape("".join(char.text for char in run))
         spans.append(f"<tspan {position}{_font_attrs(run[0].font)}>{text}</tspan>")
