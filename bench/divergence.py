@@ -240,7 +240,7 @@ def reference_lines(chars: list[PlacedChar]) -> list[list[int]]:
 
 
 def pair_chars(reference: list[PlacedChar], rendered: list[PlacedChar]) -> dict[int, int]:
-    """accuracy.score_page와 같은 짝 맺기(글자 열 정렬 뒤 남은 글자는 허용 오차 안 같은 글자). 정답 번호 → 렌더 번호."""
+    """accuracy.score_page와 같은 쌍 맺기(글자 열 정렬 뒤 남은 글자는 허용 오차 안 같은 글자). 정답 번호 → 렌더 번호."""
     matcher = difflib.SequenceMatcher(None, [c.char for c in reference], [c.char for c in rendered], autojunk=False)
     pairs = {block.a + k: block.b + k for block in matcher.get_matching_blocks() for k in range(block.size)}
     used = set(pairs.values())
@@ -298,7 +298,7 @@ def glyph_lines(page, glyphs: list[object]) -> list[int | None]:
 
 
 def _find_run(haystack: list[str], needle: list[str]) -> int | None:
-    """needle 글자 목록이 haystack 글자 목록에 처음 나오는 자리. 글자 하나가 여러 코드 포인트여도 자리가 맞는다."""
+    """needle 글자 목록이 haystack 글자 목록에 처음 나오는 위치. 글자 하나가 여러 코드 포인트여도 위치가 맞는다."""
     first = needle[0]
     for at, char in enumerate(haystack):
         if char == first and haystack[at : at + len(needle)] == needle:
@@ -355,7 +355,7 @@ def classify(line, line_of, reference, rendered, pairs, owners, good, page, neig
 
 
 def x_jump(paired, reference, rendered) -> int | None:
-    """이웃한 두 글자 사이에서 x 차이가 허용 오차 넘게 바뀌는 첫 자리(paired 번호). 고르게 쌓이면 None."""
+    """이웃한 두 글자 사이에서 x 차이가 허용 오차 넘게 바뀌는 첫 위치(paired 번호). 고르게 쌓이면 None."""
     dxs = [rendered[b].x - reference[a].x for a, b in paired]
     return next((i for i in range(1, len(dxs)) if abs(dxs[i] - dxs[i - 1]) > TOLERANCE_PT), None)
 
@@ -471,7 +471,7 @@ def page_onsets(page_index, reference_all, pages, neighbor, reference_rules, far
         "reference_chars": len(reference),
         "bad": len(reference) - len(good),
         "onsets": [],
-        #: 시작 줄로 세지 않고 따로 센 1pt 밖 글자: 같은 자리 표기 차이, ±1쪽 밖으로 옮겨진 줄.
+        #: 시작 줄로 세지 않고 따로 센 1pt 밖 글자: 같은 위치 표기 차이, ±1쪽 밖으로 옮겨진 줄.
         "glyph_form": 0,
         "far_page": 0,
     }
@@ -549,39 +549,31 @@ def page_onsets(page_index, reference_all, pages, neighbor, reference_rules, far
 
 
 def _rule_fitted(item, fit: tuple[float, float]) -> bool:
-    """선 끝 좌표가 0.12pt 장치 격자보다 쪽 맞춤 격자에 더 가까운가. 선을 그린 행렬은 PDF 그리기 목록에 없다.
-
-    실측(2026-10-23, 쪽 맞춤 행렬이 있는 정답 쪽 전체, big_file 뺌): 쪽 맞춤 격자 343,717, 장치 격자 36,134,
-    구분 안 됨 8,131. 두 격자가 섞인 쪽이 146쪽이라 쪽 단위로 정할 수 없다.
-    """
+    """선 끝 좌표가 0.12pt 장치 격자보다 쪽 맞춤 격자에 가깝거나 같은가(같으면 다수인 쪽 맞춤으로 본다)."""
     if item[0] == "l":
         values = [(item[1].x, 0), (item[2].x, 0), (item[1].y, 1), (item[2].y, 1)]
     else:
         values = [(item[1].x0, 0), (item[1].x1, 0), (item[1].y0, 1), (item[1].y1, 1)]
     exact = sum(abs(v / DEVICE_PT - round(v / DEVICE_PT)) for v, _ in values)
     fitted = sum(abs(v / fit[axis] - round(v / fit[axis])) for v, axis in values)
-    return fitted < exact
+    return fitted <= exact
 
 
 def _glyph_form_only(bad: list[int], reference, rendered, pairs, free: list[int]) -> bool:
-    """1pt 밖 글자가 모두 짝이 없고 같은 자리(1pt 안)에 짝 없는 렌더 글자가 하나씩 있는가(PUA ↔ 옛한글 자모 등).
-
-    렌더 글자 하나는 정답 글자 하나만 덮는다. 맞으면 쓴 렌더 글자를 free에서 뺀다.
-    """
+    """1pt 밖 글자마다 1pt 안에 쌍 없는 렌더 글자가 하나씩 따로 있는가(PUA ↔ 옛한글 자모 등). 맞으면 free에서 뺀다."""
     if any(a in pairs for a in bad):
         return False
     used = []
     for a in bad:
-        near = next(
+        distance, near = min(
             (
-                b
+                (math.dist((rendered[b].x, rendered[b].y), (reference[a].x, reference[a].y)), b)
                 for b in free
                 if b not in used
-                and math.dist((rendered[b].x, rendered[b].y), (reference[a].x, reference[a].y)) <= TOLERANCE_PT
             ),
-            None,
+            default=(math.inf, None),
         )
-        if near is None:
+        if distance > TOLERANCE_PT:
             return False
         used.append(near)
     free[:] = [b for b in free if b not in used]
@@ -616,7 +608,7 @@ def _clear_traces() -> None:
 def _diverge_pages(pages, reference, reference_path) -> dict:
     texts: dict[int, tuple[list[str], list] | None] = {}
     rules: dict[int, list[tuple[float, float, float]]] = {}
-    joined: dict[int, str] = {}
+    plain: dict[int, list[str]] = {}
 
     def reference_rules(index: int) -> list[tuple[float, float, float]]:
         """정답 쪽 가로선 (x0, x1, y) pt. 쪽 맞춤 행렬로 찍힌 선만 글자처럼 장치 좌표로 되돌린다(accuracy.pdf_pages)."""
@@ -648,15 +640,15 @@ def _diverge_pages(pages, reference, reference_path) -> dict:
         return texts[index]
 
     def far_page(run: list[str], index: int) -> int | None:
-        """run 글이 든 렌더 쪽 번호(±1쪽 밖). 없거나 둘 이상의 쪽에 있으면 None."""
-        needle = "".join(run)
+        """run 글이 든 렌더 쪽 번호(±1쪽 밖, 이웃 쪽과 같은 _find_run). 없거나 둘 이상의 쪽에 있으면 None."""
         found = None
         for other in range(len(pages)):
             if abs(other - index) <= 1:
                 continue
-            if other not in joined:
-                joined[other] = "".join(neighbor(other)[0])
-            if needle in joined[other]:
+            if other not in plain:
+                # 줄 번호(glyph_lines)는 쪽 나눔 판정에만 쓰므로 여기서는 글자만 쪽마다 한 번 꺼낸다.
+                plain[other] = [c.char for c in rendered_chars(pages[other])[0]]
+            if _find_run(plain[other], run) is not None:
                 if found is not None:
                     return None
                 found = other
@@ -745,7 +737,7 @@ def markdown(ranked: dict[str, list[dict]], totals: dict, limit: int) -> str:
     out.append(
         f"문서 {totals['documents']}, 채점 {totals['checked']}, render-error {totals['errors']}, "
         f"검사불가 {totals['check_errors']}, 시작 줄로 세지 않은 1pt 밖 글자: "
-        f"같은 자리 표기 차이 {totals['glyph_form']}, "
+        f"같은 위치 표기 차이 {totals['glyph_form']}, "
         f"±1쪽 밖 쪽 나눔 {totals['far_page']}, "
         f"정답 글자 {totals['reference_chars']}, 1pt 밖 {totals['bad']}, 시작 줄 {totals['onsets']}, "
         f"score_page와 맞은 글자 수가 다른 쪽 {totals['score_mismatch_pages']}"
