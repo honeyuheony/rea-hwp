@@ -45,6 +45,8 @@ REFERENCE_ROOT = CORPUS_ROOT / "ref2022"
 LINE_JUMP_PT = 12.0
 #: 이보다 짧은 줄 글은 다른 쪽에서 찾지 않는다(한두 글자는 아무 쪽에나 있다). 검증 안 됨: 고른 값.
 NEIGHBOR_TEXT_MIN = 3
+#: 문서 전체 쪽에서 찾을 줄 글 최소 길이. 짧은 조각은 여러 쪽에 있어 한 쪽에서만 나올 때 받는다. 검증 안 됨: 고른 값.
+FAR_TEXT_MIN = 8
 #: 정답 PDF 가로선: 양 끝 y 차이 상한, 선을 채운 사각형의 높이 상한(pt). 검증 안 됨: 굵은 표 선 1pt 안팎을 보고 고름.
 RULE_FLAT_PT = 0.2
 RULE_THICK_PT = 1.5
@@ -384,6 +386,7 @@ def _cell_box(page, onset: dict):
 
 def _reference_cell_top(rules, box, y: float) -> float | None:
     """정답 줄 y 위로 칸 높이 안에서, 칸 폭을 RULE_COVER 넘게 덮는 가장 가까운 가로선 y. 없으면 None."""
+    # 한계: 칸 안 겹친 표의 선도 칸 폭을 덮으면 위 경계로 잡힌다. 렌더 칸 창이 정답 칸과 크게 다르면 「모름」이 된다.
     left, _, width, height = box
     covering = [
         rule_y
@@ -417,6 +420,7 @@ def vertical_detail(onset: dict, page_index: int, pages, reference_rules) -> dic
 
 def _table_tops(page) -> dict[str, float]:
     """이 쪽에 놓인 바깥 표마다 그 칸 상자의 가장 위 y(HU). 표 차례를 넣은 차례가 아니라 쪽 위아래로 정한다."""
+    # 한계: 칸 상자에 단 번호가 없어 여러 단 쪽에서는 흐름 차례와 다를 수 있다. 단 정보를 기록하면 단 → y로 바꾼다.
     context = next(iter(_PARAGRAPH_CONTEXT.values()), {})
     tops: dict[str, float] = {}
     for keys, _, top, _, _ in _CELL_BOXES.get(id(page), []):
@@ -479,6 +483,8 @@ def page_onsets(page_index, reference_all, pages, neighbor, reference_rules, far
     lines = reference_lines(reference)
     line_of = {a: number for number, line in enumerate(lines) for a in line}
     neighbor_texts = [neighbor(page_index - 1), neighbor(page_index + 1)]
+    taken = set(pairs.values())
+    free = [b for b in range(len(rendered)) if b not in taken]
     previous_good = True
     for number, line in enumerate(lines):
         bad = [a for a in line if a not in good]
@@ -486,17 +492,20 @@ def page_onsets(page_index, reference_all, pages, neighbor, reference_rules, far
             previous_good = True
             continue
         # 채점 기준은 그대로 두고, 위치는 맞는데 표기만 다른 줄과 먼 쪽으로 옮겨진 줄은 시작 줄 셈에서 뺀다.
-        if _glyph_form_only(bad, reference, rendered, pairs):
+        if _glyph_form_only(bad, reference, rendered, pairs, free):
+            # 위치는 맞으므로 맞는 줄로 본다. 뒤 줄이 틀리면 새 시작 줄이다.
             record["glyph_form"] += len(bad)
+            previous_good = True
             continue
         run = [reference[a].char for a in line if a not in pairs]
         if (
             page is not None
             and len(run) == len(line)
-            and len(run) >= NEIGHBOR_TEXT_MIN
+            and len(run) >= FAR_TEXT_MIN
             and not any(n is not None and _find_run(n[0], run) is not None for n in neighbor_texts)
             and far_page(run, page_index) is not None
         ):
+            # 이 쪽 흐름 밖 줄이라 previous_good을 그대로 둔다: 앞 시작 줄이 이어지면 그 몫, 아니면 뒤 줄이 새 시작 줄.
             record["far_page"] += len(bad)
             continue
         if previous_good:
@@ -539,17 +548,43 @@ def page_onsets(page_index, reference_all, pages, neighbor, reference_rules, far
     return record
 
 
-def _glyph_form_only(bad: list[int], reference, rendered, pairs) -> bool:
-    """1pt 밖 글자가 모두 짝이 없고 같은 자리(1pt 안)에 짝 없는 다른 표기 렌더 글자가 있는가(PUA ↔ 옛한글 자모 등)."""
-    taken = set(pairs.values())
-    free = [b for b in range(len(rendered)) if b not in taken]
+def _rule_fitted(item, fit: tuple[float, float]) -> bool:
+    """선 끝 좌표가 0.12pt 장치 격자보다 쪽 맞춤 격자에 더 가까운가. 선을 그린 행렬은 PDF 그리기 목록에 없다.
+
+    실측(2026-10-23, 쪽 맞춤 행렬이 있는 정답 쪽 전체, big_file 뺌): 쪽 맞춤 격자 343,717, 장치 격자 36,134,
+    구분 안 됨 8,131. 두 격자가 섞인 쪽이 146쪽이라 쪽 단위로 정할 수 없다.
+    """
+    if item[0] == "l":
+        values = [(item[1].x, 0), (item[2].x, 0), (item[1].y, 1), (item[2].y, 1)]
+    else:
+        values = [(item[1].x0, 0), (item[1].x1, 0), (item[1].y0, 1), (item[1].y1, 1)]
+    exact = sum(abs(v / DEVICE_PT - round(v / DEVICE_PT)) for v, _ in values)
+    fitted = sum(abs(v / fit[axis] - round(v / fit[axis])) for v, axis in values)
+    return fitted < exact
+
+
+def _glyph_form_only(bad: list[int], reference, rendered, pairs, free: list[int]) -> bool:
+    """1pt 밖 글자가 모두 짝이 없고 같은 자리(1pt 안)에 짝 없는 렌더 글자가 하나씩 있는가(PUA ↔ 옛한글 자모 등).
+
+    렌더 글자 하나는 정답 글자 하나만 덮는다. 맞으면 쓴 렌더 글자를 free에서 뺀다.
+    """
+    if any(a in pairs for a in bad):
+        return False
+    used = []
     for a in bad:
-        if a in pairs:
+        near = next(
+            (
+                b
+                for b in free
+                if b not in used
+                and math.dist((rendered[b].x, rendered[b].y), (reference[a].x, reference[a].y)) <= TOLERANCE_PT
+            ),
+            None,
+        )
+        if near is None:
             return False
-        if not any(
-            math.dist((rendered[b].x, rendered[b].y), (reference[a].x, reference[a].y)) <= TOLERANCE_PT for b in free
-        ):
-            return False
+        used.append(near)
+    free[:] = [b for b in free if b not in used]
     return True
 
 
@@ -558,8 +593,7 @@ def diverge(entry) -> dict:
     if not reference_path.exists():
         return {"status": "unchecked", "reason": "no reference PDF"}
     install_trace()
-    _TRACED.clear()
-    _PARAGRAPH_CONTEXT.clear()
+    _clear_traces()
     try:
         pages = layout.layout_document(HwpDocument.open(entry.path, entry.password), RenderOptions.from_environment())
     except Exception as error:  # 렌더링 실패는 실패로 센다(evaluate.py와 같다).
@@ -569,22 +603,26 @@ def diverge(entry) -> dict:
     except Exception as error:  # 한 문서의 집계 실패가 전체 집계를 끝내지 않게 검사불가로 따로 센다.
         return {"status": "check-error", "reason": f"{type(error).__name__}: {error}"}
     finally:
-        _TRACED.clear()
+        _clear_traces()
+
+
+def _clear_traces() -> None:
+    """id() 키 기록을 문서마다 비운다. 남기면 다른 문서의 같은 id 쪽·줄·문서 기록이 섞이고 메모리가 는다."""
+    _TRACED.clear()
+    _PARAGRAPH_CONTEXT.clear()
+    _CELL_BOXES.clear()
 
 
 def _diverge_pages(pages, reference, reference_path) -> dict:
     texts: dict[int, tuple[list[str], list] | None] = {}
-    rules: dict[int, list[float]] = {}
+    rules: dict[int, list[tuple[float, float, float]]] = {}
+    joined: dict[int, str] = {}
 
     def reference_rules(index: int) -> list[tuple[float, float, float]]:
-        """정답 쪽 가로선 (x0, x1, y) pt. 글자처럼 쪽 맞춤 축척을 되돌린다(accuracy.pdf_pages).
-
-        검증 안 됨: 선도 글자와 같은 행렬로 찍혔다고 본다.
-        """
+        """정답 쪽 가로선 (x0, x1, y) pt. 쪽 맞춤 행렬로 찍힌 선만 글자처럼 장치 좌표로 되돌린다(accuracy.pdf_pages)."""
         if index not in rules:
             page = reference_document[index]
             fit = _fit_scale(page)
-            sx, sy = (DEVICE_PT / fit[0], DEVICE_PT / fit[1]) if fit is not None else (1.0, 1.0)
             found = set()
             for drawing in page.get_drawings():
                 for item in drawing["items"]:
@@ -594,7 +632,9 @@ def _diverge_pages(pages, reference, reference_path) -> dict:
                         x0, x1, y = item[1].x0, item[1].x1, (item[1].y0 + item[1].y1) / 2
                     else:
                         continue
-                    found.add((x0 * sx, x1 * sx, y * sy))
+                    if fit is not None and _rule_fitted(item, fit):
+                        x0, x1, y = x0 * DEVICE_PT / fit[0], x1 * DEVICE_PT / fit[0], y * DEVICE_PT / fit[1]
+                    found.add((x0, x1, y))
             rules[index] = sorted(found)
         return rules[index]
 
@@ -608,11 +648,19 @@ def _diverge_pages(pages, reference, reference_path) -> dict:
         return texts[index]
 
     def far_page(run: list[str], index: int) -> int | None:
-        """run 글자 목록이 든 렌더 쪽 번호(±1쪽 밖). 없으면 None."""
+        """run 글이 든 렌더 쪽 번호(±1쪽 밖). 없거나 둘 이상의 쪽에 있으면 None."""
+        needle = "".join(run)
+        found = None
         for other in range(len(pages)):
-            if abs(other - index) > 1 and _find_run(neighbor(other)[0], run) is not None:
-                return other
-        return None
+            if abs(other - index) <= 1:
+                continue
+            if other not in joined:
+                joined[other] = "".join(neighbor(other)[0])
+            if needle in joined[other]:
+                if found is not None:
+                    return None
+                found = other
+        return found
 
     with pymupdf.open(str(reference_path)) as reference_document:
         records = [
