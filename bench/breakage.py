@@ -366,9 +366,14 @@ def judge_page(data: PageInput) -> list[dict]:
         events.append(_event("겹침", line, y, f"그림 위 글자 {rendered[b].char!r}", b))
 
     # 넘침: 쪽 밖으로 나간 글자. 정답 글 맨 아래보다 아래 글자는 세지 않는다(정답 PDF가 글자로 꺼내지 못한 글이 있다).
+    # 수식 글자도 세지 않는다(수식 엔진이 쪽 아래에 둔 늘린 괄호 획이 있으나 보이지 않는다, 3-09월_교육_통합_2022 11쪽).
     for b, char in enumerate(rendered):
         box = boxes[b]
-        if box is not None and (box.x0 < 0 or box.y0 < 0 or box.x1 > data.width or box.y1 > data.height):
+        if (
+            box is not None
+            and not equation_glyph[b]
+            and (box.x0 < 0 or box.y0 < 0 or box.x1 > data.width or box.y1 > data.height)
+        ):
             line, y = place(b)
             events.append(_event("넘침", line, y, f"쪽 밖 글자 {char.char!r}", b))
 
