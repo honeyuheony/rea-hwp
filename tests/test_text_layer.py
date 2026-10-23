@@ -9,7 +9,7 @@ from corpus_paths import CORPUS_ROOT, USER_CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
 from rea_hwp.render.equation.unicode import LEGACY_EQUATION_FAMILY
-from rea_hwp.render.html import text_layer
+from rea_hwp.render.html import text_layer, viewer_html
 from rea_hwp.render.layout import layout_document
 from rea_hwp.render.scene import Glyph, Page, TextLine
 from rea_hwp.render.svg import HU_PER_PT, copy_text, page_to_svg
@@ -134,3 +134,11 @@ def test_text_layer_uses_same_font_family_as_drawn_glyph(font, char):
     span = ET.fromstring(text_layer([line], 10000, 10000)).find("text/tspan")
     drawn = ET.fromstring(page_to_svg(Page(10000, 10000, 1, items=[glyph]))).find(f"{{{SVG_NS}}}text")
     assert (span.get("font-family"), span.get("font-weight")) == (drawn.get("font-family"), drawn.get("font-weight"))
+
+
+def test_viewer_puts_every_text_layer_in_page_from_start():
+    layer = text_layer([TextLine("가", 1000, 2000, 1000, 1000)], 59528, 84188)
+    html = viewer_html("t", [("p1.svg", 595.28, 841.88), ("p2.svg", 841.88, 595.28)], [layer, layer])
+    figures = html.split('<figure class="page"')[1:]
+    assert all(layer in figure and "aspect-ratio" in figure.split(">")[0] for figure in figures)
+    assert "<template" not in html

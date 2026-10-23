@@ -24,7 +24,9 @@ header {{ position: sticky; top: 0; z-index: 1; display: flex; gap: 12px; align-
          padding: 8px 16px; background: var(--bg); border-bottom: 1px solid rgba(127, 127, 127, .3); }}
 header h1 {{ font-size: 14px; margin: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
 main {{ display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 16px; }}
-.page {{ position: relative; background: #fff; box-shadow: var(--paper-shadow);
+/* 글 층은 처음부터 모든 쪽에 두어 전체 선택 복사·찾기가 모든 쪽을 다루게 하고, 화면 밖 쪽은 배치 계산을 건너뛴다
+   (편람 384쪽 처음 열기: 층을 모두 배치하면 7.3초, content-visibility로 2.4초). 쪽 높이는 aspect-ratio로 정한다. */
+.page {{ position: relative; background: #fff; box-shadow: var(--paper-shadow); content-visibility: auto;
          width: calc(var(--zoom) * var(--w)); max-width: calc(100vw - 32px); }}
 .page img {{ display: block; width: 100%; height: auto; user-select: none; }}
 .text-layer {{ position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; }}
@@ -49,28 +51,8 @@ main {{ display: flex; flex-direction: column; align-items: center; gap: 16px; p
 document.getElementById('zoom').addEventListener('change', (event) => {{
   document.body.style.setProperty('--zoom', event.target.value);
 }});
-// 글 층은 화면 가까운 쪽부터 붙이고 나머지는 한가할 때 붙인다(편람 384쪽: 한꺼번에 7.3초, 먼저 보이는 쪽만 2.8초).
-// 나머지도 붙여야 브라우저 찾기가 모든 쪽 글을 찾는다. 배치 계산은 다음 프레임에 몰리므로 한 번에 한 쪽씩 붙인다.
-function attachLayer(page) {{
-  const template = page.querySelector('template.text-layer-source');
-  if (template) page.replaceChild(template.content.cloneNode(true), template);
-}}
-const layerObserver = new IntersectionObserver((entries) => {{
-  for (const entry of entries) {{
-    if (!entry.isIntersecting) continue;
-    attachLayer(entry.target);
-    layerObserver.unobserve(entry.target);
-  }}
-}}, {{ rootMargin: '200% 0px' }});
-const waitingPages = [...document.querySelectorAll('.page')];
-for (const page of waitingPages) layerObserver.observe(page);
-const whenIdle = window.requestIdleCallback || ((work) => setTimeout(work, 50));
-function attachWhenIdle() {{
-  if (waitingPages.length) attachLayer(waitingPages.shift());
-  if (waitingPages.length) whenIdle(attachWhenIdle);
-}}
-whenIdle(attachWhenIdle);
 // 줄마다 따로 놓인 SVG 글은 브라우저 기본 복사로는 줄바꿈 없이 붙으므로, 고른 범위를 줄 단위로 모아 줄바꿈으로 잇는다.
+// 범위 경계가 줄 끝(끝 위치)이나 줄 머리(0)에 걸린 줄은 고른 글자가 없으므로 빈 줄로 넣지 않는다.
 function selectedText(line, range) {{
   const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
   let text = '';
@@ -88,7 +70,8 @@ document.addEventListener('copy', (event) => {{
   const range = selection.getRangeAt(0);
   const lines = [...document.querySelectorAll('.text-layer .ln')].filter((line) => range.intersectsNode(line));
   if (!lines.length) return;
-  event.clipboardData.setData('text/plain', lines.map((line) => selectedText(line, range)).join('\\n'));
+  const texts = lines.map((line) => selectedText(line, range)).filter((text) => text);
+  event.clipboardData.setData('text/plain', texts.join('\\n'));
   event.preventDefault();
 }});
 // 수식 글꼴이 이 PC에 없으면(PUA 글자 폭이 대체 글꼴과 같으면) 유니코드 수식으로 그린 쪽으로 바꾼다.
@@ -234,17 +217,13 @@ def viewer_html(
     layers = text_layers or [""] * len(svg_files)
     fallbacks = equation_fallbacks or [None] * len(svg_files)
     pages = "\n".join(
-        f'<figure class="page" style="--w: {width * 96 / 72:.1f}px; margin: 0">'
+        f'<figure class="page" style="--w: {width * 96 / 72:.1f}px; aspect-ratio: {width:g} / {height:g}; margin: 0">'
         f'<img src="{escape(path)}" alt="{index}쪽" width="{width * 96 / 72:.0f}" '
         f'height="{height * 96 / 72:.0f}" loading="lazy"{_fallback_attrs(fallback)}>'
-        f"{_layer_source(layer)}"
+        f"{layer}"
         f'</figure><div class="label">{index}</div>'
         for index, ((path, width, height), layer, fallback) in enumerate(
             zip(svg_files, layers, fallbacks, strict=True), 1
         )
     )
     return _TEMPLATE.format(title=escape(title), count=len(svg_files), pages=pages)
-
-
-def _layer_source(layer: str) -> str:
-    return f'<template class="text-layer-source">{layer}</template>' if layer else ""
