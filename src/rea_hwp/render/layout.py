@@ -1116,8 +1116,12 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             for index in range(len(view.segments)):
                 self.place_line(state, view, index, area)
 
-    def paragraph_views(self, paragraphs: list[Node], width: float, textbox: bool = False) -> list[ParagraphView]:
+    def paragraph_views(
+        self, paragraphs: list[Node], width: float, textbox: bool = False, cell: bool = False
+    ) -> list[ParagraphView]:
         """문단 목록(셀·글상자·머리말·주석)의 보기. LINE_SEG가 없는 문단은 앞 문단 끝에 이어 줄을 만든다.
+
+        cell은 가로쓰기 표 칸 목록이다. 그 안 번호 문단은 저장 줄을 버리고 다시 나눈다(아래 renumbered).
 
         글상자 문단은 저장 줄이 글자까지 줄여야 들어가면(없는 글꼴을 더 넓은 글꼴로 대체) 다시 나눈다
         (실측: annual_report 나눔고딕·BookReview 한컴 윤고딕 240 → Haansoft Batang, 셀까지 넓히면 편람 −159k).
@@ -1139,6 +1143,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         column_widths = {w for _, w in column_layout(column_def, round(width))}
         judged_width = column_widths.pop() if len(column_widths) == 1 else None
         rewound = False
+        # 표 칸 번호 문단은 한글이 저장 줄을 버리고 다시 나눈다(재저장본 실측: task2287 셀 번호 문단 862개 중 346개
+        # 줄 시작이 바뀜, 머리 없는 문단 4,277개는 0개. 가로 구간이 같아 FUN_101dbcf0 판정으로는 설명 안 됨).
+        # 근거가 없는 칸(어울림 개체 칸, 칸 안 다단)은 저장 줄을 쓴다.
+        renumbered = cell and not floating and column_def is None
         for node in paragraphs:
             view = ParagraphView.build(node, self.styles)
             if shift and view.segments:
@@ -1171,7 +1179,15 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 shift += _line_end(rejudged.segments[-1]) - _line_end(view.segments[-1])
                 view = rejudged
                 last_vpos = view.segments[-1].vertical_pos
-            if textbox and view.segments and self.squeezed(view):
+            # 저장 줄 재사용 판정이 다시 짠 문단은 그 결과를 쓴다. 저장 위치가 되감기거나 제자리인(0 다음 0) 문단은
+            # 쪽을 넘는 칸의 나눔 지점(table_flow stored_pieces)을 저장 줄에서 찾으므로 다시 나누지 않는다.
+            numbered = (
+                renumbered
+                and rejudged is None
+                and view.para_shape.head_type == heads.HEAD_NUMBER
+                and not any(b <= a for a, b in itertools.pairwise(stored_vpos))
+            )
+            if view.segments and (numbered or textbox and self.squeezed(view)):
                 previous = views[-1] if views else None
                 start = reflow.flow_end(previous) if previous else view.segments[0].vertical_pos
                 if previous:
@@ -1544,9 +1560,11 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         # 나눔 정렬은 문단 마지막 줄까지 공백에 나눈다(basic__Textmail 1쪽 PDF: 「제 목」 한 줄이 「받 는 사 람」 폭으로
         # 벌어짐, rhwp paragraph_layout.rs needs_word_distribution). 강제 줄바꿈 줄은 두 정렬 모두 늘이지 않는다.
         stretch = (alignment == SPLIT or alignment == JUSTIFY and not is_last_line) and not forced_break
-        if stretch and interior_end and isinstance(chars[interior_end - 1], TextChar):
+        if (stretch or alignment == CENTER) and interior_end and isinstance(chars[interior_end - 1], TextChar):
             # 줄 끝 글자 뒤 자간은 줄 폭에 넣지 않는다(실측: hwp3-sample16 22쪽 13pt 자간 −12%·−16% 줄 끝 글자가
-            # 자간 없는 폭 13pt로 오른쪽 끝에 맞음).
+            # 자간 없는 폭 13pt로 오른쪽 끝에 맞음). 가운데 정렬도 같다(task1718 44쪽 「더높은」 10pt 시작 x가 자간 몫
+            # −2.64pt의 절반만큼 오른쪽, 코퍼스 시작 줄 761자 맞음·64자 다름). 오른쪽 정렬은 90 대 90자로 갈려 뺌.
+            # 넘침(공백 줄이기) 판정에도 이 몫을 넣는다(issue7235 1쪽 가운데 정렬 줄: 빼면 줄이지 않아 끝이 +1.9pt).
             last = chars[interior_end - 1]
             slack += self.trailing_spacing(last.char, self.styles.char_shapes[last.shape_id])
         distribute = alignment == DISTRIBUTE

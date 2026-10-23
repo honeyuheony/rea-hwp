@@ -742,7 +742,7 @@ class TableFlowMixin:
             width = (cell.header.text_width or cell.header.width) - margins[0] - margins[1]
             views[id(cell)] = [
                 dataclasses.replace(view, segments=[_restored_baseline(segment) for segment in view.segments])
-                for view in self.paragraph_views(cell.paragraphs, width)
+                for view in self.paragraph_views(cell.paragraphs, width, cell=not cell.header.text_direction)
             ]
 
             lines = [view.segments for view in views[id(cell)]]
