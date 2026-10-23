@@ -1564,6 +1564,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             # 줄 끝 글자 뒤 자간은 줄 폭에 넣지 않는다(실측: hwp3-sample16 22쪽 13pt 자간 −12%·−16% 줄 끝 글자가
             # 자간 없는 폭 13pt로 오른쪽 끝에 맞음). 가운데 정렬도 같다(task1718 44쪽 「더높은」 10pt 시작 x가 자간 몫
             # −2.64pt의 절반만큼 오른쪽, 코퍼스 시작 줄 761자 맞음·64자 다름). 오른쪽 정렬은 90 대 90자로 갈려 뺌.
+            # 넘침(공백 줄이기) 판정에도 이 몫을 넣는다(issue7235 1쪽 가운데 정렬 줄: 빼면 줄이지 않아 끝이 +1.9pt).
             last = chars[interior_end - 1]
             slack += self.trailing_spacing(last.char, self.styles.char_shapes[last.shape_id])
         distribute = alignment == DISTRIBUTE
