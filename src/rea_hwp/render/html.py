@@ -145,9 +145,12 @@ class _LayerChar(NamedTuple):
 
 
 def _glyph_line(line: TextLine) -> str | None:
-    """글자마다 그린 글자와 같은 x·y·글꼴·크기·장평으로 놓은 줄. 그린 글리프가 없는 보이는 글자가 있으면 None."""
-    pairs = list(zip(line.text, line.char_x, line.glyphs, strict=False))
-    if len(line.char_x) != len(line.text) or any(glyph is None and char.strip() for char, _, glyph in pairs):
+    """그린 글자와 같은 x·y·글꼴·크기·장평으로 놓은 줄. 글자별 위치가 없거나 글리프 없는 글자가 보이면 None."""
+    if not len(line.char_x) == len(line.glyphs) == len(line.text):
+        return None
+    pairs = list(zip(line.text, line.char_x, line.glyphs, strict=True))
+    # 복사 글에서 지워지는 제어 문자는 그린 글리프가 없어도 줄을 글자별로 놓는 데 방해되지 않는다.
+    if any(glyph is None and copy_text(char).strip() for char, _, glyph in pairs):
         return None
     drawn = [glyph for glyph in line.glyphs if glyph is not None]
     if not drawn:

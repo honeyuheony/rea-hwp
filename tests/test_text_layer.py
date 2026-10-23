@@ -106,3 +106,17 @@ def test_text_layer_divides_char_x_by_condensed_scale():
     element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
     assert element.get("transform") == "translate(10 0) scale(0.8000 1)"
     assert element.find("tspan").get("x") == "0 10"
+
+
+def test_text_layer_falls_back_to_line_fit_when_glyphs_are_shorter_than_text():
+    line = TextLine("가나", 1000, 2000, 2000, 1000, None, [1000, 2000], [Glyph("가", 1000, 2000, 1000, "바탕")])
+    element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
+    assert (element.get("class"), "".join(element.itertext())) == ("ln fit", "가나")
+
+
+def test_text_layer_keeps_glyph_positions_when_dropped_control_char_has_no_glyph():
+    glyphs = [Glyph("가", 1000, 2000, 1000, "바탕"), None, Glyph("나", 2000, 2000, 1000, "바탕")]
+    line = TextLine("가\x18나", 1000, 2000, 2000, 1000, None, [1000, 2000, 2000], glyphs)
+    element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
+    assert element.get("class") == "ln"
+    assert [(span.get("x"), span.text) for span in element.findall("tspan")] == [("10 20", "가나")]
