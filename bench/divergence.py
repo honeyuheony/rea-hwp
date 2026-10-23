@@ -17,6 +17,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+import pymupdf
 from accuracy import (
     EQUATION_FONTS,
     TOLERANCE_PT,
@@ -34,6 +35,7 @@ from rea_hwp.models.controls import CaptionListHeader, CellListHeader, ObjectCtr
 from rea_hwp.models.paragraph import TAB, ControlChar
 from rea_hwp.render import layout
 from rea_hwp.render.options import RenderOptions
+from rea_hwp.render.scene import Line
 from rea_hwp.render.svg import HU_PER_PT, page_glyph_table
 
 REFERENCE_ROOT = CORPUS_ROOT / "ref2022"
@@ -58,7 +60,7 @@ _LIST_KINDS = {CellListHeader: "셀", CaptionListHeader: "캡션", TextBoxListHe
 #: 그린 TextLine의 id → (그 TextLine, 줄 특징). TextLine을 함께 쥐어 id가 다른 객체에 다시 쓰이지 않게 한다.
 _TRACED: dict[int, tuple[object, dict]] = {}
 #: 문서 id → 문단 레코드 id → (담은 목록 종류, 앞 문단 종류, 자기 문단 개체 종류).
-_PARAGRAPH_CONTEXT: dict[int, dict[int, tuple[str, str, str]]] = {}
+_PARAGRAPH_CONTEXT: dict[int, dict[int, tuple[str, str, str, str | None]]] = {}
 
 
 def _ctrl_id(node) -> int:
@@ -81,19 +83,20 @@ def _objects_of(paragraph) -> str:
     return "글" if text is not None and text.record.payload else "빈 문단"
 
 
-def _paragraph_context(document) -> dict[int, tuple[str, str, str]]:
-    """문단마다 담은 목록(가장 안쪽 컨트롤), 같은 목록의 바로 앞 문단 종류, 자기 문단의 개체 종류."""
-    found: dict[int, tuple[str, str, str]] = {}
+def _paragraph_context(document) -> dict[int, tuple[str, str, str, str | None]]:
+    """문단마다 담은 목록, 같은 목록의 바로 앞 문단 종류, 자기 문단의 개체 종류, 가장 안쪽 표(TABLE) 원본 위치."""
+    found: dict[int, tuple[str, str, str, str | None]] = {}
     roots = [node for section in document.sections for node in section.nodes]
-    pending = [(node, "본문", 0) for node in reversed(roots)]
+    pending = [(node, "본문", 0, None) for node in reversed(roots)]
     #: 목록(부모 Node id, 최상위는 0)마다 마지막으로 본 문단의 종류와 지금 목록의 종류.
     previous: dict[int, str] = {}
     list_kind: dict[int, str] = {}
     while pending:
-        node, container, parent = pending.pop()
+        node, container, parent, table = pending.pop()
         if node.tag == tags.PARA_HEADER:
             own = _objects_of(node)
-            found[id(node.record)] = (list_kind.get(parent, container), previous.get(parent, "목록 처음"), own)
+            kind = list_kind.get(parent, container)
+            found[id(node.record)] = (kind, previous.get(parent, "목록 처음"), own, table if kind == "셀" else None)
             previous[parent] = own
         elif node.tag == tags.LIST_HEADER:
             # 셀·글상자·캡션 문단은 LIST_HEADER 뒤에 같은 수준으로 이어지므로 새 목록은 여기서 시작한다.
@@ -102,7 +105,9 @@ def _paragraph_context(document) -> dict[int, tuple[str, str, str]]:
         inner = _CONTAINERS.get(_ctrl_id(node), container)
         if node.tag == tags.PARA_HEADER and parent in list_kind:
             inner = _CONTAINERS.get(_ctrl_id(node), list_kind[parent])
-        pending.extend((child, inner, id(node)) for child in reversed(node.children))
+        table_node = node.find(tags.TABLE) if _ctrl_id(node) == tags.TABLE_CTRL else None
+        inner_table = document.record_id(table_node.record) if table_node is not None else table
+        pending.extend((child, inner, id(node), inner_table) for child in reversed(node.children))
     return found
 
 
@@ -160,7 +165,7 @@ def _line_info(engine, view, index: int) -> dict:
     context = _PARAGRAPH_CONTEXT.get(id(document))
     if context is None:
         context = _PARAGRAPH_CONTEXT[id(document)] = _paragraph_context(document)
-    container, previous, own = context.get(id(view.node.record), ("모름", "모름", "모름"))
+    container, previous, own, table = context.get(id(view.node.record), ("모름", "모름", "모름", None))
     if engine.__dict__.get("in_master_page"):
         container = "바탕쪽"
     return {
@@ -168,6 +173,7 @@ def _line_info(engine, view, index: int) -> dict:
         "container": container,
         "previous": previous,
         "own_objects": own,
+        "table": table,
         "line_state": _line_state(view, index),
         "line_number": index,
         "flags": _line_flags(view, index),
@@ -342,7 +348,60 @@ def _line_record(page, index: int | None) -> dict:
     return info
 
 
-def page_onsets(page_index, reference_all, pages, neighbor) -> dict:
+def _horizontal_rules(page) -> list[float]:
+    """렌더 쪽 가로선의 y(pt)."""
+    return sorted({item.y1 / HU_PER_PT for item in page.items if isinstance(item, Line) and abs(item.y1 - item.y2) < 1})
+
+
+def _rule_above(rules: list[float], y: float) -> float | None:
+    """y 바로 위(60pt 안)의 가로선 y. 칸 글 줄의 위 칸 경계로 본다."""
+    above = [rule for rule in rules if y - 60 <= rule < y]
+    return max(above) if above else None
+
+
+def vertical_detail(onset: dict, page_index: int, pages, reference_rules) -> dict:
+    """세로 밀림 시작 줄의 하위 특징: 바로 위 칸 경계 어긋남, 같은 쪽 앞 표와 자기 표가 앞 쪽에서 이어졌는가."""
+    page = pages[page_index]
+    detail = {}
+    ref_rule = _rule_above(reference_rules(page_index), onset["reference_y"])
+    our_rule = _rule_above(_horizontal_rules(page), onset.get("baseline_pt", onset["reference_y"]))
+    if ref_rule is not None and our_rule is not None:
+        detail["rule_dy"] = round(our_rule - ref_rule, 2)
+    table = onset.get("table")
+    if table is not None and table in page.table_rows:
+        previous = pages[page_index - 1].table_rows if page_index else {}
+        placed = list(page.table_rows)
+        detail["table_continued"] = table in previous
+        detail["earlier_table_carried"] = any(t in previous for t in placed[: placed.index(table)])
+        detail["earlier_table_here"] = placed.index(table) > 0
+    return detail
+
+
+def _vertical_key(onset: dict) -> str:
+    rule_dy = onset.get("rule_dy")
+    if rule_dy is None:
+        edge = "칸 경계 모름"
+    elif abs(rule_dy) <= TOLERANCE_PT:
+        edge = "칸 경계 맞음(칸 안 위치)"
+    elif abs(rule_dy - (onset.get("dy") or 0)) <= TOLERANCE_PT:
+        edge = "칸 경계도 같이 밀림(표·행 위치)"
+    else:
+        edge = "칸 경계와 글이 따로 밀림"
+    if onset.get("earlier_table_carried"):
+        carried = "앞 표가 앞 쪽에서 넘어옴"
+    elif onset.get("table_continued"):
+        carried = "자기 표가 앞 쪽에서 이어짐"
+    elif onset.get("earlier_table_here"):
+        # 「대기 목록으로 쪽 맨 위에 옮겨진 표 뒤 간격」(render21, 3회 실패)은 이 묶음에 든다.
+        carried = "같은 쪽 앞에 다른 표 있음"
+    elif "table_continued" in onset:
+        carried = "표가 이 쪽에서 시작"
+    else:
+        carried = "표 아님"
+    return f"{onset.get('container', '모름')} / {edge} / {carried}"
+
+
+def page_onsets(page_index, reference_all, pages, neighbor, reference_rules) -> dict:
     page = pages[page_index] if page_index < len(pages) else None
     boxes = [tuple(v / 100 for v in box) for box in page.excluded] if page is not None else []
     reference = [c for c in reference_all if not c.font.startswith(EQUATION_FONTS) and not _inside(c, boxes)]
@@ -406,6 +465,8 @@ def page_onsets(page_index, reference_all, pages, neighbor) -> dict:
                     - (rendered[paired[jump - 1][1]].x - reference[paired[jump - 1][0]].x),
                     2,
                 )
+            if kind == "세로 밀림" and page is not None:
+                onset |= vertical_detail(onset, page_index, pages, reference_rules)
             record["onsets"].append(onset)
         record["onsets"][-1]["damage"] += len(bad)
         previous_good = False
@@ -424,15 +485,29 @@ def diverge(entry) -> dict:
     except Exception as error:  # 렌더링 실패는 실패로 센다(evaluate.py와 같다).
         return {"status": "render-error", "reason": f"{type(error).__name__}: {error}"}
     try:
-        return _diverge_pages(pages, pdf_pages(str(reference_path)))
+        return _diverge_pages(pages, pdf_pages(str(reference_path)), reference_path)
     except Exception as error:  # 한 문서의 집계 실패가 전체 집계를 끝내지 않게 검사불가로 따로 센다.
         return {"status": "check-error", "reason": f"{type(error).__name__}: {error}"}
     finally:
         _TRACED.clear()
 
 
-def _diverge_pages(pages, reference) -> dict:
+def _diverge_pages(pages, reference, reference_path) -> dict:
     texts: dict[int, tuple[list[str], list] | None] = {}
+    rules: dict[int, list[float]] = {}
+
+    def reference_rules(index: int) -> list[float]:
+        if index not in rules:
+            with pymupdf.open(str(reference_path)) as document:
+                found = set()
+                for drawing in document[index].get_drawings():
+                    for item in drawing["items"]:
+                        if item[0] == "l" and abs(item[1].y - item[2].y) < 0.2:
+                            found.add(item[1].y)
+                        elif item[0] == "re" and item[1].height < 1.5:
+                            found.add((item[1].y0 + item[1].y1) / 2)
+                rules[index] = sorted(found)
+        return rules[index]
 
     def neighbor(index: int):
         if not 0 <= index < len(pages):
@@ -443,7 +518,7 @@ def _diverge_pages(pages, reference) -> dict:
             texts[index] = ([c.char for c in chars], [(index, owner) for owner in owners])
         return texts[index]
 
-    records = [page_onsets(index, chars, pages, neighbor) for index, chars in enumerate(reference)]
+    records = [page_onsets(index, chars, pages, neighbor, reference_rules) for index, chars in enumerate(reference)]
     return {"status": "ok", "pages": len(pages), "reference_pages": len(reference), "page_records": records}
 
 
@@ -464,6 +539,8 @@ def _char_class(char: str) -> str:
 def _feature_keys(onset: dict) -> dict[str, str]:
     flags = "·".join(onset.get("flags", [])) or "없음"
     keys = {}
+    if onset["kind"] == "세로 밀림":
+        keys["세로 밀림 하위 원인"] = _vertical_key(onset)
     if "x_jump" in onset:
         before, after = onset["x_jump"]
         keys["x 건너뜀 글자 종류"] = f"{_char_class(before[0])} 뒤 {_char_class(after[0])}"
@@ -537,6 +614,7 @@ def markdown(ranked: dict[str, list[dict]], totals: dict, limit: int) -> str:
         "종류 × 줄 특징",
         "x 건너뜀 글자 종류",
         "x 건너뜀 글자 쌍",
+        "세로 밀림 하위 원인",
     ):
         out += [
             "",
