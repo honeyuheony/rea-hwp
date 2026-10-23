@@ -24,8 +24,7 @@ header {{ position: sticky; top: 0; z-index: 1; display: flex; gap: 12px; align-
          padding: 8px 16px; background: var(--bg); border-bottom: 1px solid rgba(127, 127, 127, .3); }}
 header h1 {{ font-size: 14px; margin: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
 main {{ display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 16px; }}
-/* 글 층은 처음부터 모든 쪽에 두어 전체 선택 복사·찾기가 모든 쪽을 다루게 하고, 화면 밖 쪽은 배치 계산을 건너뛴다
-   (편람 384쪽 처음 열기: 층을 모두 배치하면 7.3초, content-visibility로 2.4초). 쪽 높이는 aspect-ratio로 정한다. */
+/* 글 층은 전체 복사·찾기를 위해 모든 쪽에 두고 화면 밖 쪽은 배치를 건너뛴다. 쪽 높이는 aspect-ratio로 정한다. */
 .page {{ position: relative; background: #fff; box-shadow: var(--paper-shadow); content-visibility: auto;
          width: calc(var(--zoom) * var(--w)); max-width: calc(100vw - 32px); }}
 .page img {{ display: block; width: 100%; height: auto; user-select: none; }}
@@ -68,7 +67,11 @@ document.addEventListener('copy', (event) => {{
   const selection = document.getSelection();
   if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
   const range = selection.getRangeAt(0);
-  const lines = [...document.querySelectorAll('.text-layer .ln')].filter((line) => range.intersectsNode(line));
+  const common = range.commonAncestorContainer;
+  const scope = common.nodeType === Node.ELEMENT_NODE ? common : common.parentElement;
+  const own = scope.closest('.ln');
+  const candidates = own ? [own] : scope.querySelectorAll('.text-layer .ln');
+  const lines = [...candidates].filter((line) => range.intersectsNode(line));
   if (!lines.length) return;
   const texts = lines.map((line) => selectedText(line, range)).filter((text) => text);
   event.clipboardData.setData('text/plain', texts.join('\\n'));
@@ -126,10 +129,6 @@ def _glyph_line(line: TextLine) -> str | None:
     """그린 글자와 같은 x·y·글꼴·크기·장평으로 놓은 줄. 글자별 위치가 없거나 글리프 없는 글자가 보이면 None."""
     if not len(line.char_x) == len(line.glyphs) == len(line.text):
         return None
-    pairs = list(zip(line.text, line.char_x, line.glyphs, strict=True))
-    # 복사 글에서 지워지는 제어 문자는 그린 글리프가 없어도 줄을 글자별로 놓는 데 방해되지 않는다.
-    if any(glyph is None and copy_text(char).strip() for char, _, glyph in pairs):
-        return None
     drawn = [glyph for glyph in line.glyphs if glyph is not None]
     if not drawn:
         return None
@@ -138,8 +137,11 @@ def _glyph_line(line: TextLine) -> str | None:
     style: Glyph = drawn[0]
     font, scale = _style_key(style), round(style.scale_x, 4)
     previous: Glyph | None = None
-    for char, x, glyph in pairs:
+    for char, x, glyph in zip(line.text, line.char_x, line.glyphs, strict=True):
         shown = copy_text(char)
+        # 복사 글에서 지워지는 제어 문자는 그린 글리프가 없어도 줄을 글자별로 놓는 데 방해되지 않는다.
+        if glyph is None and shown.strip():
+            return None
         joined = glyph is not None and glyph is previous
         previous = glyph
         if glyph is not None and glyph is not style:
