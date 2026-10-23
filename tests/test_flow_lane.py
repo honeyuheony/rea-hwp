@@ -819,3 +819,24 @@ def test_top_and_bottom_object_follows_its_anchor_line():
     # 캡션 「도」 기준선이 403.8pt다(문단 위 기준이면 60pt 위).
     page = _open(POLICY_REPORT)[11]
     assert _glyphs_at(page, "도", 346.8, 403.81)
+
+
+def _line_start(page, located: str) -> float:
+    """원본 위치 located 문단의 첫 글줄 첫 글자 x(pt)."""
+    return next(line.x / 100 for line in page.text_lines if line.paragraph == located)
+
+
+@needs_corpus
+@pytest.mark.parametrize(
+    ("relative", "page_number", "located", "start"),
+    [
+        # 한글 2022 PDF 44쪽: 가운데 정렬 셀 「더높은」(10pt, 음수 자간). 줄 끝 자간을 폭에 넣으면 +1.32pt.
+        ("oss/rhwp/task1718__table_giant_cell_overfill.hwp", 44, "0:5137", 208.56),
+        # 한글 2022 PDF 18쪽: 오른쪽 정렬 셀 숫자 「142」 「4,288」. 줄 끝 자간을 폭에 넣으면 +1.32pt.
+        ("oss/rhwp/k-water-rfp.hwp", 18, "1:2850", 311.64),
+        ("oss/rhwp/k-water-rfp.hwp", 18, "1:2704", 303.72),
+    ],
+)
+def test_centered_and_right_lines_leave_out_end_spacing(relative, page_number, located, start):
+    page = _open(relative)[page_number - 1]
+    assert _line_start(page, located) == pytest.approx(start, abs=0.5)
