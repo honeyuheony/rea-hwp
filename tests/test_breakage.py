@@ -263,3 +263,105 @@ def test_overlap_with_new_engine_equation_glyph_is_not_counted(breakage):
     data.glyphs[3].font_family = "HancomEQN"
 
     assert breakage.judge_page(data) == []
+
+
+def _texts(ours="", reference="", missing=(), extra=()):
+    return {"ours": ours, "reference": reference, "missing_runs": list(missing), "extra_runs": list(extra)}
+
+
+def test_rows_moved_to_next_page_top_in_order_are_pagination_difference(breakage):
+    records = [{"kinds": ["빠짐"]}, {"kinds": []}]
+    texts = [_texts(missing=["넷째행", "다섯째행"]), _texts(ours="머리말넷째행다섯째행본문" + "가" * 50)]
+
+    assert breakage.pagination_moves(0, records, texts) == ["다음 쪽 앞으로: 넷째행", "다음 쪽 앞으로: 다섯째행"]
+
+
+def test_missing_text_out_of_order_or_absent_is_not_pagination_difference(breakage):
+    records = [{"kinds": ["빠짐"]}, {"kinds": []}]
+    reversed_order = [_texts(missing=["넷째행", "다섯째행"]), _texts(ours="다섯째행넷째행")]
+    absent = [_texts(missing=["넷째행"]), _texts(ours="다른글")]
+
+    assert breakage.pagination_moves(0, records, reversed_order) is None
+    assert breakage.pagination_moves(0, records, absent) is None
+
+
+def test_overlap_keeps_page_broken_even_if_missing_text_moved(breakage):
+    records = [{"kinds": ["겹침", "빠짐"]}, {"kinds": []}]
+    texts = [_texts(missing=["넷째행"]), _texts(ours="넷째행")]
+
+    assert breakage.pagination_moves(0, records, texts) is None
+
+
+def test_vertical_shift_is_pagination_only_when_page_top_gained_previous_page_text(breakage):
+    records = [{"kinds": []}, {"kinds": ["세로 밀림"]}]
+    gained = [_texts(reference="앞쪽본문마지막행"), _texts(extra=["마지막행"])]
+    nothing = [_texts(reference="앞쪽본문마지막행"), _texts(extra=[])]
+
+    assert breakage.pagination_moves(1, records, gained) == ["앞 쪽에서 넘어옴: 마지막행"]
+    assert breakage.pagination_moves(1, records, nothing) is None
+
+
+def _pixmap(width, height, filled):
+    import pymupdf
+
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
+    pixmap.set_rect(pixmap.irect, (255, 255, 255))
+    if filled is not None:
+        pixmap.set_rect(pymupdf.IRect(*filled), (0, 0, 255))
+    return pixmap
+
+
+def test_chart_region_empty_in_ours_is_broken(breakage):
+    reference = _pixmap(80, 80, (10, 10, 70, 70))
+
+    assert breakage.judge_chart(_pixmap(80, 80, None), reference)["reason"] == "빔"
+    assert breakage.judge_chart(_pixmap(80, 80, (10, 10, 70, 70)), reference)["reason"] is None
+
+
+def test_chart_region_with_bars_elsewhere_is_shape_difference(breakage):
+    reference = _pixmap(80, 80, (0, 40, 40, 80))
+
+    assert breakage.judge_chart(_pixmap(80, 80, (40, 0, 80, 40)), reference)["reason"] == "모양 다름"
+
+
+def _bmp(width: int, height: int) -> bytes:
+    """검은색으로 채운 24비트 BMP."""
+    import struct
+
+    row = b"\x00" * (width * 3) + b"\x00" * ((4 - width * 3 % 4) % 4)
+    pixels = row * height
+    header = struct.pack("<2sIHHI", b"BM", 54 + len(pixels), 0, 0, 54)
+    info = struct.pack("<IiiHHIIiiII", 40, width, height, 1, 24, 0, len(pixels), 2835, 2835, 0, 0)
+    return header + info + pixels
+
+
+def test_bmp_inside_svg_is_drawn(breakage):
+    import base64
+
+    import pymupdf
+
+    data = base64.b64encode(_bmp(4, 4)).decode()
+    image = f'<image width="4" height="4" href="data:image/bmp;base64,{data}"/>'
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">{image}</svg>'.encode()
+
+    with pymupdf.open(stream=svg, filetype="svg") as ignored:
+        ink_ignored, _, _ = breakage.ink_grid(ignored[0].get_pixmap(alpha=False))
+    with pymupdf.open(stream=breakage._svg_for_mupdf(svg), filetype="svg") as converted:
+        ink_converted, _, _ = breakage.ink_grid(converted[0].get_pixmap(alpha=False))
+
+    assert (ink_ignored, ink_converted) == (0.0, 1.0)
+
+
+def test_chart_region_missing_small_colored_marks_is_color_difference(breakage):
+    import pymupdf
+
+    # 검은 축 위에 노란 표식 둘이 있는 정답과, 표식이 빠진 렌더. 잉크·칸 차로는 거의 같다.
+    reference, ours = _pixmap(80, 80, None), _pixmap(80, 80, None)
+    for pixmap in (reference, ours):
+        pixmap.set_rect(pymupdf.IRect(0, 70, 80, 80), (0, 0, 0))
+    reference.set_rect(pymupdf.IRect(10, 10, 14, 14), (255, 220, 0))
+    reference.set_rect(pymupdf.IRect(50, 10, 54, 14), (255, 220, 0))
+
+    result = breakage.judge_chart(ours, reference)
+
+    assert result["reason"] == "색 다름"
