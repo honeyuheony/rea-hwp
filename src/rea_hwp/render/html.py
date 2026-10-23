@@ -32,9 +32,11 @@ main {{ display: flex; flex-direction: column; align-items: center; gap: 16px; p
 .text-layer {{ position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; }}
 .text-layer text {{ fill: transparent; white-space: pre; cursor: text; }}
 .text-layer .fit {{ font-family: system-ui, sans-serif; }}
-/* 브라우저 선택 칠하기는 대체 글꼴 상자를 따라 겹치거나 끊기므로 끄고, 줄마다 띠(.bands rect)를 직접 그린다. */
-.text-layer ::selection {{ fill: transparent; background: transparent; }}
+.text-layer ::selection {{ fill: transparent; background: rgba(6, 55, 123, .3); }}
+/* 띠 자료가 있는 줄은 브라우저 칠하기(대체 글꼴 상자라 겹치거나 끊김)를 끄고 띠(.bands rect)로 그린다. */
+.text-layer [data-band]::selection, .text-layer [data-band] ::selection {{ background: transparent; }}
 .text-layer .bands {{ fill: rgba(6, 55, 123, .3); pointer-events: none; }}
+@media print {{ .text-layer .bands {{ display: none; }} }}
 .label {{ font-size: 12px; opacity: .7; text-align: center; }}
 </style>
 </head>
@@ -82,8 +84,7 @@ document.addEventListener('copy', (event) => {{
   event.clipboardData.setData('text/plain', texts.join('\\n'));
   event.preventDefault();
 }});
-// 선택 띠: 줄(.ln)마다 고른 첫 위치 경계부터 끝 위치 경계까지(data-edges, pt) 글자 높이(data-band) 띠 하나를 그린다.
-// 화면에 보이는 쪽만 그리고, 쪽이 화면에 들어오거나 범위가 바뀌면 다음 그림 차례에 한 번 다시 그린다.
+// 선택 띠: 화면에 보이는 쪽의 띠 자료가 있는 줄마다, 고른 범위마다 rect 하나를 다음 그림 차례에 그린다.
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const shownPages = new Set();
 const bandedPages = new Set();
@@ -92,12 +93,33 @@ let bandFrame = 0;
 function scheduleBands() {{
   if (!bandFrame) bandFrame = requestAnimationFrame(drawBands);
 }}
+// 줄 글 UTF-16 위치마다 경계 x. data-edges가 없는 글리프 줄은 tspan x와 장평 transform, 줄 끝(data-end)으로 만든다.
 function edgesOf(line) {{
   let edges = lineEdges.get(line);
-  if (!edges) {{
+  if (edges) return edges;
+  if (line.dataset.edges) {{
     edges = line.dataset.edges.split(' ').map(Number);
-    lineEdges.set(line, edges);
+  }} else {{
+    // tspan의 x 목록은 앞 글자들에만 있고, 목록 뒤 글자(이은 자모)와 대리쌍 뒤 단위는 다음 경계를 쓴다.
+    const starts = [];
+    for (const text of line.matches('text') ? [line] : line.querySelectorAll('text')) {{
+      const shift = text.transform.baseVal.consolidate();
+      const [origin, scale] = shift ? [shift.matrix.e, shift.matrix.a] : [0, 1];
+      for (const span of text.querySelectorAll('tspan')) {{
+        const xs = span.x.baseVal;
+        let k = 0;
+        for (const char of span.textContent) {{
+          starts.push(k < xs.numberOfItems ? origin + scale * xs.getItem(k).value : null);
+          if (char.length === 2) starts.push(null);
+          k += 1;
+        }}
+      }}
+    }}
+    edges = [Number(line.dataset.end)];
+    for (let k = starts.length - 1; k >= 0; k -= 1) edges.push(starts[k] ?? edges[edges.length - 1]);
+    edges.reverse();
   }}
+  lineEdges.set(line, edges);
   return edges;
 }}
 // 범위 경계점(node, offset)이 줄 글의 몇째 UTF-16 위치인지. 줄 앞이면 0, 줄 뒤면 글 길이.
@@ -117,42 +139,55 @@ function bandGroup(layer) {{
   }}
   return group;
 }}
-function drawPageBands(layer, range) {{
+function lineBand(line, lineRange, range) {{
+  const length = line.textContent.length;
+  const start = offsetInLine(lineRange, length, range.startContainer, range.startOffset);
+  const end = offsetInLine(lineRange, length, range.endContainer, range.endOffset);
+  if (start >= end) return null;
+  const span = edgesOf(line).slice(start, end + 1);
+  const left = Math.min(...span), right = Math.max(...span);
+  if (right <= left) return null;
+  const [top, height] = line.dataset.band.split(' ').map(Number);
+  const rect = document.createElementNS(SVG_NS, 'rect');
+  rect.setAttribute('x', left);
+  rect.setAttribute('y', top);
+  rect.setAttribute('width', right - left);
+  rect.setAttribute('height', height);
+  return rect;
+}}
+function drawPageBands(layer, ranges) {{
   const rects = [];
-  for (const line of layer.querySelectorAll('.ln')) {{
-    if (!range.intersectsNode(line)) continue;
+  for (const line of layer.querySelectorAll('.ln[data-band]')) {{
     const lineRange = document.createRange();
     lineRange.selectNodeContents(line);
-    const length = line.textContent.length;
-    const start = offsetInLine(lineRange, length, range.startContainer, range.startOffset);
-    const end = offsetInLine(lineRange, length, range.endContainer, range.endOffset);
-    if (start >= end) continue;
-    const span = edgesOf(line).slice(start, end + 1);
-    const left = Math.min(...span), right = Math.max(...span);
-    if (right <= left) continue;
-    const [top, height] = line.dataset.band.split(' ').map(Number);
-    const rect = document.createElementNS(SVG_NS, 'rect');
-    rect.setAttribute('x', left);
-    rect.setAttribute('y', top);
-    rect.setAttribute('width', right - left);
-    rect.setAttribute('height', height);
-    rects.push(rect);
+    for (const range of ranges) {{
+      const rect = range.intersectsNode(line) && lineBand(line, lineRange, range);
+      if (rect) rects.push(rect);
+    }}
   }}
   bandGroup(layer).replaceChildren(...rects);
 }}
+function selectedRanges() {{
+  const selection = document.getSelection();
+  const ranges = [];
+  for (let k = 0; selection && k < selection.rangeCount; k += 1) {{
+    const range = selection.getRangeAt(k);
+    if (!range.collapsed) ranges.push(range);
+  }}
+  return ranges;
+}}
 function drawBands() {{
   bandFrame = 0;
-  const selection = document.getSelection();
-  const range = selection && selection.rangeCount && !selection.isCollapsed ? selection.getRangeAt(0) : null;
+  const ranges = selectedRanges();
+  const touched = (layer) => shownPages.has(layer) && ranges.some((range) => range.intersectsNode(layer));
   for (const layer of bandedPages) {{
-    if (range && shownPages.has(layer) && range.intersectsNode(layer)) continue;
+    if (touched(layer)) continue;
     bandGroup(layer).replaceChildren();
     bandedPages.delete(layer);
   }}
-  if (!range) return;
   for (const layer of shownPages) {{
-    if (!range.intersectsNode(layer)) continue;
-    drawPageBands(layer, range);
+    if (!touched(layer)) continue;
+    drawPageBands(layer, ranges);
     bandedPages.add(layer);
   }}
 }}
@@ -198,32 +233,54 @@ def _utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def _band_attrs(line: TextLine, unit_x: list[float | None]) -> str:
-    """선택 띠 자료. unit_x는 DOM 글의 UTF-16 단위마다 그 단위가 시작하는 x(묶음 안 뒤 단위는 None)."""
-    end = line.x + line.width
-    # 경계 k는 단위 k 앞이다. 묶음 안 경계는 묶음 끝으로 올려, 묶음 일부만 골라도 띠가 묶음 전체를 덮는다.
-    edges = [end]
+def _markup_text(text: str) -> str:
+    # HTML 파서는 글 속 \r을 \n으로 바꾸므로 문자 참조로 넣어 DOM 글을 copy_text와 같게 둔다.
+    return escape(text).replace("\r", "&#13;")
+
+
+def _band_attrs(line: TextLine, edges: list[float] | None) -> str:
+    """선택 띠 자료. edges가 없으면 스크립트가 tspan x와 줄 끝(data-end)으로 경계를 만든다."""
+    if line.top is not None and line.bottom is not None and line.bottom > line.top:
+        top, height = line.top, line.bottom - line.top
+    else:
+        # 저장 줄 없이 놓은 글(쪽 번호·덧말)은 layout처럼 기준선이 위에서 글자 크기 × TAC_ASCENT인 글자 상자다.
+        top, height = line.baseline - line.size * TAC_ASCENT, line.size
+    if edges is None:
+        span = f' data-end="{format_pt(line.x + line.width)}"'
+    else:
+        span = f' data-edges="{" ".join(format_pt(edge) for edge in edges)}"'
+    return f'{span} data-band="{format_pt(top)} {format_pt(height)}"'
+
+
+def _fit_edges(line: TextLine, shown: str) -> list[float] | None:
+    """줄 폭 맞춤 줄의 UTF-16 위치별 경계. char_x가 있으면 글자 x, 없으면 줄 폭을 고르게 나눈다. 폭이 없으면 None."""
+    unit_x: list[float | None] = []
+    if len(line.char_x) == len(line.text):
+        for char, x in zip(line.text, line.char_x, strict=True):
+            for k, part in enumerate(copy_text(char)):
+                unit_x += [None if k else x] + [None] * (_utf16_len(part) - 1)
+    if len(unit_x) != _utf16_len(shown):
+        count = _utf16_len(shown)
+        unit_x = [line.x + line.width * k / count for k in range(count)]
+    # 경계 k는 단위 k 앞이고, 글자 안쪽 경계(대리쌍 뒤 단위 등)는 그 글자 끝으로 올린다.
+    edges = [line.x + line.width]
     for x in reversed(unit_x):
         edges.append(edges[-1] if x is None else x)
     edges.reverse()
-    # 띠는 LINE_SEG 글자 높이(줄 최대 base_size)다. layout은 기준선을 그 위 끝에서 글자 높이 × TAC_ASCENT 아래에 둔다.
-    top = line.baseline - line.size * TAC_ASCENT
-    return (
-        f' data-edges="{" ".join(format_pt(edge) for edge in edges)}"'
-        f' data-band="{format_pt(top)} {format_pt(line.size)}"'
-    )
+    return edges if max(edges) > min(edges) else None
 
 
 def _fit_line(line: TextLine) -> str:
     """글자별 자리가 없거나 그린 글자와 하나씩 맞지 않는 줄(수식 스크립트)은 줄 폭에 맞춰 늘이거나 줄인다."""
     shown = copy_text(line.text)
-    count = _utf16_len(shown)
-    band = _band_attrs(line, [line.x + line.width * k / count for k in range(count)])
+    edges = _fit_edges(line, shown)
+    # 띠를 그릴 수 없는 줄(폭 0)은 띠 자료를 넣지 않아 브라우저 선택 칠하기를 그대로 둔다.
+    band = _band_attrs(line, edges) if edges is not None else ""
     length = f' textLength="{format_pt(line.width)}" lengthAdjust="spacingAndGlyphs"' if line.width > 0 else ""
     return (
         f'<text class="ln fit" x="{format_pt(line.x)}" y="{format_pt(line.baseline)}" '
         f'font-size="{format_pt(line.size)}"{length}{band}>'
-        f"{escape(shown)}</text>"
+        f"{_markup_text(shown)}</text>"
     )
 
 
@@ -275,8 +332,7 @@ def _glyph_line(line: TextLine) -> str | None:
             groups[-1].append(char)
         else:
             groups.append([char])
-    unit_x = [x for char in chars for x in [char.x] + [None] * (_utf16_len(char.text) - 1)]
-    attrs = f' class="ln"{_band_attrs(line, unit_x)}'
+    attrs = f' class="ln"{_band_attrs(line, None)}'
     if len(groups) == 1:
         return _transformed_text(groups[0], attrs)
     return f"<g{attrs}>{''.join(_transformed_text(group) for group in groups)}</g>"
@@ -305,7 +361,7 @@ def _transformed_text(group: list[_LayerChar], attrs: str = "") -> str:
         xs = " ".join(format_pt((char.x - origin_x) / scale) for char in placed)
         ys = " ".join(format_pt(char.y) for char in placed)
         position = f'x="{xs}" y="{ys}" ' if placed else ""
-        text = escape("".join(char.text for char in run))
+        text = _markup_text("".join(char.text for char in run))
         spans.append(f"<tspan {position}{_font_attrs(run[0].font)}>{text}</tspan>")
     return f"<text{attrs}{transform}>{''.join(spans)}</text>"
 

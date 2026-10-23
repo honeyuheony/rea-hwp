@@ -200,27 +200,45 @@ def test_text_layer_falls_back_to_line_fit_for_rotated_glyph():
     assert (element.get("class"), "".join(element.itertext())) == ("ln fit", "가나")
 
 
-def test_band_edges_put_joined_jamo_end_at_next_char_x():
-    glyph = Glyph("\uac00\u11a8", 1000, 2000, 1000, "바탕")
-    line = TextLine(
-        "\uac00\u11a8 나", 1000, 2000, 2000, 1000, None, [1000, 1000, 2000, 2500], [glyph, glyph, None, None]
-    )
-    line.glyphs[3] = Glyph("나", 2500, 2000, 1000, "바탕")
+def test_glyph_line_band_leaves_edges_to_script_with_line_end():
+    glyphs = [Glyph("가", 1000, 2000, 1000, "바탕"), Glyph("나", 2000, 2000, 1000, "바탕")]
+    line = TextLine("가나", 1000, 2000, 2000, 1000, None, [1000, 2000], glyphs)
     element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
-    assert element.get("data-edges") == "10 20 20 25 30"
+    assert (element.get("data-end"), element.get("data-edges")) == ("30", None)
 
 
-def test_band_edges_count_utf16_units_of_astral_char():
-    glyphs = [Glyph("\U0001d465", 1000, 2000, 1000, "바탕"), Glyph("가", 2000, 2000, 1000, "바탕")]
-    line = TextLine("\U0001d465가", 1000, 2000, 2000, 1000, None, [1000, 2000], glyphs)
+def test_band_spans_layout_line_top_to_bottom():
+    line = TextLine("가", 1000, 1850, 1000, 1000, None, [1000], [Glyph("가", 1000, 1850, 1000, "바탕")], 1000, 3400)
     element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
-    assert element.get("data-edges") == "10 20 20 30"
+    assert element.get("data-band") == "10 24"
 
 
-def test_band_spans_text_height_with_baseline_at_ascent():
+def test_band_falls_back_to_glyph_box_without_layout_line():
     line = TextLine("가", 1000, 3000, 1000, 2000, None, [1000], [Glyph("가", 1000, 3000, 2000, "바탕")])
     element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
     assert element.get("data-band") == "13 20"
+
+
+def test_fit_line_band_edges_follow_char_x_and_utf16_units():
+    line = TextLine("\U0001d465가", 1000, 2000, 3000, 1000, None, [1000, 2500], [None, None])
+    element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
+    assert (element.get("class"), element.get("data-edges")) == ("ln fit", "10 25 25 40")
+
+
+def test_fit_line_band_edges_spread_line_width_without_char_x():
+    element = ET.fromstring(text_layer([TextLine("가나다", 1000, 2000, 3000, 1000)], 10000, 10000)).find("text")
+    assert element.get("data-edges") == "10 20 30 40"
+
+
+def test_zero_width_fit_line_keeps_browser_selection_without_band():
+    element = ET.fromstring(text_layer([TextLine("가", 1000, 2000, 0, 1000)], 10000, 10000)).find("text")
+    assert (element.get("data-band"), element.get("data-edges")) == (None, None)
+
+
+def test_carriage_return_goes_to_html_as_char_reference():
+    layer = text_layer([TextLine("가\r나", 1000, 2000, 3000, 1000)], 10000, 10000)
+    assert "\r" not in layer and "가&#13;나" in layer
+    assert ET.fromstring(layer).find("text").get("data-edges") == "10 20 30 40"
 
 
 def _utf16_len(text: str) -> int:
@@ -228,17 +246,19 @@ def _utf16_len(text: str) -> int:
 
 
 @pytest.mark.parametrize("path", DOCUMENTS, ids=lambda path: path.name)
-def test_band_edges_cover_dom_text_from_line_start_to_line_end(path):
+def test_band_data_matches_text_line(path):
     for page in layout_document(HwpDocument.open(path)):
         for line, element in zip(page.text_lines, _layer_lines(page), strict=True):
-            edges = [float(edge) for edge in element.get("data-edges").split()]
-            assert len(edges) == _utf16_len("".join(element.itertext())) + 1, (page.number, line.text)
+            top, height = (float(value) for value in element.get("data-band").split())
+            if line.top is not None:
+                assert (top, height) == pytest.approx((line.top / HU_PER_PT, (line.bottom - line.top) / HU_PER_PT))
+            end = (line.x + line.width) / HU_PER_PT
             if "fit" in element.get("class").split():
-                first = line.x
+                edges = [float(edge) for edge in element.get("data-edges").split()]
+                assert len(edges) == _utf16_len("".join(element.itertext())) + 1, (page.number, line.text)
+                assert edges[-1] == pytest.approx(end, abs=0.001), (page.number, line.text)
             else:
-                first = next(x for char, x in zip(line.text, line.char_x, strict=True) if copy_text(char))
-            assert edges[0] == pytest.approx(first / HU_PER_PT, abs=0.001), (page.number, line.text)
-            assert edges[-1] == pytest.approx((line.x + line.width) / HU_PER_PT, abs=0.001), (page.number, line.text)
+                assert float(element.get("data-end")) == pytest.approx(end, abs=0.001), (page.number, line.text)
 
 
 def _equation_scripts(document: HwpDocument) -> list[str]:
