@@ -14,7 +14,8 @@ import math
 import os
 import statistics
 import sys
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,6 +46,9 @@ from rea_hwp.render.svg import HU_PER_PT
 VERTICAL_SHIFT_PT = 5.0
 #: 세로 밀림으로 볼 정답 줄의 최소 짝 글자 수. 한 글자 짝은 다른 자리 같은 글자와 잘못 맺히기 쉽다(추정).
 SHIFT_MIN_CHARS = 2
+#: 단·칸 조각을 가르는 글자 원점 간격(pt)과 줄 간격 중앙값 배수. 글자 사이 띄어쓰기(한 칸+글자 폭)보다 크게 잡은 추정값.
+COLUMN_GAP_PT = 15.0
+COLUMN_GAP_STEPS = 2.5
 #: 겹침으로 볼 두 글자 몸통의 겹친 넓이 비율(작은 글자 기준). 추정값.
 OVERLAP_RATIO = 0.3
 
@@ -52,6 +56,8 @@ OVERLAP_RATIO = 0.3
 BIG_GLYPH_SLACK = 0.1
 
 KINDS = ("세로 밀림", "겹침", "빠짐", "넘침")
+#: 단·칸 맨 아래 조각만 밀린 경우. 꼬리말·쪽 번호가 쪽마다 밀려 문서 전체가 깨짐으로 잡히지 않게 깨짐과 따로 센다.
+TAIL_SHIFT = "꼬리 밀림"
 
 
 @dataclass(frozen=True)
@@ -117,9 +123,18 @@ def rendered_rules(page) -> list[Rule]:
                 rules.append(Rule(min(x0, x1), y0, max(x0, x1), y0))
             elif abs(x0 - x1) < 0.2:
                 rules.append(Rule(x0, min(y0, y1), x0, max(y0, y1)))
-        elif isinstance(item, Rect) and (item.stroke or item.fill) and min(item.width, item.height) < 1.5 * HU_PER_PT:
+        elif isinstance(item, Rect) and (item.stroke or item.fill):
             x, y, w, h = (v / HU_PER_PT for v in (item.x, item.y, item.width, item.height))
-            rules.append(Rule(x, y + h / 2, x + w, y + h / 2) if h < w else Rule(x + w / 2, y, x + w / 2, y + h))
+            if min(w, h) < 1.5:
+                rules.append(Rule(x, y + h / 2, x + w, y + h / 2) if h < w else Rule(x + w / 2, y, x + w / 2, y + h))
+            elif item.stroke and item.stroke_width > 0:
+                # 테두리만 그린 사각형(셀·글상자 테두리)은 네 변을 선으로 본다(reference_rules와 같은 기준).
+                rules += [
+                    Rule(x, y, x + w, y),
+                    Rule(x, y + h, x + w, y + h),
+                    Rule(x, y, x, y + h),
+                    Rule(x + w, y, x + w, y + h),
+                ]
     return rules
 
 
@@ -208,6 +223,26 @@ def _is_pua(char: str) -> bool:
     return "\ue000" <= char[0] <= "\uf8ff" or char[0] >= "\U000f0000"
 
 
+def column_segments(reference: list[PlacedChar], lines: list[list[int]]) -> list[list[int]]:
+    """정답 줄을 단·칸 조각으로 나눈다. reference_lines는 같은 기준선의 옆 단·옆 칸 글을 한 줄로 묶는다.
+
+    이웃 글자 원점 간격이 그 줄 간격 중앙값의 COLUMN_GAP_STEPS배와 COLUMN_GAP_PT 가운데 큰 값을 넘으면 새 조각이다.
+    """
+    segments = []
+    for line in lines:
+        steps = [reference[b].x - reference[a].x for a, b in zip(line, line[1:], strict=False)]
+        positive = [step for step in steps if step > 0]
+        limit = max(COLUMN_GAP_PT, COLUMN_GAP_STEPS * statistics.median(positive)) if positive else COLUMN_GAP_PT
+        current = [line[0]]
+        for previous, index in zip(line, line[1:], strict=False):
+            if reference[index].x - reference[previous].x > limit:
+                segments.append(current)
+                current = []
+            current.append(index)
+        segments.append(current)
+    return segments
+
+
 def _in_box(x: float, y: float, boxes) -> bool:
     return any(bx <= x <= bx + bw and by <= y <= by + bh for bx, by, bw, bh in boxes)
 
@@ -216,7 +251,7 @@ def judge_page(data: PageInput) -> list[dict]:
     """깨진 자리 목록(정답 줄 번호 차례). 비어 있으면 안 깨진 쪽이다."""
     reference, rendered = data.reference, data.rendered
     pairs = pair_chars(reference, rendered)
-    lines = reference_lines(reference)
+    lines = column_segments(reference, reference_lines(reference))
     line_of = {a: number for number, line in enumerate(lines) for a in line}
     sizes = [glyph.size / HU_PER_PT for glyph in data.glyphs]
     near_rendered, near_reference = _Nearby(rendered, sizes), _Nearby(reference)
@@ -235,7 +270,14 @@ def judge_page(data: PageInput) -> list[dict]:
     equation_glyph = [glyph.font_family.upper().startswith(EQUATION_FONTS[1]) for glyph in data.glyphs]
     events: list[dict] = []
 
-    # 줄마다 상태: 글자의 반 넘게 문턱 안에 같은 렌더 글자가 없으면 밀린 줄(짝이 다른 자리에 있음)이나 빠진 줄이다.
+    def text_of(number: float) -> str:
+        index = math.ceil(number)
+        return "".join(reference[a].char for a in lines[index])[:40] if 0 <= index < len(lines) else ""
+
+    def event(kind: str, number: float, y: float, detail: str, rendered_index: int | None = None) -> None:
+        events.append(_event(kind, number, y, detail, rendered_index) | {"reference_text": text_of(number)})
+
+    # 단·칸 조각마다 상태: 글자의 반 넘게 문턱 안에 같은 렌더 글자가 없으면 밀린 조각이나 빠진 조각이다.
     # PUA 글자는 한글이 글꼴 안 코드로 찍어 렌더와 글자 코드가 다를 수 있어(『』 등) 세지 않는다.
     deficit = collections.Counter(c.char for c in reference) - collections.Counter(c.char for c in rendered)
     states: list[tuple[str, list[int]]] = []
@@ -252,12 +294,16 @@ def judge_page(data: PageInput) -> list[dict]:
             states.append(("제자리", displaced))
             continue
         # 빠진 글자: 짝이 없고, 쪽 전체에서도 렌더에 그 글자가 모자란다(줄 나눔이 달라 옮겨진 글자는 빠짐이 아니다).
+        # 빠짐 조각이 아니면 쓴 부족 수를 돌려준다(뒤에 오는 진짜 빠진 조각이 쓸 수 있게).
+        need: collections.Counter[str] = collections.Counter()
         missing = []
         for a in displaced:
-            if a not in pairs and deficit[reference[a].char] > 0:
-                deficit[reference[a].char] -= 1
+            char = reference[a].char
+            if a not in pairs and deficit[char] - need[char] > 0:
+                need[char] += 1
                 missing.append(a)
         if missing and len(missing) * 2 >= len(displaced):
+            deficit.subtract(need)
             states.append(("빠짐", missing))
             continue
         paired = [a for a in displaced if a in pairs]
@@ -266,25 +312,34 @@ def judge_page(data: PageInput) -> list[dict]:
             continue
         dy = statistics.median(rendered[pairs[a]].y - reference[a].y for a in paired)
         dx = statistics.median(rendered[pairs[a]].x - reference[a].x for a in paired)
-        # 옆으로만 옮겨진 줄(줄 나눔·자간 차이)은 표본에서 깨져 보이지 않았다.
-        states.append(("세로 밀림" if abs(dy) >= abs(dx) else "제자리", displaced))
+        # 옆으로만 옮겨진 줄(줄 나눔·자간 차이)은 표본에서 깨져 보이지 않았다. 세로 차가 문턱 아래인 줄도 세지 않는다.
+        shifted = abs(dy) > VERTICAL_SHIFT_PT and abs(dy) >= abs(dx)
+        states.append(("세로 밀림" if shifted else "제자리", displaced))
 
     line_y = [reference[line[0]].y for line in lines]
+    spans = [(min(reference[a].x for a in line), max(reference[a].x for a in line)) for line in lines]
     for number, (state, displaced) in enumerate(states):
         if state == "빠짐":
             text = "".join(reference[a].char for a in displaced)[:30]
-            events.append(
-                _event("빠짐", number, line_y[number], f"{len(displaced)}/{len(lines[number])}자 없음: {text}")
-            )
+            event("빠짐", number, line_y[number], f"{len(displaced)}/{len(lines[number])}자 없음: {text}")
         elif state == "세로 밀림":
-            # 「그 쪽 끝까지 어긋남」: 아래 줄의 반 이상도 밀리거나 빠졌을 때만 센다(칸 안 줄 나눔 차이는 뺀다).
-            below = [states[k][0] for k in range(len(lines)) if line_y[k] > line_y[number] + 1]
-            if below and sum(s != "제자리" for s in below) * 2 < len(below):
+            # 「그 쪽 끝까지 어긋남」: 같은 단·칸(가로로 겹치는 조각)의 아래 조각 반 이상도 밀리거나 빠졌을 때만 센다.
+            x0, x1 = spans[number]
+            below = [
+                states[k][0]
+                for k in range(len(lines))
+                if line_y[k] > line_y[number] + 1 and spans[k][0] <= x1 and spans[k][1] >= x0
+            ]
+            if not below:
+                # 단·칸의 맨 아래 조각만 밀림(꼬리말·쪽 번호 등): 깨짐이 아니라 따로 센다.
+                event(TAIL_SHIFT, number, line_y[number], "맨 아래 조각만 밀림")
+                continue
+            if sum(s != "제자리" for s in below) * 2 < len(below):
                 continue
             paired = [a for a in displaced if a in pairs]
             dy = statistics.median(rendered[pairs[a]].y - reference[a].y for a in paired)
             first = min((pairs[a] for a in paired), key=lambda b: rendered[b].x)
-            events.append(_event("세로 밀림", number, line_y[number], f"dy {dy:+.1f}pt", first))
+            event("세로 밀림", number, line_y[number], f"dy {dy:+.1f}pt", first)
 
     boxes = [
         None if glyph.rotation else glyph_box(glyph, char) for glyph, char in zip(data.glyphs, rendered, strict=True)
@@ -320,7 +375,7 @@ def judge_page(data: PageInput) -> list[dict]:
                 if boxes[b].overlap(boxes[c]) <= OVERLAP_RATIO * min(boxes[b].area(), boxes[c].area()):
                     continue
                 line, y = place(b if home[b] is not None else c)
-                events.append(_event("겹침", line, y, f"글자 {rendered[b].char!r}·{rendered[c].char!r}", b))
+                event("겹침", line, y, f"글자 {rendered[b].char!r}·{rendered[c].char!r}", b)
 
     # 겹침(글자·선): 렌더 선이 글자 몸통을 가르는데, 정답에서는 같은 글자를 가르는 선이 없다.
     crossed = [b for b, box in enumerate(boxes) if box is not None and any(rule.crosses(box) for rule in data.rules)]
@@ -338,7 +393,7 @@ def judge_page(data: PageInput) -> list[dict]:
             if a is None and in_place[b]:
                 continue
             line, y = place(b)
-            events.append(_event("겹침", line, y, f"선이 글자 {rendered[b].char!r}를 가름", b))
+            event("겹침", line, y, f"선이 글자 {rendered[b].char!r}를 가름", b)
 
     # 겹침(글자·그림): 정답과 다른 자리에 놓인 렌더 비트맵 위의 글자가 정답에서는 어느 비트맵 위에도 없다.
     # 정답 PDF는 그림을 벡터로 바꿔 저장하기도 하므로(사용자 표본 도장 그림), 정답 쪽에 비트맵이 없으면 판정하지 않는다.
@@ -363,21 +418,22 @@ def judge_page(data: PageInput) -> list[dict]:
         if _inside(reference[home[b]], expanded):
             continue
         line, y = place(b)
-        events.append(_event("겹침", line, y, f"그림 위 글자 {rendered[b].char!r}", b))
+        event("겹침", line, y, f"그림 위 글자 {rendered[b].char!r}", b)
 
-    # 넘침: 쪽 밖으로 나간 글자. 정답 글 맨 아래보다 아래 글자는 세지 않는다(정답 PDF가 글자로 꺼내지 못한 글이 있다).
+    # 넘침: 쪽 밖으로 나간 글자. 정답도 같은 자리에 그 글자를 둔 경우(제자리)는 세지 않는다.
     # 수식 글자도 세지 않는다(수식 엔진이 쪽 아래에 둔 늘린 괄호 획이 있으나 보이지 않는다, 3-09월_교육_통합_2022 11쪽).
     for b, char in enumerate(rendered):
         box = boxes[b]
         if (
             box is not None
             and not equation_glyph[b]
+            and home[b] is None
             and (box.x0 < 0 or box.y0 < 0 or box.x1 > data.width or box.y1 > data.height)
         ):
             line, y = place(b)
-            events.append(_event("넘침", line, y, f"쪽 밖 글자 {char.char!r}", b))
+            event("넘침", line, y, f"쪽 밖 글자 {char.char!r}", b)
 
-    events.sort(key=lambda event: (event["line"], KINDS.index(event["kind"])))
+    events.sort(key=lambda event: (event["line"], (*KINDS, TAIL_SHIFT).index(event["kind"])))
     return events
 
 
@@ -423,20 +479,21 @@ def _has_nested_table(document) -> bool:
 
 
 def measure(target: Target) -> dict:
-    if not target.reference.exists():
-        return {"status": "unchecked", "reason": "정답 PDF 없음", "groups": list(target.groups)}
-    install_trace()
-    _TRACED.clear()
-    _PARAGRAPH_CONTEXT.clear()
     groups = list(target.groups)
+    if not target.reference.exists():
+        return {"status": "unchecked", "reason": "정답 PDF 없음", "groups": groups}
     try:
-        document = HwpDocument.open(target.path, target.password)
-        pages = layout.layout_document(document, RenderOptions.from_environment())
-    except Exception as error:  # 렌더링 실패도 검사불가로 센다. 멈추지 않는다.
-        return {"status": "render-error", "reason": f"{type(error).__name__}: {error}", "groups": groups}
-    try:
-        if _has_nested_table(document):
-            groups.append("표 안의 표")
+        install_trace()
+        _TRACED.clear()
+        _PARAGRAPH_CONTEXT.clear()
+        try:
+            document = HwpDocument.open(target.path, target.password)
+            # 렌더가 실패해도 문서군에 들도록 레이아웃 전에 표 안의 표 문서인지 본다.
+            if _has_nested_table(document):
+                groups.append("표 안의 표")
+            pages = layout.layout_document(document, RenderOptions.from_environment())
+        except Exception as error:  # 렌더링 실패(MemoryError 포함)도 검사불가로 센다. 멈추지 않는다.
+            return {"status": "render-error", "reason": f"{type(error).__name__}: {error}", "groups": groups}
         reference = pdf_pages(str(target.reference))
         image_boxes = pdf_image_boxes(str(target.reference))
         records = []
@@ -457,6 +514,33 @@ def measure(target: Target) -> dict:
         _PARAGRAPH_CONTEXT.clear()
 
 
+def measure_all(chosen: list[Target], jobs: int, worker=measure) -> dict[str, dict]:
+    """문서마다 worker를 돌린다. 프로세스가 죽으면 남은 문서를 하나씩 다시 돌려 죽인 문서만 검사불가로 둔다."""
+    results: dict[str, dict] = {}
+    retry: list[Target] = []
+    with ProcessPoolExecutor(jobs) as pool:
+        futures = {pool.submit(worker, target): target for target in chosen}
+        for future in as_completed(futures):
+            target = futures[future]
+            try:
+                results[target.name] = future.result()
+            except BrokenProcessPool:
+                retry.append(target)
+            except Exception as error:  # worker 밖으로 나온 실패도 그 문서만 검사불가로 센다.
+                results[target.name] = _crashed(target, error)
+    for target in retry:
+        with ProcessPoolExecutor(1) as pool:
+            try:
+                results[target.name] = pool.submit(worker, target).result()
+            except Exception as error:  # 혼자 돌려도 프로세스가 죽은 문서다.
+                results[target.name] = _crashed(target, error)
+    return {target.name: results[target.name] for target in chosen}
+
+
+def _crashed(target: Target, error: BaseException) -> dict:
+    return {"status": "check-error", "reason": f"{type(error).__name__}: {error}", "groups": list(target.groups)}
+
+
 def _page_record(index: int, pages, reference, image_boxes, pdf_document) -> dict:
     record = {"page": index + 1, "kinds": [], "first": None, "events": 0}
     if index >= len(reference):
@@ -471,24 +555,23 @@ def _page_record(index: int, pages, reference, image_boxes, pdf_document) -> dic
         return record
     page = pages[index]
     data = _page_input(page, reference[index], image_boxes[index], pdf_document, index)
-    events = judge_page(data)
+    found = judge_page(data)
+    tails = [event for event in found if event["kind"] == TAIL_SHIFT]
+    if tails:
+        record["tail_shift"] = [event["reference_text"] for event in tails]
+    events = [event for event in found if event["kind"] != TAIL_SHIFT]
     if not events:
         return record
     record["kinds"] = [kind for kind in KINDS if any(event["kind"] == kind for event in events)]
     record["events"] = len(events)
     first = events[0]
     owner = data.owners[first["rendered"]] if first["rendered"] is not None else None
-    lines = reference_lines(data.reference)
-    line_number = math.floor(first["line"]) if first["line"] >= 0 else 0
-    reference_text = (
-        "".join(data.reference[a].char for a in lines[line_number])[:40] if line_number < len(lines) else ""
-    )
     record["first"] = {
         "kind": first["kind"],
         "line": first["line"],
         "y": first["y"],
         "detail": first["detail"],
-        "reference_text": reference_text,
+        "reference_text": first["reference_text"],
         **_line_record(page, owner),
     }
     record["by_kind"] = dict(collections.Counter(event["kind"] for event in events))
@@ -521,6 +604,7 @@ def summarize(results: dict[str, dict]) -> dict:
                 "pages": 0,
                 "broken_pages": 0,
                 "kinds": dict.fromkeys(KINDS, 0),
+                "tail_shift_pages": 0,
             },
         )
 
@@ -536,6 +620,7 @@ def summarize(results: dict[str, dict]) -> dict:
             row["pages"] += len(result["page_records"])
             row["broken_pages"] += len(broken)
             row["failed" if broken else "passed"] += 1
+            row["tail_shift_pages"] += sum("tail_shift" in page for page in result["page_records"])
             for page in broken:
                 for kind in page["kinds"]:
                     row["kinds"][kind] += 1
@@ -560,13 +645,13 @@ def summarize(results: dict[str, dict]) -> dict:
 
 def markdown(summary: dict, limit: int) -> str:
     out = ["# 깨진 쪽 집계", "", f"세로 밀림 문턱 {VERTICAL_SHIFT_PT}pt.", ""]
-    out += ["| 문서군 | 문서 | 통과 | 실패 | 검사불가 | 쪽 | 깨진 쪽 | " + " | ".join(KINDS) + " |"]
-    out.append("|---" * (7 + len(KINDS)) + "|")
+    out += ["| 문서군 | 문서 | 통과 | 실패 | 검사불가 | 쪽 | 깨진 쪽 | " + " | ".join(KINDS) + f" | {TAIL_SHIFT} 쪽 |"]
+    out.append("|---" * (8 + len(KINDS)) + "|")
     for name, row in summary["groups"].items():
         kinds = " | ".join(str(row["kinds"][kind]) for kind in KINDS)
         out.append(
             f"| {name} | {row['documents']} | {row['passed']} | {row['failed']} | {row['unchecked']} | "
-            f"{row['pages']} | {row['broken_pages']} | {kinds} |"
+            f"{row['pages']} | {row['broken_pages']} | {kinds} | {row['tail_shift_pages']} |"
         )
     out += ["", "## 원인 묶음(처음 깨진 줄 특징, 사용자 표본에서 나온 묶음 먼저)", ""]
     out.append("| 순위 | 묶음 | 깨진 쪽 | 사용자 표본 쪽 | 문서 | 예(문서:쪽) |")
@@ -610,10 +695,7 @@ def main() -> int:
     chosen = targets(args.match)
     if args.limit:
         chosen = chosen[: args.limit]
-    results = {}
-    with ProcessPoolExecutor(args.jobs) as pool:
-        for target, result in zip(chosen, pool.map(measure, chosen), strict=True):
-            results[target.name] = result
+    results = measure_all(chosen, args.jobs)
     summary = summarize(results)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "pages.json").write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
