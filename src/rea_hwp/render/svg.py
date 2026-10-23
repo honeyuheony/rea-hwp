@@ -81,41 +81,52 @@ def copy_text(text: str) -> str:
     return xml_safe(display_text(text).translate(_SPACE_CONTROLS))
 
 
-def _pt(value: float) -> str:
+def format_pt(value: float) -> str:
+    """HWPUNIT 값을 SVG 사용자 단위(pt) 글자로. 소수 셋째 자리까지 쓰고 끝의 0은 지운다."""
     text = f"{value / HU_PER_PT:.3f}".rstrip("0").rstrip(".")
     return text if text not in ("", "-0") else "0"
 
 
-def _glyph(glyph: Glyph, equation_fallback: bool = False) -> str:
+def glyph_family_and_text(glyph: Glyph, equation_fallback: bool = False) -> tuple[str, str]:
+    """(font-family 속성 값(따옴표 포함), 그릴 글). 쪽 SVG와 뷰어 글 층이 같은 글꼴을 고르도록 함께 쓴다."""
+    if glyph.font_family in EQUATION_FONTS and equation_fallback:
+        return quoteattr(FALLBACK_FONT_CHAIN), escape(xml_safe(to_unicode(glyph.char)))
+    if glyph.font_family in EQUATION_FONTS:
+        # 수식 글꼴 PUA는 옛한글이 아니라 수식 기호라 그대로 찍는다.
+        return quoteattr(xml_safe(glyph.font_family)), escape(xml_safe(glyph.char))
+    if glyph.font_family == LEGACY_EQUATION_FAMILY:
+        return quoteattr(f"'{LEGACY_EQUATION_FAMILY}', {FALLBACK_FONT_CHAIN}"), escape(xml_safe(glyph.char))
+    # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
+    # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
+    family = quoteattr(xml_safe(display_font(glyph.char, glyph.font_family)))
+    return family, escape(xml_safe(display_text(glyph.char).replace("\u00ad", "-")))
+
+
+def glyph_style_attrs(glyph: Glyph) -> list[str]:
     style = []
     if glyph.bold:
         style.append('font-weight="bold"')
     if glyph.italic:
         style.append('font-style="italic"')
+    return style
+
+
+def _glyph(glyph: Glyph, equation_fallback: bool = False) -> str:
+    style = glyph_style_attrs(glyph)
     if glyph.color != "#000000":
         style.append(f'fill="{glyph.color}"')
     attrs = " ".join(style)
-    if glyph.font_family in EQUATION_FONTS and equation_fallback:
-        family, text = quoteattr(FALLBACK_FONT_CHAIN), escape(xml_safe(to_unicode(glyph.char)))
-    elif glyph.font_family in EQUATION_FONTS:
-        # 수식 글꼴 PUA는 옛한글이 아니라 수식 기호라 그대로 찍는다.
-        family, text = quoteattr(xml_safe(glyph.font_family)), escape(xml_safe(glyph.char))
-    elif glyph.font_family == LEGACY_EQUATION_FAMILY:
-        family, text = quoteattr(f"'{LEGACY_EQUATION_FAMILY}', {FALLBACK_FONT_CHAIN}"), escape(xml_safe(glyph.char))
-    else:
-        family = quoteattr(xml_safe(display_font(glyph.char, glyph.font_family)))
-        # 한글은 U+00AD를 글꼴의 하이픈 모양으로 찍는다(task2093 3쪽 PDF: 텍스트는 U+00AD, 그림은 「-」 글머리표).
-        # 브라우저는 소프트 하이픈으로 숨기므로 그릴 때만 「-」로 바꾸고 글자 값(복사·평가)은 그대로 둔다.
-        text = escape(xml_safe(display_text(glyph.char).replace("\u00ad", "-")))
+    family, text = glyph_family_and_text(glyph, equation_fallback)
     if abs(glyph.scale_x - 1.0) > 0.001 or glyph.rotation:
         # 장평은 가로로만 줄이거나 늘린다. 원점을 기준으로 변환해 x 위치가 흔들리지 않게 한다.
         rotate = f" rotate({-glyph.rotation:g})" if glyph.rotation else ""
         return (
-            f'<text transform="translate({_pt(glyph.x)} {_pt(glyph.y)}){rotate} scale({glyph.scale_x:.4f} 1)" '
-            f'font-size="{_pt(glyph.size)}" font-family={family} {attrs}>{text}</text>'
+            f'<text transform="translate({format_pt(glyph.x)} {format_pt(glyph.y)}){rotate} '
+            f'scale({glyph.scale_x:.4f} 1)" font-size="{format_pt(glyph.size)}" font-family={family} {attrs}>'
+            f"{text}</text>"
         )
     return (
-        f'<text x="{_pt(glyph.x)}" y="{_pt(glyph.y)}" font-size="{_pt(glyph.size)}" '
+        f'<text x="{format_pt(glyph.x)}" y="{format_pt(glyph.y)}" font-size="{format_pt(glyph.size)}" '
         f"font-family={family} {attrs}>{text}</text>"
     )
 
@@ -123,8 +134,9 @@ def _glyph(glyph: Glyph, equation_fallback: bool = False) -> str:
 def _line(line: Line) -> str:
     dash = f' stroke-dasharray="{line.dash}"' if line.dash else ""
     return (
-        f'<line x1="{_pt(line.x1)}" y1="{_pt(line.y1)}" x2="{_pt(line.x2)}" y2="{_pt(line.y2)}" '
-        f'stroke="{line.color}" stroke-width="{_pt(line.width)}"{dash}/>'
+        f'<line x1="{format_pt(line.x1)}" y1="{format_pt(line.y1)}" '
+        f'x2="{format_pt(line.x2)}" y2="{format_pt(line.y2)}" '
+        f'stroke="{line.color}" stroke-width="{format_pt(line.width)}"{dash}/>'
     )
 
 
@@ -135,18 +147,19 @@ def _rect(rect: Rect, index: int) -> str:
         gradient = rect.gradient
         stops = "".join(f'<stop offset="{offset:g}" stop-color="{color}"/>' for offset, color in gradient.stops)
         if gradient.radial:
-            center = f'cx="{_pt(gradient.x1)}" cy="{_pt(gradient.y1)}"'
-            shape = f'radialGradient id="grad{index}" {center} r="{_pt(gradient.x2)}"'
+            center = f'cx="{format_pt(gradient.x1)}" cy="{format_pt(gradient.y1)}"'
+            shape = f'radialGradient id="grad{index}" {center} r="{format_pt(gradient.x2)}"'
         else:
             shape = (
-                f'linearGradient id="grad{index}" x1="{_pt(gradient.x1)}" y1="{_pt(gradient.y1)}" '
-                f'x2="{_pt(gradient.x2)}" y2="{_pt(gradient.y2)}"'
+                f'linearGradient id="grad{index}" x1="{format_pt(gradient.x1)}" y1="{format_pt(gradient.y1)}" '
+                f'x2="{format_pt(gradient.x2)}" y2="{format_pt(gradient.y2)}"'
             )
         definition = f'<defs><{shape} gradientUnits="userSpaceOnUse">{stops}</{shape.split()[0]}></defs>'
         fill = f"url(#grad{index})"
-    stroke = f' stroke="{rect.stroke}" stroke-width="{_pt(rect.stroke_width)}"' if rect.stroke else ""
+    stroke = f' stroke="{rect.stroke}" stroke-width="{format_pt(rect.stroke_width)}"' if rect.stroke else ""
     return (
-        f'{definition}<rect x="{_pt(rect.x)}" y="{_pt(rect.y)}" width="{_pt(rect.width)}" height="{_pt(rect.height)}" '
+        f'{definition}<rect x="{format_pt(rect.x)}" y="{format_pt(rect.y)}" '
+        f'width="{format_pt(rect.width)}" height="{format_pt(rect.height)}" '
         f'fill="{fill}"{stroke}/>'
     )
 
@@ -155,7 +168,8 @@ def _image(image: Image, index: int, href: str) -> str:
     href = quoteattr(xml_safe(href))
     if image.crop is None:
         return (
-            f'<image x="{_pt(image.x)}" y="{_pt(image.y)}" width="{_pt(image.width)}" height="{_pt(image.height)}" '
+            f'<image x="{format_pt(image.x)}" y="{format_pt(image.y)}" '
+            f'width="{format_pt(image.width)}" height="{format_pt(image.height)}" '
             f'preserveAspectRatio="none" href={href}/>'
         )
     left, top, right, bottom = image.crop
@@ -163,10 +177,11 @@ def _image(image: Image, index: int, href: str) -> str:
     full_w, full_h = image.width / span_x, image.height / span_y
     clip = f"clip{index}"
     return (
-        f'<clipPath id="{clip}"><rect x="{_pt(image.x)}" y="{_pt(image.y)}" '
-        f'width="{_pt(image.width)}" height="{_pt(image.height)}"/></clipPath>'
-        f'<image clip-path="url(#{clip})" x="{_pt(image.x - left * full_w)}" y="{_pt(image.y - top * full_h)}" '
-        f'width="{_pt(full_w)}" height="{_pt(full_h)}" preserveAspectRatio="none" href={href}/>'
+        f'<clipPath id="{clip}"><rect x="{format_pt(image.x)}" y="{format_pt(image.y)}" '
+        f'width="{format_pt(image.width)}" height="{format_pt(image.height)}"/></clipPath>'
+        f'<image clip-path="url(#{clip})" x="{format_pt(image.x - left * full_w)}" '
+        f'y="{format_pt(image.y - top * full_h)}" '
+        f'width="{format_pt(full_w)}" height="{format_pt(full_h)}" preserveAspectRatio="none" href={href}/>'
     )
 
 
@@ -208,7 +223,7 @@ def page_to_svg(page: Page, equation_fallback: bool = False, *, image_href: Imag
             resolved[image.href] = image.href if decoded is None else image_href(*decoded)
         return resolved[image.href]
 
-    width, height = _pt(page.width), _pt(page.height)
+    width, height = format_pt(page.width), format_pt(page.height)
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}pt" height="{height}pt" '
         f'viewBox="0 0 {width} {height}">',
