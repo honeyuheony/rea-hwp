@@ -77,9 +77,7 @@ function rangeTexts(range) {{
   return lines.map((line) => selectedText(line, range)).filter((text) => text);
 }}
 document.addEventListener('copy', (event) => {{
-  const selection = document.getSelection();
-  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
-  const texts = rangeTexts(selection.getRangeAt(0));
+  const texts = selectedRanges().flatMap(rangeTexts);
   // 글 층 글자를 하나도 고르지 않았으면(쪽 번호 글에서 다음 쪽 첫 줄 머리까지 등) 브라우저 기본 복사에 맡긴다.
   if (!texts.length) return;
   event.clipboardData.setData('text/plain', texts.join('\\n'));
@@ -104,8 +102,14 @@ function edgesOf(line) {{
     // tspan의 x 목록은 앞 글자들에만 있고, 목록 뒤 글자(이은 자모)와 대리쌍 뒤 단위는 다음 경계를 쓴다.
     const starts = [];
     for (const text of line.matches('text') ? [line] : line.querySelectorAll('text')) {{
-      const shift = text.transform.baseVal.consolidate();
-      const [origin, scale] = shift ? [shift.matrix.e, shift.matrix.a] : [0, 1];
+      // 장평 transform(translate·scale)을 읽기만 해서 곱한다. consolidate()는 transform 속성을 고쳐 쓴다.
+      const transforms = text.transform.baseVal;
+      let origin = 0, scale = 1;
+      for (let k = 0; k < transforms.numberOfItems; k += 1) {{
+        const matrix = transforms.getItem(k).matrix;
+        origin += scale * matrix.e;
+        scale *= matrix.a;
+      }}
       for (const span of text.querySelectorAll('tspan')) {{
         const xs = span.x.baseVal;
         let k = 0;
@@ -145,8 +149,12 @@ function lineBand(line, lineRange, range) {{
   const start = offsetInLine(lineRange, length, range.startContainer, range.startOffset);
   const end = offsetInLine(lineRange, length, range.endContainer, range.endOffset);
   if (start >= end) return null;
-  const span = edgesOf(line).slice(start, end + 1);
-  const left = Math.min(...span), right = Math.max(...span);
+  const edges = edgesOf(line);
+  const span = edges.slice(start, end + 1);
+  let left = Math.min(...span), right = Math.max(...span);
+  // 이은 자모·대리쌍의 뒤쪽만 골라 경계가 접히면 그 글자 묶음 전체(앞 경계부터)로 넓힌다.
+  if (right <= left) left = edges.slice(0, start).findLast((edge) => edge < right) ?? left;
+  if (right <= left) right = edges.slice(end).find((edge) => edge > left) ?? right;
   if (right <= left) return null;
   const [top, height] = line.dataset.band.split(' ').map(Number);
   const rect = document.createElementNS(SVG_NS, 'rect');
@@ -241,17 +249,32 @@ def _markup_text(text: str) -> str:
     return escape(text).replace("\r", "&#13;")
 
 
+def _glyph_box(line: TextLine) -> tuple[float, float]:
+    """그린 글자들의 위·아래 끝. layout처럼 글자 원점 위로 크기 × TAC_ASCENT, 아래로 나머지를 차지한다."""
+    drawn = [(glyph.y, glyph.size) for glyph in line.glyphs if glyph is not None] or [(line.baseline, line.size)]
+    return min(y - size * TAC_ASCENT for y, size in drawn), max(y + size * (1 - TAC_ASCENT) for y, size in drawn)
+
+
 def _bands(lines: list[TextLine]) -> list[str]:
-    """줄마다 data-band 속성(띠 위 끝과 높이)."""
-    bands = []
-    for line in lines:
-        if line.top is not None and line.bottom is not None and line.bottom > line.top:
-            top, height = line.top, line.bottom - line.top
+    """줄마다 data-band 속성. layout 줄 몫(top·bottom)과 그린 글자 상자를 합친 띠의 위 끝과 높이다."""
+    boxes = [_glyph_box(line) for line in lines]
+    spans = []
+    for line, (glyph_top, glyph_bottom) in zip(lines, boxes, strict=True):
+        if line.top is not None and line.bottom is not None:
+            spans.append([min(line.top, glyph_top), max(line.bottom, glyph_bottom)])
         else:
-            # 저장 줄 없이 놓은 글(쪽 번호·덧말)은 layout처럼 기준선이 위에서 글자 크기 × TAC_ASCENT인 글자 상자다.
-            top, height = line.baseline - line.size * TAC_ASCENT, line.size
-        bands.append(f' data-band="{format_pt(top)} {format_pt(height)}"')
-    return bands
+            spans.append([glyph_top, glyph_bottom])
+    for k, (above, below) in enumerate(zip(lines, lines[1:], strict=False)):
+        same = above.paragraph is not None and above.paragraph == below.paragraph
+        if not same or above.bottom is None or spans[k][1] <= spans[k + 1][0]:
+            continue
+        # 같은 문단 이웃 줄 띠가 겹치면(글자 위치 오프셋으로 올린 글자 등) 경계를 저장 줄 경계에 가장 가깝게 두되
+        # 윗줄 글자 아래 끝과 아랫줄 글자 위 끝 사이로 옮긴다. 글자 상자끼리 겹치면 겹친 채 둔다.
+        # 한계: 덧말·줄 안 표·글상자 줄이 사이에 끼면 이웃으로 보지 않아 겹친 띠가 진하게 남을 수 있다.
+        low, high = boxes[k][1], boxes[k + 1][0]
+        if low <= high:
+            spans[k][1] = spans[k + 1][0] = min(max(above.bottom, low), high)
+    return [f' data-band="{format_pt(top)} {format_pt(bottom - top)}"' for top, bottom in spans]
 
 
 def _fit_edges(line: TextLine, shown: str) -> list[float] | None:
@@ -334,8 +357,12 @@ def _glyph_line(line: TextLine, band: str = "") -> str | None:
             groups[-1].append(char)
         else:
             groups.append([char])
-    # 경계는 스크립트가 tspan x와 줄 끝(data-end)으로 만든다.
-    attrs = f' class="ln" data-end="{format_pt(line.x + line.width)}"{band}' if band else ' class="ln"'
+    # 경계는 스크립트가 tspan x와 줄 끝(data-end)으로 만든다. 폭 0 줄은 띠 대신 브라우저 선택 칠하기를 둔다.
+    if band and line.width > 0:
+        band = f' data-end="{format_pt(line.x + line.width)}"{band}'
+    else:
+        band = ""
+    attrs = f' class="ln"{band}'
     if len(groups) == 1:
         return _transformed_text(groups[0], attrs)
     return f"<g{attrs}>{''.join(_transformed_text(group) for group in groups)}</g>"

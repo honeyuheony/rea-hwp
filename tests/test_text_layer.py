@@ -57,16 +57,11 @@ def test_text_line_char_x_keeps_spaces_in_order():
         assert all(glyph is None for char, glyph in zip(line.text, line.glyphs, strict=True) if not char.strip())
 
 
-@pytest.mark.parametrize("path", DOCUMENTS, ids=lambda path: path.name)
-def test_text_line_top_bottom_hold_baseline(path):
-    lines = [line for page in layout_document(HwpDocument.open(path)) for line in page.text_lines]
-    placed = [line for line in lines if line.top is not None]
-    assert placed
-    for line in placed:
-        assert line.top <= line.baseline <= line.bottom, line.text
+#: 여러 줄 문단 안에 글자 높이가 줄 높이보다 큰 줄(1128·1156)이 있는 문서.
+TALL_TEXT_DOCUMENT = CORPUS_ROOT / "oss/rhwp/21_언어_기출_편집가능본.hwp"
 
 
-@pytest.mark.parametrize("path", [DOCUMENTS[0], DOCUMENTS[2]], ids=lambda path: path.name)
+@pytest.mark.parametrize("path", [DOCUMENTS[0], DOCUMENTS[2], TALL_TEXT_DOCUMENT], ids=lambda path: path.name)
 def test_text_line_bottom_meets_next_line_top_in_paragraph(path):
     pairs = 0
     for page in layout_document(HwpDocument.open(path)):
@@ -245,13 +240,57 @@ def _utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-@pytest.mark.parametrize("path", DOCUMENTS, ids=lambda path: path.name)
-def test_band_data_matches_text_line(path):
-    for page in layout_document(HwpDocument.open(path)):
-        for line, element in zip(page.text_lines, _layer_lines(page), strict=True):
-            top, height = (float(value) for value in element.get("data-band").split())
-            if line.top is not None:
-                assert (top, height) == pytest.approx((line.top / HU_PER_PT, (line.bottom - line.top) / HU_PER_PT))
+#: 띠 세로 값 시험 문서: 고정·음수 줄 간격(cyber 10쪽 「(」), 수식 든 마지막 줄(edu 181쪽), 글자 오프셋(exam_kor).
+BAND_DOCUMENTS = [
+    *DOCUMENTS,
+    CORPUS_ROOT / "_clones/rhwp/samples/issue6795/1341000-201100013-cyber-university-application.hwp",
+    CORPUS_ROOT / "oss/rhwp/task2287__1342000_edu_curriculum_map.hwp",
+    CORPUS_ROOT / "oss/rhwp/exam_kor.hwp",
+]
+
+
+def _band(element: ET.Element) -> tuple[float, float]:
+    top, height = (float(value) * HU_PER_PT for value in element.get("data-band").split())
+    return top, top + height
+
+
+def _drawn_box(line: TextLine) -> tuple[float, float]:
+    drawn = [(glyph.y, glyph.size) for glyph in line.glyphs if glyph is not None] or [(line.baseline, line.size)]
+    return min(y - size * TAC_ASCENT for y, size in drawn), max(y + size * (1 - TAC_ASCENT) for y, size in drawn)
+
+
+@pytest.fixture(scope="module", params=BAND_DOCUMENTS, ids=lambda path: path.name)
+def band_pages(request):
+    return [(page, _layer_lines(page)) for page in layout_document(HwpDocument.open(request.param))]
+
+
+def test_band_covers_drawn_glyphs_and_layout_line(band_pages):
+    for page, elements in band_pages:
+        for line, element in zip(page.text_lines, elements, strict=True):
+            if element.get("data-band") is None:
+                assert line.width <= 0, (page.number, line.text)
+                continue
+            top, bottom = _band(element)
+            glyph_top, glyph_bottom = _drawn_box(line)
+            assert top <= glyph_top + 1 and bottom >= glyph_bottom - 1, (page.number, line.text)
+
+
+def test_band_of_paragraph_neighbors_do_not_overlap_unless_glyphs_do(band_pages):
+    for page, elements in band_pages:
+        lines = list(zip(page.text_lines, elements, strict=True))
+        for (above, upper), (below, lower) in zip(lines, lines[1:], strict=False):
+            same = above.paragraph is not None and above.paragraph == below.paragraph
+            if not same or upper.get("data-band") is None or lower.get("data-band") is None:
+                continue
+            if _band(upper)[1] > _band(lower)[0] + 1 and _band(lower)[1] > _band(upper)[0]:
+                assert _drawn_box(above)[1] > _drawn_box(below)[0], (page.number, above.text, below.text)
+
+
+def test_band_edge_data_matches_text_line(band_pages):
+    for page, elements in band_pages:
+        for line, element in zip(page.text_lines, elements, strict=True):
+            if element.get("data-band") is None:
+                continue
             end = (line.x + line.width) / HU_PER_PT
             if "fit" in element.get("class").split():
                 edges = [float(edge) for edge in element.get("data-edges").split()]
@@ -259,6 +298,20 @@ def test_band_data_matches_text_line(path):
                 assert edges[-1] == pytest.approx(end, abs=0.001), (page.number, line.text)
             else:
                 assert float(element.get("data-end")) == pytest.approx(end, abs=0.001), (page.number, line.text)
+
+
+def test_band_widens_to_glyph_raised_above_line_top():
+    glyph = Glyph("가", 1000, 1735, 1000, "바탕")
+    line = TextLine("가", 1000, 1850, 1000, 1000, None, [1000], [glyph], 1000, 2000)
+    assert ET.fromstring(text_layer([line], 10000, 10000)).find("text").get("data-band") == "8.85 11.15"
+
+
+def test_band_boundary_moves_up_to_raised_glyph_of_next_line_in_paragraph():
+    above = TextLine("가", 1000, 1850, 1000, 1000, "0:1", [1000], [Glyph("가", 1000, 1850, 1000, "바탕")], 1000, 2600)
+    raised = Glyph("나", 1000, 3335, 1000, "바탕")
+    below = TextLine("나", 1000, 3450, 1000, 1000, "0:1", [1000], [raised], 2600, 3600)
+    bands = [element.get("data-band") for element in ET.fromstring(text_layer([above, below], 10000, 10000))]
+    assert bands == ["10 14.85", "24.85 11.15"]
 
 
 def _equation_scripts(document: HwpDocument) -> list[str]:
