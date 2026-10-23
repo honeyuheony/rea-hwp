@@ -5,6 +5,7 @@ from __future__ import annotations
 from html import escape
 from typing import NamedTuple
 
+from .common import TAC_ASCENT
 from .scene import Glyph, TextLine
 from .svg import copy_text, format_pt, glyph_family_and_text, glyph_style_attrs
 
@@ -31,7 +32,9 @@ main {{ display: flex; flex-direction: column; align-items: center; gap: 16px; p
 .text-layer {{ position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; }}
 .text-layer text {{ fill: transparent; white-space: pre; cursor: text; }}
 .text-layer .fit {{ font-family: system-ui, sans-serif; }}
-.text-layer ::selection {{ fill: transparent; background: rgba(6, 55, 123, .3); }}
+/* 브라우저 선택 칠하기는 대체 글꼴 상자를 따라 겹치거나 끊기므로 끄고, 줄마다 띠(.bands rect)를 직접 그린다. */
+.text-layer ::selection {{ fill: transparent; background: transparent; }}
+.text-layer .bands {{ fill: rgba(6, 55, 123, .3); pointer-events: none; }}
 .label {{ font-size: 12px; opacity: .7; text-align: center; }}
 </style>
 </head>
@@ -79,6 +82,91 @@ document.addEventListener('copy', (event) => {{
   event.clipboardData.setData('text/plain', texts.join('\\n'));
   event.preventDefault();
 }});
+// 선택 띠: 줄(.ln)마다 고른 첫 위치 경계부터 끝 위치 경계까지(data-edges, pt) 글자 높이(data-band) 띠 하나를 그린다.
+// 화면에 보이는 쪽만 그리고, 쪽이 화면에 들어오거나 범위가 바뀌면 다음 그림 차례에 한 번 다시 그린다.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const shownPages = new Set();
+const bandedPages = new Set();
+const lineEdges = new WeakMap();
+let bandFrame = 0;
+function scheduleBands() {{
+  if (!bandFrame) bandFrame = requestAnimationFrame(drawBands);
+}}
+function edgesOf(line) {{
+  let edges = lineEdges.get(line);
+  if (!edges) {{
+    edges = line.dataset.edges.split(' ').map(Number);
+    lineEdges.set(line, edges);
+  }}
+  return edges;
+}}
+// 범위 경계점(node, offset)이 줄 글의 몇째 UTF-16 위치인지. 줄 앞이면 0, 줄 뒤면 글 길이.
+function offsetInLine(lineRange, length, node, offset) {{
+  const order = lineRange.comparePoint(node, offset);
+  if (order !== 0) return order < 0 ? 0 : length;
+  const head = lineRange.cloneRange();
+  head.setEnd(node, offset);
+  return head.toString().length;
+}}
+function bandGroup(layer) {{
+  let group = layer.querySelector(':scope > .bands');
+  if (!group) {{
+    group = document.createElementNS(SVG_NS, 'g');
+    group.setAttribute('class', 'bands');
+    layer.prepend(group);
+  }}
+  return group;
+}}
+function drawPageBands(layer, range) {{
+  const rects = [];
+  for (const line of layer.querySelectorAll('.ln')) {{
+    if (!range.intersectsNode(line)) continue;
+    const lineRange = document.createRange();
+    lineRange.selectNodeContents(line);
+    const length = line.textContent.length;
+    const start = offsetInLine(lineRange, length, range.startContainer, range.startOffset);
+    const end = offsetInLine(lineRange, length, range.endContainer, range.endOffset);
+    if (start >= end) continue;
+    const span = edgesOf(line).slice(start, end + 1);
+    const left = Math.min(...span), right = Math.max(...span);
+    if (right <= left) continue;
+    const [top, height] = line.dataset.band.split(' ').map(Number);
+    const rect = document.createElementNS(SVG_NS, 'rect');
+    rect.setAttribute('x', left);
+    rect.setAttribute('y', top);
+    rect.setAttribute('width', right - left);
+    rect.setAttribute('height', height);
+    rects.push(rect);
+  }}
+  bandGroup(layer).replaceChildren(...rects);
+}}
+function drawBands() {{
+  bandFrame = 0;
+  const selection = document.getSelection();
+  const range = selection && selection.rangeCount && !selection.isCollapsed ? selection.getRangeAt(0) : null;
+  for (const layer of bandedPages) {{
+    if (range && shownPages.has(layer) && range.intersectsNode(layer)) continue;
+    bandGroup(layer).replaceChildren();
+    bandedPages.delete(layer);
+  }}
+  if (!range) return;
+  for (const layer of shownPages) {{
+    if (!range.intersectsNode(layer)) continue;
+    drawPageBands(layer, range);
+    bandedPages.add(layer);
+  }}
+}}
+const pageWatch = new IntersectionObserver((entries) => {{
+  for (const entry of entries) {{
+    const layer = entry.target.querySelector('svg.text-layer');
+    if (entry.isIntersecting) shownPages.add(layer);
+    else shownPages.delete(layer);
+  }}
+  scheduleBands();
+}});
+// content-visibility로 건너뛴 쪽 안의 요소 대신 쪽 자체를 관찰한다.
+for (const layer of document.querySelectorAll('svg.text-layer')) pageWatch.observe(layer.closest('.page'));
+document.addEventListener('selectionchange', scheduleBands);
 // 수식 글꼴이 이 PC에 없으면(PUA 글자 폭이 대체 글꼴과 같으면) 유니코드 수식으로 그린 쪽으로 바꾼다.
 function hasFont(name) {{
   const context = document.createElement('canvas').getContext('2d');
@@ -106,14 +194,36 @@ def _font_attrs(key: tuple) -> str:
     return " ".join([f'font-family={family} font-size="{format_pt(size)}"', *style])
 
 
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _band_attrs(line: TextLine, unit_x: list[float | None]) -> str:
+    """선택 띠 자료. unit_x는 DOM 글의 UTF-16 단위마다 그 단위가 시작하는 x(묶음 안 뒤 단위는 None)."""
+    end = line.x + line.width
+    # 경계 k는 단위 k 앞이다. 묶음 안 경계는 묶음 끝으로 올려, 묶음 일부만 골라도 띠가 묶음 전체를 덮는다.
+    edges = [end]
+    for x in reversed(unit_x):
+        edges.append(edges[-1] if x is None else x)
+    edges.reverse()
+    # 띠는 LINE_SEG 글자 높이(줄 최대 base_size)다. layout은 기준선을 그 위 끝에서 글자 높이 × TAC_ASCENT 아래에 둔다.
+    top = line.baseline - line.size * TAC_ASCENT
+    return (
+        f' data-edges="{" ".join(format_pt(edge) for edge in edges)}"'
+        f' data-band="{format_pt(top)} {format_pt(line.size)}"'
+    )
+
+
 def _fit_line(line: TextLine) -> str:
     """글자별 자리가 없거나 그린 글자와 하나씩 맞지 않는 줄(수식 스크립트)은 줄 폭에 맞춰 늘이거나 줄인다."""
-    text = escape(copy_text(line.text))
+    shown = copy_text(line.text)
+    count = _utf16_len(shown)
+    band = _band_attrs(line, [line.x + line.width * k / count for k in range(count)])
     length = f' textLength="{format_pt(line.width)}" lengthAdjust="spacingAndGlyphs"' if line.width > 0 else ""
     return (
         f'<text class="ln fit" x="{format_pt(line.x)}" y="{format_pt(line.baseline)}" '
-        f'font-size="{format_pt(line.size)}"{length}>'
-        f"{text}</text>"
+        f'font-size="{format_pt(line.size)}"{length}{band}>'
+        f"{escape(shown)}</text>"
     )
 
 
@@ -165,9 +275,11 @@ def _glyph_line(line: TextLine) -> str | None:
             groups[-1].append(char)
         else:
             groups.append([char])
+    unit_x = [x for char in chars for x in [char.x] + [None] * (_utf16_len(char.text) - 1)]
+    attrs = f' class="ln"{_band_attrs(line, unit_x)}'
     if len(groups) == 1:
-        return _transformed_text(groups[0], ' class="ln"')
-    return f'<g class="ln">{"".join(_transformed_text(group) for group in groups)}</g>'
+        return _transformed_text(groups[0], attrs)
+    return f"<g{attrs}>{''.join(_transformed_text(group) for group in groups)}</g>"
 
 
 def _transformed_text(group: list[_LayerChar], attrs: str = "") -> str:
