@@ -68,17 +68,18 @@ function selectedText(line, range) {{
   }}
   return text;
 }}
-document.addEventListener('copy', (event) => {{
-  const selection = document.getSelection();
-  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
-  const range = selection.getRangeAt(0);
+function rangeTexts(range) {{
   const common = range.commonAncestorContainer;
   const scope = common.nodeType === Node.ELEMENT_NODE ? common : common.parentElement;
   const own = scope.closest('.ln');
   const candidates = own ? [own] : scope.querySelectorAll('.text-layer .ln');
   const lines = [...candidates].filter((line) => range.intersectsNode(line));
-  if (!lines.length) return;
-  const texts = lines.map((line) => selectedText(line, range)).filter((text) => text);
+  return lines.map((line) => selectedText(line, range)).filter((text) => text);
+}}
+document.addEventListener('copy', (event) => {{
+  const selection = document.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+  const texts = rangeTexts(selection.getRangeAt(0));
   // 글 층 글자를 하나도 고르지 않았으면(쪽 번호 글에서 다음 쪽 첫 줄 머리까지 등) 브라우저 기본 복사에 맡긴다.
   if (!texts.length) return;
   event.clipboardData.setData('text/plain', texts.join('\\n'));
@@ -158,10 +159,12 @@ function lineBand(line, lineRange, range) {{
 function drawPageBands(layer, ranges) {{
   const rects = [];
   for (const line of layer.querySelectorAll('.ln[data-band]')) {{
+    const hits = ranges.filter((range) => range.intersectsNode(line));
+    if (!hits.length) continue;
     const lineRange = document.createRange();
     lineRange.selectNodeContents(line);
-    for (const range of ranges) {{
-      const rect = range.intersectsNode(line) && lineBand(line, lineRange, range);
+    for (const range of hits) {{
+      const rect = lineBand(line, lineRange, range);
       if (rect) rects.push(rect);
     }}
   }}
@@ -238,18 +241,17 @@ def _markup_text(text: str) -> str:
     return escape(text).replace("\r", "&#13;")
 
 
-def _band_attrs(line: TextLine, edges: list[float] | None) -> str:
-    """선택 띠 자료. edges가 없으면 스크립트가 tspan x와 줄 끝(data-end)으로 경계를 만든다."""
-    if line.top is not None and line.bottom is not None and line.bottom > line.top:
-        top, height = line.top, line.bottom - line.top
-    else:
-        # 저장 줄 없이 놓은 글(쪽 번호·덧말)은 layout처럼 기준선이 위에서 글자 크기 × TAC_ASCENT인 글자 상자다.
-        top, height = line.baseline - line.size * TAC_ASCENT, line.size
-    if edges is None:
-        span = f' data-end="{format_pt(line.x + line.width)}"'
-    else:
-        span = f' data-edges="{" ".join(format_pt(edge) for edge in edges)}"'
-    return f'{span} data-band="{format_pt(top)} {format_pt(height)}"'
+def _bands(lines: list[TextLine]) -> list[str]:
+    """줄마다 data-band 속성(띠 위 끝과 높이)."""
+    bands = []
+    for line in lines:
+        if line.top is not None and line.bottom is not None and line.bottom > line.top:
+            top, height = line.top, line.bottom - line.top
+        else:
+            # 저장 줄 없이 놓은 글(쪽 번호·덧말)은 layout처럼 기준선이 위에서 글자 크기 × TAC_ASCENT인 글자 상자다.
+            top, height = line.baseline - line.size * TAC_ASCENT, line.size
+        bands.append(f' data-band="{format_pt(top)} {format_pt(height)}"')
+    return bands
 
 
 def _fit_edges(line: TextLine, shown: str) -> list[float] | None:
@@ -270,12 +272,12 @@ def _fit_edges(line: TextLine, shown: str) -> list[float] | None:
     return edges if max(edges) > min(edges) else None
 
 
-def _fit_line(line: TextLine) -> str:
+def _fit_line(line: TextLine, band: str = "") -> str:
     """글자별 자리가 없거나 그린 글자와 하나씩 맞지 않는 줄(수식 스크립트)은 줄 폭에 맞춰 늘이거나 줄인다."""
     shown = copy_text(line.text)
     edges = _fit_edges(line, shown)
     # 띠를 그릴 수 없는 줄(폭 0)은 띠 자료를 넣지 않아 브라우저 선택 칠하기를 그대로 둔다.
-    band = _band_attrs(line, edges) if edges is not None else ""
+    band = f' data-edges="{" ".join(format_pt(edge) for edge in edges)}"{band}' if edges is not None and band else ""
     length = f' textLength="{format_pt(line.width)}" lengthAdjust="spacingAndGlyphs"' if line.width > 0 else ""
     return (
         f'<text class="ln fit" x="{format_pt(line.x)}" y="{format_pt(line.baseline)}" '
@@ -294,7 +296,7 @@ class _LayerChar(NamedTuple):
     scale: float
 
 
-def _glyph_line(line: TextLine) -> str | None:
+def _glyph_line(line: TextLine, band: str = "") -> str | None:
     """그린 글자와 같은 x·y·글꼴·크기·장평으로 놓은 줄. 글자별 위치가 없거나 글리프 없는 글자가 보이면 None."""
     if not len(line.char_x) == len(line.glyphs) == len(line.text):
         return None
@@ -332,7 +334,8 @@ def _glyph_line(line: TextLine) -> str | None:
             groups[-1].append(char)
         else:
             groups.append([char])
-    attrs = f' class="ln"{_band_attrs(line, None)}'
+    # 경계는 스크립트가 tspan x와 줄 끝(data-end)으로 만든다.
+    attrs = f' class="ln" data-end="{format_pt(line.x + line.width)}"{band}' if band else ' class="ln"'
     if len(groups) == 1:
         return _transformed_text(groups[0], attrs)
     return f"<g{attrs}>{''.join(_transformed_text(group) for group in groups)}</g>"
@@ -368,7 +371,9 @@ def _transformed_text(group: list[_LayerChar], attrs: str = "") -> str:
 
 def text_layer(lines: list[TextLine], width: float, height: float) -> str:
     """쪽 크기(width·height, HWPUNIT) viewBox의 투명한 SVG 글 층. 줄마다 .ln 하나이며 복사하면 줄이 나뉜다."""
-    body = "".join(_glyph_line(line) or _fit_line(line) for line in lines)
+    body = "".join(
+        _glyph_line(line, band) or _fit_line(line, band) for line, band in zip(lines, _bands(lines), strict=True)
+    )
     return f'<svg class="text-layer" viewBox="0 0 {format_pt(width)} {format_pt(height)}">{body}</svg>'
 
 
