@@ -24,7 +24,7 @@ from .render.svg import page_to_svg
 from .structure import BinDataItem, Paragraph, RecordView, picture_bin_data_id, record_id, subtree_end
 
 #: pyproject.toml의 버전과 같게 둔다. 공개 API나 읽기·렌더 결과가 바뀌는 커밋마다 올린다.
-__version__ = "0.2.8"
+__version__ = "0.2.9"
 
 __all__ = [
     "BinDataItem",
