@@ -144,6 +144,9 @@ def _glyph_line(line: TextLine) -> str | None:
         # 복사 글에서 지워지는 제어 문자는 그린 글리프가 없어도 줄을 글자별로 놓는 데 방해되지 않는다.
         if glyph is None and shown.strip():
             return None
+        # 회전 글자는 레이아웃 줄 글에 없지만 바깥 코드가 만든 TextLine에는 올 수 있어 줄 폭 맞춤으로 덮는다.
+        if glyph is not None and glyph.rotation:
+            return None
         joined = glyph is not None and glyph is previous
         previous = glyph
         if glyph is not None and glyph is not style:

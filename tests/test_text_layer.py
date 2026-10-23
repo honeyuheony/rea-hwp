@@ -142,3 +142,10 @@ def test_viewer_puts_every_text_layer_in_page_from_start():
     figures = html.split('<figure class="page"')[1:]
     assert all(layer in figure and "aspect-ratio" in figure.split(">")[0] for figure in figures)
     assert "<template" not in html
+
+
+def test_text_layer_falls_back_to_line_fit_for_rotated_glyph():
+    glyphs = [Glyph("가", 1000, 2000, 1000, "바탕", rotation=-90.0), Glyph("나", 1000, 3000, 1000, "바탕")]
+    line = TextLine("가나", 1000, 2000, 2000, 1000, None, [1000, 1000], glyphs)
+    element = ET.fromstring(text_layer([line], 10000, 10000)).find("text")
+    assert (element.get("class"), "".join(element.itertext())) == ("ln fit", "가나")
