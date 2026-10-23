@@ -1116,8 +1116,12 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             for index in range(len(view.segments)):
                 self.place_line(state, view, index, area)
 
-    def paragraph_views(self, paragraphs: list[Node], width: float, textbox: bool = False) -> list[ParagraphView]:
+    def paragraph_views(
+        self, paragraphs: list[Node], width: float, textbox: bool = False, cell: bool = False
+    ) -> list[ParagraphView]:
         """문단 목록(셀·글상자·머리말·주석)의 보기. LINE_SEG가 없는 문단은 앞 문단 끝에 이어 줄을 만든다.
+
+        cell은 가로쓰기 표 칸 목록이다. 그 안 번호 문단은 저장 줄을 버리고 다시 나눈다(아래 renumbered).
 
         글상자 문단은 저장 줄이 글자까지 줄여야 들어가면(없는 글꼴을 더 넓은 글꼴로 대체) 다시 나눈다
         (실측: annual_report 나눔고딕·BookReview 한컴 윤고딕 240 → Haansoft Batang, 셀까지 넓히면 편람 −159k).
@@ -1139,6 +1143,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         column_widths = {w for _, w in column_layout(column_def, round(width))}
         judged_width = column_widths.pop() if len(column_widths) == 1 else None
         rewound = False
+        # 표 칸 번호 문단은 한글이 저장 줄을 버리고 다시 나눈다(재저장본 실측: task2287 셀 번호 문단 862개 중 346개
+        # 줄 시작이 바뀜, 머리 없는 문단 4,277개는 0개. 가로 구간이 같아 FUN_101dbcf0 판정으로는 설명 안 됨).
+        # 근거가 없는 칸(어울림 개체 칸, 칸 안 다단)은 저장 줄을 쓴다.
+        renumbered = cell and not floating and column_def is None
         for node in paragraphs:
             view = ParagraphView.build(node, self.styles)
             if shift and view.segments:
@@ -1171,9 +1179,14 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 shift += _line_end(rejudged.segments[-1]) - _line_end(view.segments[-1])
                 view = rejudged
                 last_vpos = view.segments[-1].vertical_pos
-            # 목록 안 번호 문단은 한글이 저장 줄을 버리고 다시 나눈다(재저장본 실측: task2287 셀 번호 문단 862개 중
-            # 346개 줄 시작이 바뀜, 머리 없는 문단 4,277개는 0개. 가로 구간이 같아 FUN_101dbcf0 판정으로는 설명 안 됨).
-            numbered = view.para_shape.head_type == heads.HEAD_NUMBER
+            # 저장 줄 재사용 판정이 다시 짠 문단은 그 결과를 쓴다. 저장 위치가 되감기거나 제자리인(0 다음 0) 문단은
+            # 쪽을 넘는 칸의 나눔 지점(table_flow stored_pieces)을 저장 줄에서 찾으므로 다시 나누지 않는다.
+            numbered = (
+                renumbered
+                and rejudged is None
+                and view.para_shape.head_type == heads.HEAD_NUMBER
+                and not any(b <= a for a, b in itertools.pairwise(stored_vpos))
+            )
             if view.segments and (numbered or textbox and self.squeezed(view)):
                 previous = views[-1] if views else None
                 start = reflow.flow_end(previous) if previous else view.segments[0].vertical_pos

@@ -15,7 +15,7 @@ from rea_hwp.render.table_flow import (
     inline_table_rooms,
     paging_eligible,
 )
-from rea_hwp.render.tables import cell_margins, stored_pieces
+from rea_hwp.render.tables import cell_margins, collect_cells, stored_pieces
 
 
 def _paragraph(*positions: tuple[int, int]) -> list:
@@ -242,3 +242,39 @@ def test_paragraph_relative_picture_in_cell_starts_above_space_before():
     label = next(item for item in page.items if isinstance(item, Glyph) and item.char == "꺾" and item.x > 35000)
     # 한글 2022 PDF 3쪽: 셀 첫 문단(위 간격 1100) 그림 안 글상자 「중꺾마」 기준선 379.92pt(첫 줄 기준이면 390.88pt).
     assert label.y / 100 == pytest.approx(379.92, abs=0.5)
+
+
+CURRICULUM = RHWP / "task2287__1342000_edu_curriculum_map.hwp"
+
+
+def _cell_views(document: HwpDocument, located: str, cell: bool):
+    """located(구역:index) 문단이 든 표 칸의 문단 보기와 그 문단의 차례."""
+    for section in document.sections:
+        for node in section.walk():
+            if node.tag != tags.CTRL_HEADER or node.find(tags.TABLE) is None:
+                continue
+            table, cells = collect_cells(node)
+            for found in cells:
+                for index, paragraph in enumerate(found.paragraphs):
+                    if document.record_id(paragraph.record) == located:
+                        margins = cell_margins(table, found)
+                        width = (found.header.text_width or found.header.width) - margins[0] - margins[1]
+                        return DocumentLayout(document).paragraph_views(found.paragraphs, width, cell=cell), index
+    raise LookupError(located)
+
+
+@pytest.mark.skipif(not CURRICULUM.exists(), reason="corpus not available")
+def test_numbered_cell_paragraph_is_rebroken_like_hangul():
+    views, index = _cell_views(HwpDocument.open(CURRICULUM), "5:5589", cell=True)
+    # 한글 2022 재저장본 LINE_SEG 줄 시작(원본 저장 줄은 0, 30, 62, 94, 124).
+    assert [segment.text_start for segment in views[index].segments] == [0, 31, 63, 95, 126]
+
+
+@pytest.mark.skipif(not CURRICULUM.exists(), reason="corpus not available")
+@pytest.mark.parametrize("located", ["1:3955", "1:4869", "5:1726"])
+def test_numbered_paragraph_with_rewound_lines_keeps_stored_lines(located):
+    document = HwpDocument.open(CURRICULUM)
+    # 저장 위치가 되감기는 번호 문단은 쪽을 넘는 칸의 나눔 지점이라 다시 나누지 않는다.
+    on, index = _cell_views(document, located, cell=True)
+    off, _ = _cell_views(document, located, cell=False)
+    assert on[index].segments == off[index].segments
