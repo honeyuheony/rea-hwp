@@ -1701,6 +1701,12 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                     self.paragraph_id(view),
                     [mark_x for mark_x, _ in kept],
                     [drawn for _, drawn in kept],
+                    top=line_top,
+                    # 덧말 줄은 글자 높이만 늘려 저장한다(dutmal 견본 줄 높이 1000·글자 높이 1500). 문단 마지막 줄의
+                    # 줄 간격은 다음 문단·셀 아래 여백 쪽이라 넣지 않는다.
+                    bottom=line_top
+                    + max(segment.line_height, segment.text_height)
+                    + (0 if is_last_line else segment.line_spacing),
                 )
             )
 

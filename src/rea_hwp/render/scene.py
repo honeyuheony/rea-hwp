@@ -91,6 +91,10 @@ class TextLine:
     char_x: list[float] = field(default_factory=list)
     #: text 글자마다 그린 Glyph(page.items 안 같은 객체, 이은 자모는 같은 Glyph). 그린 글리프가 없는 글자는 None.
     glyphs: list[Glyph | None] = field(default_factory=list)
+    #: 줄 위 끝 y(LINE_SEG 세로 위치). 저장 줄 없이 놓은 글(쪽 번호 같은 생성 글, 덧말)은 None.
+    top: float | None = None
+    #: 줄이 차지하는 아래 끝 y. 같은 문단 다음 줄의 위 끝(줄 높이 + 줄 간격)이고, 문단 마지막 줄은 줄 높이까지.
+    bottom: float | None = None
 
 
 @dataclass
