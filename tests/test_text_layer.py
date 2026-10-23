@@ -57,6 +57,16 @@ def test_text_line_char_x_keeps_spaces_in_order():
         assert all(glyph is None for char, glyph in zip(line.text, line.glyphs, strict=True) if not char.strip())
 
 
+@pytest.mark.parametrize("path", DOCUMENTS, ids=lambda path: path.name)
+def test_text_line_top_bottom_hold_baseline(path):
+    # 띠는 글자 상자와 합쳐 그리므로, layout 줄 몫이 기준선을 놓치는 회귀는 이 시험으로만 드러난다.
+    lines = [line for page in layout_document(HwpDocument.open(path)) for line in page.text_lines]
+    placed = [line for line in lines if line.top is not None]
+    assert placed
+    for line in placed:
+        assert line.top <= line.baseline <= line.bottom, line.text
+
+
 #: 여러 줄 문단 안에 글자 높이가 줄 높이보다 큰 줄(1128·1156)이 있는 문서.
 TALL_TEXT_DOCUMENT = CORPUS_ROOT / "oss/rhwp/21_언어_기출_편집가능본.hwp"
 
