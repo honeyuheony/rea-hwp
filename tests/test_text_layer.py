@@ -13,7 +13,7 @@ from rea_hwp.document import HwpDocument
 from rea_hwp.models.controls import EqEdit
 from rea_hwp.render.common import TAC_ASCENT
 from rea_hwp.render.equation.unicode import LEGACY_EQUATION_FAMILY
-from rea_hwp.render.html import text_layer, viewer_html
+from rea_hwp.render.html import _glyph_box, text_layer, viewer_html
 from rea_hwp.render.layout import layout_document
 from rea_hwp.render.scene import Glyph, Page, TextLine
 from rea_hwp.render.svg import HU_PER_PT, copy_text, page_to_svg
@@ -264,11 +264,6 @@ def _band(element: ET.Element) -> tuple[float, float]:
     return top, top + height
 
 
-def _drawn_box(line: TextLine) -> tuple[float, float]:
-    drawn = [(glyph.y, glyph.size) for glyph in line.glyphs if glyph is not None] or [(line.baseline, line.size)]
-    return min(y - size * TAC_ASCENT for y, size in drawn), max(y + size * (1 - TAC_ASCENT) for y, size in drawn)
-
-
 @pytest.fixture(scope="module", params=BAND_DOCUMENTS, ids=lambda path: path.name)
 def band_pages(request):
     return [(page, _layer_lines(page)) for page in layout_document(HwpDocument.open(request.param))]
@@ -281,7 +276,7 @@ def test_band_covers_drawn_glyphs_and_layout_line(band_pages):
                 assert line.width <= 0, (page.number, line.text)
                 continue
             top, bottom = _band(element)
-            glyph_top, glyph_bottom = _drawn_box(line)
+            glyph_top, glyph_bottom = _glyph_box(line)
             assert top <= glyph_top + 1 and bottom >= glyph_bottom - 1, (page.number, line.text)
 
 
@@ -293,7 +288,7 @@ def test_band_of_paragraph_neighbors_do_not_overlap_unless_glyphs_do(band_pages)
             if not same or upper.get("data-band") is None or lower.get("data-band") is None:
                 continue
             if _band(upper)[1] > _band(lower)[0] + 1 and _band(lower)[1] > _band(upper)[0]:
-                assert _drawn_box(above)[1] > _drawn_box(below)[0], (page.number, above.text, below.text)
+                assert _glyph_box(above)[1] > _glyph_box(below)[0], (page.number, above.text, below.text)
 
 
 def test_band_edge_data_matches_text_line(band_pages):
