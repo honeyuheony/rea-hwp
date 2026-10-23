@@ -68,19 +68,26 @@ function selectedText(line, range) {{
   }}
   return text;
 }}
-function rangeTexts(range) {{
+// 범위가 고른 글 조각(줄과 함께). 글 층 줄에 닿지 않는 범위는 그 범위의 글 하나다(line은 null).
+function rangePieces(range) {{
   const common = range.commonAncestorContainer;
-  const scope = common.nodeType === Node.ELEMENT_NODE ? common : common.parentElement;
+  // 공통 조상이 Document면(문서 전체를 고른 범위 등) 부모 요소가 없어 문서 요소에서 찾는다.
+  const scope = common instanceof Element ? common : common.parentElement ?? document.documentElement;
   const own = scope.closest('.ln');
   const candidates = own ? [own] : scope.querySelectorAll('.text-layer .ln');
   const lines = [...candidates].filter((line) => range.intersectsNode(line));
-  return lines.map((line) => selectedText(line, range)).filter((text) => text);
+  if (!lines.length) return [{{line: null, text: range.toString()}}];
+  return lines.map((line) => ({{line, text: selectedText(line, range)}}));
 }}
 document.addEventListener('copy', (event) => {{
-  const texts = selectedRanges().flatMap(rangeTexts);
+  const pieces = selectedRanges().flatMap(rangePieces).filter((piece) => piece.text);
   // 글 층 글자를 하나도 고르지 않았으면(쪽 번호 글에서 다음 쪽 첫 줄 머리까지 등) 브라우저 기본 복사에 맡긴다.
-  if (!texts.length) return;
-  event.clipboardData.setData('text/plain', texts.join('\\n'));
+  if (!pieces.some((piece) => piece.line)) return;
+  // 같은 줄을 이어 고른 범위 조각은 한 줄로 붙이고, 나머지는 줄바꿈으로 잇는다.
+  const text = pieces
+    .map((piece, k) => (k && (!piece.line || piece.line !== pieces[k - 1].line) ? '\\n' : '') + piece.text)
+    .join('');
+  event.clipboardData.setData('text/plain', text);
   event.preventDefault();
 }});
 // 선택 띠: 화면에 보이는 쪽의 띠 자료가 있는 줄마다, 고른 범위마다 rect 하나를 다음 그림 차례에 그린다.
