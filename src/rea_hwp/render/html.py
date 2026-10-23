@@ -74,6 +74,8 @@ document.addEventListener('copy', (event) => {{
   const lines = [...candidates].filter((line) => range.intersectsNode(line));
   if (!lines.length) return;
   const texts = lines.map((line) => selectedText(line, range)).filter((text) => text);
+  // 글 층 글자를 하나도 고르지 않았으면(쪽 번호 글에서 다음 쪽 첫 줄 머리까지 등) 브라우저 기본 복사에 맡긴다.
+  if (!texts.length) return;
   event.clipboardData.setData('text/plain', texts.join('\\n'));
   event.preventDefault();
 }});
