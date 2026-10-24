@@ -365,3 +365,10 @@ def test_chart_region_missing_small_colored_marks_is_color_difference(breakage):
     result = breakage.judge_chart(ours, reference)
 
     assert result["reason"] == "색 다름"
+
+
+def test_missing_page_number_is_not_pagination_difference_even_if_digit_is_on_next_page(breakage):
+    records = [{"kinds": ["빠짐"]}, {"kinds": []}]
+    texts = [_texts(missing=["2"]), _texts(ours="2. 표 만들기와 지우기")]
+
+    assert breakage.pagination_moves(0, records, texts) is None

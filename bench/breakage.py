@@ -69,6 +69,9 @@ EQUATION_GLYPH_FONTS = ("HYHWPEQ", "HANCOMEQN")
 #: 쪽 나눔 차이로 볼 때 옮겨 간 글을 찾는 이웃 쪽 앞·뒤 구간(그 쪽 글자 수 비율과 최소 글자 수). 추정값.
 EDGE_SHARE = 0.4
 EDGE_MIN_CHARS = 300
+#: 옮겨 갔다고 볼 빠진 글의 최소 글자 수(모두 합)와, 그 가운데 가장 긴 덩어리의 최소 글자 수. 추정값.
+MOVED_MIN_CHARS = 5
+MOVED_RUN_CHARS = 3
 #: 차트 영역 비교 문턱. 차트 26영역 그림 확인(작업 3 결과, 2026-10-24)으로 정했다.
 #: 우리 잉크(흰색 아닌 화소)가 정답의 이 비율 아래면 「빔」이다.
 CHART_EMPTY_RATIO = 0.3
@@ -678,6 +681,10 @@ def pagination_moves(index: int, records: list[dict], texts: list[dict]) -> list
     kinds = set(records[index]["kinds"])
     if not kinds or kinds - {"세로 밀림", "빠짐"}:
         return None
+    missing = texts[index]["missing_runs"]
+    # 한두 글자(쪽 번호 등)는 이웃 쪽 아무 데나 있어 옮겨 갔다는 근거가 못 된다.
+    if missing and (sum(map(len, missing)) < MOVED_MIN_CHARS or max(map(len, missing)) < MOVED_RUN_CHARS):
+        return None
     previous = texts[index - 1] if index > 0 else None
     following = texts[index + 1] if index + 1 < len(texts) else None
     moves, down, up = [], [], []
@@ -694,7 +701,7 @@ def pagination_moves(index: int, records: list[dict], texts: list[dict]) -> list
         gained = [
             run
             for run in texts[index]["extra_runs"]
-            if previous is not None and len(run) >= 2 and run in _edge(previous["reference"], head=False)
+            if previous is not None and len(run) >= MOVED_RUN_CHARS and run in _edge(previous["reference"], head=False)
         ]
         if not up and not gained:
             return None
