@@ -372,3 +372,30 @@ def test_missing_page_number_is_not_pagination_difference_even_if_digit_is_on_ne
     texts = [_texts(missing=["2"]), _texts(ours="2. 표 만들기와 지우기")]
 
     assert breakage.pagination_moves(0, records, texts) is None
+
+
+def test_chart_regions_pick_excluded_boxes_by_chart_object_size(breakage):
+    from rea_hwp.render.scene import Page
+
+    page = Page(width=60000, height=80000, number=1)
+    page.excluded += [(1000, 2000, 30000, 18000), (1000, 30000, 12000, 4000)]
+
+    assert breakage.chart_regions(page, [(30000, 18000)]) == [(10.0, 20.0, 300.0, 180.0)]
+
+
+def test_corpus_picture_ole_is_traced_as_ole_region_not_chart(breakage):
+    from corpus_paths import CORPUS_ROOT
+
+    from rea_hwp.document import HwpDocument
+    from rea_hwp.render import layout
+
+    document = HwpDocument.open(CORPUS_ROOT / "oss/hwplib/sample_hwp__basic__ole.hwp")
+    breakage.install_object_trace()
+    breakage._OLE_BOXES.clear()
+    page = layout.layout_document(document)[0]
+
+    regions = breakage.ole_regions(page)
+    breakage._OLE_BOXES.clear()
+
+    assert breakage.chart_object_sizes(document) == []
+    assert [tuple(round(v, 1) for v in box) for box in regions] == [(85.0, 99.2, 141.8, 141.8)]

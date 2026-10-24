@@ -44,6 +44,7 @@ from rea_hwp.models.controls import ObjectCtrlHeader
 from rea_hwp.models.shapes import ShapeOle
 from rea_hwp.render import layout
 from rea_hwp.render.chart import vtchart_contents
+from rea_hwp.render.objects import CAPTION_LEFT, CAPTION_TOP
 from rea_hwp.render.ole import has_ooxml_chart
 from rea_hwp.render.options import RenderOptions
 from rea_hwp.render.scene import Glyph, Image, Line, Rect
@@ -63,7 +64,7 @@ OVERLAP_RATIO = 0.3
 #: 큰 글자의 제자리 문턱(글자 크기 배수). 쪽 크기 장식 숫자가 글꼴 차이로 문턱 넘게 옮겨진 표본 하나로 정한 추정값.
 BIG_GLYPH_SLACK = 0.1
 
-KINDS = ("세로 밀림", "겹침", "빠짐", "넘침", "차트 깨짐")
+KINDS = ("세로 밀림", "겹침", "빠짐", "넘침", "차트 깨짐", "OLE 깨짐")
 #: 렌더 수식 글자의 글꼴 이름 앞부분(대문자). 옛 엔진은 HYhwpEQ, 새 엔진은 HancomEQN으로 그린다.
 EQUATION_GLYPH_FONTS = ("HYHWPEQ", "HANCOMEQN")
 #: 쪽 나눔 차이로 볼 때 옮겨 간 글을 찾는 이웃 쪽 앞·뒤 구간(그 쪽 글자 수 비율과 최소 글자 수). 추정값.
@@ -512,29 +513,70 @@ def _page_input(page, reference_all: list[PlacedChar], image_boxes, pdf_document
 
 
 def chart_object_sizes(document) -> list[tuple[int, int]]:
-    """차트 OLE(VtChart 또는 OOXML 차트)를 담은 개체의 크기(HU). 채점 제외 영역 가운데 차트를 고르는 데 쓴다."""
+    """차트 OLE(VtChart 또는 OOXML 차트)를 담은 개체의 크기(HU). 채점 제외 영역에는 개체 종류가 없어 크기로 맞춘다."""
     sizes = []
     pending = [(node, None) for section in document.sections for node in section.nodes]
     while pending:
         node, owner = pending.pop()
         if isinstance(node.model, ObjectCtrlHeader):
             owner = node.model
-        if node.tag == tags.SHAPE_COMPONENT_OLE and isinstance(node.model, ShapeOle) and owner is not None:
-            item = document.bin_data(node.model.bin_data_id)
-            if item is not None and (vtchart_contents(item.data) is not None or has_ooxml_chart(item.data)):
-                sizes.append((owner.width, owner.height))
+        if node.tag == tags.SHAPE_COMPONENT_OLE and owner is not None and _is_chart_ole(document, node):
+            sizes.append((owner.width, owner.height))
         pending.extend((child, owner) for child in node.children)
     return sizes
 
 
+#: 그린 쪽(id) → (그 쪽, 개체 컨트롤 id → 상자(HU)). draw_object를 감싸 적는다(렌더 결과는 바꾸지 않는다).
+#: 같은 개체를 한 쪽에 두 번 그리면(issue6300 30쪽) 나중 상자만 남긴다.
+_OLE_BOXES: dict[int, tuple[object, dict[int, tuple[float, float, float, float]]]] = {}
+
+
+def _is_chart_ole(document, node) -> bool:
+    item = document.bin_data(node.model.bin_data_id) if isinstance(node.model, ShapeOle) else None
+    return item is not None and (vtchart_contents(item.data) is not None or has_ooxml_chart(item.data))
+
+
+def install_object_trace() -> None:
+    """draw_object를 감싸 차트가 아닌 OLE 개체를 그린 쪽과 상자를 적는다(그림 OLE는 채점 제외 영역에 들지 않는다)."""
+    draw_object = layout.DocumentLayout.draw_object
+    if getattr(draw_object, "traced", False):
+        return
+
+    def traced(self, state, ctrl, model, caption, anchor_state, left, top, width, height):
+        # 안에 든 다른 개체(글상자·표 속 OLE)는 그 개체의 draw_object가 따로 적으므로 내려가지 않는다.
+        pending, ole = list(ctrl.children), None
+        while pending and ole is None:
+            node = pending.pop()
+            if node.tag == tags.SHAPE_COMPONENT_OLE:
+                ole = node
+            elif node.tag != tags.CTRL_HEADER:
+                pending.extend(node.children)
+        if ole is not None and not _is_chart_ole(self.document, ole):
+            box_left = left + (caption.extent if caption and caption.direction == CAPTION_LEFT else 0)
+            box_top = top + (caption.extent if caption and caption.direction == CAPTION_TOP else 0)
+            page = state.page
+            _OLE_BOXES.setdefault(id(page), (page, {}))[1][id(ctrl)] = (box_left, box_top, width, height)
+        draw_object(self, state, ctrl, model, caption, anchor_state, left, top, width, height)
+
+    traced.traced = True
+    layout.DocumentLayout.draw_object = traced
+
+
+def ole_regions(page) -> list[tuple[float, float, float, float]]:
+    """그 쪽에 그린 차트가 아닌 OLE 개체 상자(pt). install_object_trace가 적은 것이다."""
+    traced = _OLE_BOXES.get(id(page))
+    if traced is None or traced[0] is not page:
+        return []
+    return [tuple(v / HU_PER_PT for v in box) for box in traced[1].values()]
+
+
 def chart_regions(page, sizes: list[tuple[int, int]]) -> list[tuple[float, float, float, float]]:
-    """채점에서 뺀 개체 영역(pt) 가운데 크기가 차트 OLE 개체와 같은 것. 수식·그림 OLE(수식 편집기 등)는 뺀다."""
-    regions = []
-    for box in page.excluded:
-        x, y, w, h = box
-        if any(abs(w - cw) <= max(2, cw * 0.01) and abs(h - ch) <= max(2, ch * 0.01) for cw, ch in sizes):
-            regions.append(tuple(v / HU_PER_PT for v in box))
-    return regions
+    """채점에서 뺀 개체 영역(pt) 가운데 크기가 차트 OLE 개체와 같은 것."""
+    return [
+        tuple(v / HU_PER_PT for v in box)
+        for box in page.excluded
+        if any(abs(box[2] - cw) <= max(2, cw * 0.01) and abs(box[3] - ch) <= max(2, ch * 0.01) for cw, ch in sizes)
+    ]
 
 
 def _rgb(color: str | None) -> tuple[float, float, float] | None:
@@ -724,6 +766,8 @@ def measure(target: Target) -> dict:
         return {"status": "unchecked", "reason": "정답 PDF 없음", "groups": groups}
     try:
         install_trace()
+        install_object_trace()
+        _OLE_BOXES.clear()
         _TRACED.clear()
         _PARAGRAPH_CONTEXT.clear()
         try:
@@ -761,6 +805,7 @@ def measure(target: Target) -> dict:
         return {"status": "check-error", "reason": f"{type(error).__name__}: {error}", "groups": groups}
     finally:
         _TRACED.clear()
+        _OLE_BOXES.clear()
         _PARAGRAPH_CONTEXT.clear()
 
 
@@ -809,7 +854,8 @@ def _page_record(index: int, pages, reference, image_boxes, pdf_document, charts
     data = _page_input(page, reference[index], image_boxes[index], pdf_document, index)
     notes: dict = {}
     found = judge_page(data, notes)
-    found += _chart_events(page, pdf_document[index], record, charts)
+    found += _object_events(page, pdf_document[index], record, chart_regions(page, charts), "차트 깨짐", "charts")
+    found += _object_events(page, pdf_document[index], record, ole_regions(page), "OLE 깨짐", "oles")
     texts = {
         "ours": "".join(c.char for c in data.rendered if not _is_pua(c.char)),
         "reference": "".join(c.char for c in data.reference if not _is_pua(c.char)),
@@ -838,18 +884,18 @@ def _page_record(index: int, pages, reference, image_boxes, pdf_document, charts
     return record, texts
 
 
-def _chart_events(page, pdf_page, record: dict, charts: list[tuple[int, int]]) -> list[dict]:
-    """차트·OLE 영역마다 우리 그림과 정답 PDF 그림을 견줘 깨진 영역을 「차트 깨짐」 사건으로 돌려준다."""
+def _object_events(page, pdf_page, record: dict, regions, kind: str, key: str) -> list[dict]:
+    """영역(pt)마다 우리 그림과 정답 PDF 그림을 견줘 깨진 영역을 kind 사건으로 돌려준다."""
     events = []
-    for box in chart_regions(page, charts):
+    for box in regions:
         x, y, w, h = box
         reference = pdf_page.get_pixmap(clip=pymupdf.Rect(x, y, x + w, y + h), alpha=False)
         result = judge_chart(render_region(page, box), reference) | {"box": [round(v, 1) for v in box]}
-        record.setdefault("charts", []).append(result)
+        record.setdefault(key, []).append(result)
         if result["reason"]:
             ink = f"잉크 {result['ink_ours']}/{result['ink_reference']}"
-            detail = f"차트 {result['reason']}({ink}, 칸 차 {result['grid_difference']})"
-            events.append(_event("차트 깨짐", -1, y, detail) | {"reference_text": ""})
+            detail = f"{kind.split()[0]} {result['reason']}({ink}, 칸 차 {result['grid_difference']})"
+            events.append(_event(kind, -1, y, detail) | {"reference_text": ""})
     return events
 
 
@@ -882,6 +928,7 @@ def summarize(results: dict[str, dict]) -> dict:
                 "tail_shift_pages": 0,
                 "pagination_pages": 0,
                 "chart_regions": 0,
+                "ole_regions": 0,
             },
         )
 
@@ -900,6 +947,7 @@ def summarize(results: dict[str, dict]) -> dict:
             row["tail_shift_pages"] += sum("tail_shift" in page for page in result["page_records"])
             row["pagination_pages"] += sum("pagination" in page for page in result["page_records"])
             row["chart_regions"] += sum(len(page.get("charts", [])) for page in result["page_records"])
+            row["ole_regions"] += sum(len(page.get("oles", [])) for page in result["page_records"])
             for page in broken:
                 for kind in page["kinds"]:
                     row["kinds"][kind] += 1
@@ -927,15 +975,15 @@ def markdown(summary: dict, limit: int) -> str:
     out += [
         "| 문서군 | 문서 | 통과 | 실패 | 검사불가 | 쪽 | 깨진 쪽 | "
         + " | ".join(KINDS)
-        + f" | {TAIL_SHIFT} 쪽 | 쪽 나눔 차이 쪽 | 차트 영역 |"
+        + f" | {TAIL_SHIFT} 쪽 | 쪽 나눔 차이 쪽 | 차트 영역 | OLE 영역 |"
     ]
-    out.append("|---" * (10 + len(KINDS)) + "|")
+    out.append("|---" * (11 + len(KINDS)) + "|")
     for name, row in summary["groups"].items():
         kinds = " | ".join(str(row["kinds"][kind]) for kind in KINDS)
         out.append(
             f"| {name} | {row['documents']} | {row['passed']} | {row['failed']} | {row['unchecked']} | "
             f"{row['pages']} | {row['broken_pages']} | {kinds} | {row['tail_shift_pages']} | "
-            f"{row['pagination_pages']} | {row['chart_regions']} |"
+            f"{row['pagination_pages']} | {row['chart_regions']} | {row['ole_regions']} |"
         )
     out += ["", "## 원인 묶음(처음 깨진 줄 특징, 사용자 표본에서 나온 묶음 먼저)", ""]
     out.append("| 순위 | 묶음 | 깨진 쪽 | 사용자 표본 쪽 | 문서 | 예(문서:쪽) |")
