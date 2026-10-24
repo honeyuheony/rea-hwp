@@ -11,6 +11,8 @@ import argparse
 import base64
 import collections
 import colorsys
+import hashlib
+import io
 import json
 import math
 import os
@@ -22,6 +24,7 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import olefile
 import pymupdf
 from accuracy import EQUATION_FONTS, PlacedChar, _inside, pdf_image_boxes, pdf_pages
 from corpus import CORPUS_ROOT, load_corpus
@@ -919,6 +922,7 @@ def summarize(results: dict[str, dict]) -> dict:
             name,
             {
                 "documents": 0,
+                "duplicates": 0,
                 "passed": 0,
                 "failed": 0,
                 "unchecked": 0,
@@ -936,6 +940,9 @@ def summarize(results: dict[str, dict]) -> dict:
     for name, result in results.items():
         for group_name in result.get("groups", []):
             row = group(group_name)
+            if result["status"] == "duplicate":
+                row["duplicates"] += 1
+                continue
             row["documents"] += 1
             if result["status"] != "ok":
                 row["unchecked"] += 1
@@ -971,17 +978,23 @@ def summarize(results: dict[str, dict]) -> dict:
 
 
 def markdown(summary: dict, limit: int) -> str:
-    out = ["# 깨진 쪽 집계", "", f"세로 밀림 문턱 {VERTICAL_SHIFT_PT}pt.", ""]
+    out = [
+        "# 깨진 쪽 집계",
+        "",
+        f"세로 밀림 문턱 {VERTICAL_SHIFT_PT}pt. 「문서」는 중복(내용이 같은 문서)을 뺀 수다.",
+        "",
+    ]
     out += [
-        "| 문서군 | 문서 | 통과 | 실패 | 검사불가 | 쪽 | 깨진 쪽 | "
+        "| 문서군 | 문서 | 중복 | 통과 | 실패 | 검사불가 | 쪽 | 깨진 쪽 | "
         + " | ".join(KINDS)
         + f" | {TAIL_SHIFT} 쪽 | 쪽 나눔 차이 쪽 | 차트 영역 | OLE 영역 |"
     ]
-    out.append("|---" * (11 + len(KINDS)) + "|")
+    out.append("|---" * (12 + len(KINDS)) + "|")
     for name, row in summary["groups"].items():
         kinds = " | ".join(str(row["kinds"][kind]) for kind in KINDS)
         out.append(
-            f"| {name} | {row['documents']} | {row['passed']} | {row['failed']} | {row['unchecked']} | "
+            f"| {name} | {row['documents']} | {row['duplicates']} | {row['passed']} | {row['failed']} | "
+            f"{row['unchecked']} | "
             f"{row['pages']} | {row['broken_pages']} | {kinds} | {row['tail_shift_pages']} | "
             f"{row['pagination_pages']} | {row['chart_regions']} | {row['ole_regions']} |"
         )
@@ -1016,6 +1029,55 @@ def targets(match: str = "") -> list[Target]:
     return [target for target in found if match in target.name]
 
 
+#: 내용 비교에서 빼는 스트림. 저장 시각·미리보기처럼 같은 문서를 다시 저장하면 바뀌는 것이다.
+_VOLATILE_STREAMS = ("\x05HwpSummaryInformation", "HwpSummaryInformation", "PrvImage", "PrvText")
+
+
+def _ole_digest(data: bytes) -> bytes:
+    """BinData OLE(4바이트 길이 + 복합 파일)는 스트림 이름과 내용으로 줄인다(빈 섹터·디렉터리 색은 저장마다 다르다)."""
+    body = data[4:]
+    if not olefile.isOleFile(io.BytesIO(body)):
+        return data
+    with olefile.OleFileIO(io.BytesIO(body)) as storage:
+        parts = [("/".join(entry), storage.openstream(entry).read()) for entry in sorted(storage.listdir())]
+    return b"".join(name.encode() + b"\0" + hashlib.sha256(content).digest() for name, content in parts)
+
+
+def content_digest(target: Target) -> str:
+    """문서 내용 해시: 저장마다 바뀌는 스트림을 빼고, BinData는 풀어 OLE는 논리 내용으로 본다."""
+    document = HwpDocument.open(target.path, target.password)
+    digest = hashlib.sha256()
+    for name in sorted(document.container.raw_streams):
+        if name.startswith(_VOLATILE_STREAMS) or name.startswith("BinData/"):
+            continue
+        digest.update(name.encode() + b"\0" + hashlib.sha256(document.container.raw_streams[name]).digest())
+    for index in range(1, len(document.styles.bin_data) + 1):
+        item = document.bin_data(index)
+        digest.update(b"bin" + hashlib.sha256(_ole_digest(item.data) if item else b"").digest())
+    return digest.hexdigest()
+
+
+def duplicates(chosen: list[Target], digest=content_digest) -> dict[str, str]:
+    """내용 해시(content_digest)가 같은 문서 → 대표 문서 이름. 대표는 묶음에서 이름(경로) 사전순 첫 번째다.
+
+    해시를 내지 못한 문서(열기 실패)는 묶지 않고 따로 측정한다.
+    """
+    by_hash: dict[str, list[str]] = collections.defaultdict(list)
+    for target in chosen:
+        try:
+            by_hash[digest(target)].append(target.name)
+        except Exception:  # 열지 못하는 문서는 measure가 검사불가로 센다.
+            continue
+    return {name: min(names) for names in by_hash.values() if len(names) > 1 for name in names if name != min(names)}
+
+
+def mark_duplicates(results: dict[str, dict], copies: dict[str, str]) -> None:
+    """중복 문서를 「중복」 상태로 바꾸고 대표의 문서군(표 안의 표 등)을 함께 적는다. 깨진 쪽에는 대표만 센다."""
+    for name, representative in copies.items():
+        groups = list(dict.fromkeys(results[name].get("groups", []) + results[representative].get("groups", [])))
+        results[name] = {"status": "duplicate", "duplicate_of": representative, "groups": groups}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, required=True, help="pages.json과 summary.md를 쓸 폴더")
@@ -1027,13 +1089,17 @@ def main() -> int:
     chosen = targets(args.match)
     if args.limit:
         chosen = chosen[: args.limit]
-    results = measure_all(chosen, args.jobs)
+    copies = duplicates(chosen)
+    results = measure_all([target for target in chosen if target.name not in copies], args.jobs)
+    results |= {name: {"status": "duplicate", "groups": []} for name in copies}
+    mark_duplicates(results, copies)
+    results = {target.name: results[target.name] for target in chosen}
     summary = summarize(results)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "pages.json").write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
     (args.out / "summary.md").write_text(markdown(summary, args.rows), encoding="utf-8")
     for name, result in results.items():
-        if result["status"] != "ok":
+        if result["status"] not in ("ok", "duplicate"):
             print(f"검사불가 {result['status']}: {name}: {result['reason']}")
     print(json.dumps(summary["groups"], ensure_ascii=False))
     return 0

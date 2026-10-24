@@ -399,3 +399,41 @@ def test_corpus_picture_ole_is_traced_as_ole_region_not_chart(breakage):
 
     assert breakage.chart_object_sizes(document) == []
     assert [tuple(round(v, 1) for v in box) for box in regions] == [(85.0, 99.2, 141.8, 141.8)]
+
+
+def test_same_content_documents_keep_first_name_as_representative(breakage, tmp_path):
+    for name, content in (("b.hwp", b"same"), ("a.hwp", b"same"), ("c.hwp", b"other")):
+        (tmp_path / name).write_bytes(content)
+    chosen = [
+        breakage.Target(n, tmp_path / n, tmp_path / "x.pdf", None, ("전체",)) for n in ("b.hwp", "a.hwp", "c.hwp")
+    ]
+
+    assert breakage.duplicates(chosen, digest=lambda target: target.path.read_bytes()) == {"b.hwp": "a.hwp"}
+
+
+def test_corpus_copies_differing_only_in_ole_storage_layout_are_duplicates(breakage):
+    from corpus_paths import CORPUS_ROOT
+
+    names = ["oss/rhwp/issue5447__묶은세로막대형-행추가.hwp", "oss/rhwp/issue5652__묶은세로막대형-행추가.hwp"]
+    chosen = [breakage.Target(n, CORPUS_ROOT / n, CORPUS_ROOT / "x.pdf", None, ("전체",)) for n in names]
+    other = breakage.Target("o", CORPUS_ROOT / "oss/rhwp/KTX.hwp", CORPUS_ROOT / "x.pdf", None, ("전체",))
+    if not chosen[0].path.exists():
+        chosen[0].path.read_bytes()  # 말뭉치가 없으면 FileNotFoundError로 conftest가 건너뛴다.
+
+    assert chosen[0].path.read_bytes() != chosen[1].path.read_bytes()
+    assert breakage.duplicates([*chosen, other]) == {names[1]: names[0]}
+
+
+def test_duplicate_is_counted_apart_and_takes_representative_groups(breakage):
+    page = {"page": 1, "kinds": ["빠짐"], "first": {"kind": "빠짐", "container": "본문"}}
+    results = {
+        "a.hwp": {"status": "ok", "groups": ["전체", "표 안의 표"], "page_records": [page]},
+        "b.hwp": {"status": "duplicate", "groups": ["전체"]},
+    }
+
+    breakage.mark_duplicates(results, {"b.hwp": "a.hwp"})
+    summary = breakage.summarize(results)
+
+    assert results["b.hwp"] == {"status": "duplicate", "duplicate_of": "a.hwp", "groups": ["전체", "표 안의 표"]}
+    whole = summary["groups"]["전체"]
+    assert (whole["documents"], whole["duplicates"], whole["broken_pages"]) == (1, 1, 1)
