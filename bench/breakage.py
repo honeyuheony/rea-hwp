@@ -1,5 +1,5 @@
-"""쪽마다 정답 PDF와 렌더를 맞대 깨진 쪽(세로 밀림·겹침·빠짐·넘침)과 처음 깨진 줄을 센다.
-문서는 통과(깨진 쪽 없음)·실패·검사불가(렌더·검사 실패, 정답 없음)로 나눠 센다.
+"""쪽마다 정답 PDF와 렌더를 맞대 깨진 쪽(세로 밀림·겹침·빠짐·넘침·차트 깨짐)과 처음 깨진 줄을 센다.
+쪽 나눔 위치만 다른 쪽은 「쪽 나눔 차이」로 따로 센다. 문서는 통과·실패·검사불가(렌더·검사 실패, 정답 없음)로 나눈다.
 
 사용: uv run --extra bench python bench/breakage.py --out <폴더> [--match 이름일부] [--limit N] [--jobs N]
 REA_HWP_USER_CORPUS가 있으면 사용자 표본(그 폴더의 *.hwp, 정답은 ref2022/)도 함께 센다.
@@ -8,10 +8,13 @@ REA_HWP_USER_CORPUS가 있으면 사용자 표본(그 폴더의 *.hwp, 정답은
 from __future__ import annotations
 
 import argparse
+import base64
 import collections
+import colorsys
 import json
 import math
 import os
+import re
 import statistics
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -35,11 +38,16 @@ from divergence import (
     rendered_chars,
 )
 
+from rea_hwp import tags
 from rea_hwp.document import HwpDocument
+from rea_hwp.models.controls import ObjectCtrlHeader
+from rea_hwp.models.shapes import ShapeOle
 from rea_hwp.render import layout
+from rea_hwp.render.chart import vtchart_contents
+from rea_hwp.render.ole import has_ooxml_chart
 from rea_hwp.render.options import RenderOptions
-from rea_hwp.render.scene import Image, Line, Rect
-from rea_hwp.render.svg import HU_PER_PT
+from rea_hwp.render.scene import Glyph, Image, Line, Rect
+from rea_hwp.render.svg import HU_PER_PT, image_data
 
 #: 밀림 문턱(pt). 정답 글자와 같은 글자가 렌더에서 이 거리 안에 없으면 제자리에 있지 않은 글자다.
 #: 사용자가 문서 댓글로 바꿀 수 있는 값이라 하나로 둔다. 근거는 표본 그림 확인(작업 1 결과, 2026-10-24).
@@ -55,9 +63,26 @@ OVERLAP_RATIO = 0.3
 #: 큰 글자의 제자리 문턱(글자 크기 배수). 쪽 크기 장식 숫자가 글꼴 차이로 문턱 넘게 옮겨진 표본 하나로 정한 추정값.
 BIG_GLYPH_SLACK = 0.1
 
-KINDS = ("세로 밀림", "겹침", "빠짐", "넘침")
+KINDS = ("세로 밀림", "겹침", "빠짐", "넘침", "차트 깨짐")
 #: 렌더 수식 글자의 글꼴 이름 앞부분(대문자). 옛 엔진은 HYhwpEQ, 새 엔진은 HancomEQN으로 그린다.
 EQUATION_GLYPH_FONTS = ("HYHWPEQ", "HANCOMEQN")
+#: 쪽 나눔 차이로 볼 때 옮겨 간 글을 찾는 이웃 쪽 앞·뒤 구간(그 쪽 글자 수 비율과 최소 글자 수). 추정값.
+EDGE_SHARE = 0.4
+EDGE_MIN_CHARS = 300
+#: 옮겨 갔다고 볼 빠진 글의 최소 글자 수(모두 합)와, 그 가운데 가장 긴 덩어리의 최소 글자 수. 추정값.
+MOVED_MIN_CHARS = 5
+MOVED_RUN_CHARS = 3
+#: 차트 영역 비교 문턱. 차트 26영역 그림 확인(작업 3 결과, 2026-10-24)으로 정했다.
+#: 우리 잉크(흰색 아닌 화소)가 정답의 이 비율 아래면 「빔」이다.
+CHART_EMPTY_RATIO = 0.3
+#: 칸(CHART_GRID×CHART_GRID)별 잉크 밀도 차 평균이 이보다 크면 「모양 다름」이다(같은 차트 0.016~0.029).
+CHART_GRID = 8
+CHART_GRID_DIFF = 0.035
+#: 색상 구간별 색 화소 비율 차의 합이 영역의 이 비율을 넘고, 색 화소 가운데 CHART_COLOR_SHARE보다 크면 「색 다름」이다
+#: (빠진 계열 표식처럼 작은 색 획을 잡는다).
+CHART_HUE_BINS = 12
+CHART_COLOR_DIFF = 0.0015
+CHART_COLOR_SHARE = 0.5
 #: 단·칸 맨 아래 조각만 밀린 경우. 꼬리말·쪽 번호가 쪽마다 밀려 문서 전체가 깨짐으로 잡히지 않게 깨짐과 따로 센다.
 TAIL_SHIFT = "꼬리 밀림"
 
@@ -249,8 +274,11 @@ def _in_box(x: float, y: float, boxes) -> bool:
     return any(bx <= x <= bx + bw and by <= y <= by + bh for bx, by, bw, bh in boxes)
 
 
-def judge_page(data: PageInput) -> list[dict]:
-    """깨진 자리 목록(정답 줄 번호 차례). 비어 있으면 안 깨진 쪽이다."""
+def judge_page(data: PageInput, notes: dict | None = None) -> list[dict]:
+    """깨진 자리 목록(정답 줄 번호 차례). 비어 있으면 안 깨진 쪽이다.
+
+    notes를 주면 쪽 나눔 차이 판정에 쓸 「정답 이 쪽에 없는 렌더 글 덩어리」(extra_runs, 렌더 차례)를 담는다.
+    """
     reference, rendered = data.reference, data.rendered
     pairs = pair_chars(reference, rendered)
     lines = column_segments(reference, reference_lines(reference))
@@ -271,6 +299,17 @@ def judge_page(data: PageInput) -> list[dict]:
     ]
     equation_glyph = [glyph.font_family.upper().startswith(EQUATION_GLYPH_FONTS) for glyph in data.glyphs]
     events: list[dict] = []
+    if notes is not None:
+        paired_rendered = set(pairs.values())
+        runs: list[str] = []
+        current = ""
+        for b, char in enumerate(rendered):
+            if home[b] is None and b not in paired_rendered and not _is_pua(char.char):
+                current += char.char
+            elif current:
+                runs.append(current)
+                current = ""
+        notes["extra_runs"] = [*runs, current] if current else runs
 
     def text_of(number: float) -> str:
         index = math.ceil(number)
@@ -322,8 +361,9 @@ def judge_page(data: PageInput) -> list[dict]:
     spans = [(min(reference[a].x for a in line), max(reference[a].x for a in line)) for line in lines]
     for number, (state, displaced) in enumerate(states):
         if state == "빠짐":
-            text = "".join(reference[a].char for a in displaced)[:30]
-            event("빠짐", number, line_y[number], f"{len(displaced)}/{len(lines[number])}자 없음: {text}")
+            run = "".join(reference[a].char for a in displaced)
+            event("빠짐", number, line_y[number], f"{len(displaced)}/{len(lines[number])}자 없음: {run[:30]}")
+            events[-1]["run"] = run
         elif state == "세로 밀림":
             # 「그 쪽 끝까지 어긋남」: 같은 단·칸(가로로 겹치는 조각)의 아래 조각 반 이상도 밀리거나 빠졌을 때만 센다.
             x0, x1 = spans[number]
@@ -471,6 +511,204 @@ def _page_input(page, reference_all: list[PlacedChar], image_boxes, pdf_document
     )
 
 
+def chart_object_sizes(document) -> list[tuple[int, int]]:
+    """차트 OLE(VtChart 또는 OOXML 차트)를 담은 개체의 크기(HU). 채점 제외 영역 가운데 차트를 고르는 데 쓴다."""
+    sizes = []
+    pending = [(node, None) for section in document.sections for node in section.nodes]
+    while pending:
+        node, owner = pending.pop()
+        if isinstance(node.model, ObjectCtrlHeader):
+            owner = node.model
+        if node.tag == tags.SHAPE_COMPONENT_OLE and isinstance(node.model, ShapeOle) and owner is not None:
+            item = document.bin_data(node.model.bin_data_id)
+            if item is not None and (vtchart_contents(item.data) is not None or has_ooxml_chart(item.data)):
+                sizes.append((owner.width, owner.height))
+        pending.extend((child, owner) for child in node.children)
+    return sizes
+
+
+def chart_regions(page, sizes: list[tuple[int, int]]) -> list[tuple[float, float, float, float]]:
+    """채점에서 뺀 개체 영역(pt) 가운데 크기가 차트 OLE 개체와 같은 것. 수식·그림 OLE(수식 편집기 등)는 뺀다."""
+    regions = []
+    for box in page.excluded:
+        x, y, w, h = box
+        if any(abs(w - cw) <= max(2, cw * 0.01) and abs(h - ch) <= max(2, ch * 0.01) for cw, ch in sizes):
+            regions.append(tuple(v / HU_PER_PT for v in box))
+    return regions
+
+
+def _rgb(color: str | None) -> tuple[float, float, float] | None:
+    if not color or not color.startswith("#") or len(color) != 7:
+        return None
+    return tuple(int(color[i : i + 2], 16) / 255 for i in (1, 3, 5))
+
+
+_DATA_IMAGE = re.compile(rb'href="data:image/([a-z0-9.+-]+);base64,([^"]+)"')
+
+
+def _svg_for_mupdf(content: bytes) -> bytes:
+    """SVG 안 data URI 그림을 PNG로 바꾼다. MuPDF는 SVG 안 BMP·SVG data URI 그림을 무시한다(WMF 차트가 비어 보임)."""
+
+    def as_png(match: re.Match) -> bytes:
+        data = base64.b64decode(match.group(2))
+        if match.group(1) == b"svg+xml":
+            with pymupdf.open(stream=_svg_for_mupdf(data), filetype="svg") as svg:
+                pixmap = svg[0].get_pixmap(alpha=True)
+        else:
+            pixmap = pymupdf.Pixmap(data)
+        return b'href="data:image/png;base64,' + base64.b64encode(pixmap.tobytes("png")) + b'"'
+
+    return _DATA_IMAGE.sub(as_png, content)
+
+
+def render_region(page, box: tuple[float, float, float, float]) -> pymupdf.Pixmap:
+    """우리 쪽 항목 가운데 box(pt)에 걸친 것을 1pt=1화소로 그린다. 그림 안 SVG는 PDF로 바꿔 넣는다(MuPDF가 무시한다)."""
+    x, y, w, h = box
+    canvas = pymupdf.open()
+    target = canvas.new_page(width=w, height=h)
+    area = pymupdf.Rect(0, 0, w, h)
+    for item in page.items:
+        if isinstance(item, Image):
+            rect = pymupdf.Rect(item.x, item.y, item.x + item.width, item.y + item.height) / HU_PER_PT
+            rect = rect + (-x, -y, -x, -y)
+            decoded = image_data(item.href)
+            if decoded is None or not rect.intersects(area) or rect.is_empty:
+                continue
+            content, mime = decoded
+            if mime == "image/svg+xml":
+                with pymupdf.open(stream=_svg_for_mupdf(content), filetype="svg") as svg:
+                    pdf = pymupdf.open("pdf", svg.convert_to_pdf())
+                target.show_pdf_page(rect, pdf, 0, keep_proportion=False)
+            else:
+                target.insert_image(rect, stream=content, keep_proportion=False)
+        elif isinstance(item, Rect):
+            rect = pymupdf.Rect(item.x, item.y, item.x + item.width, item.y + item.height) / HU_PER_PT
+            rect = rect + (-x, -y, -x, -y)
+            if rect.intersects(area):
+                stroke = _rgb(item.stroke)
+                target.draw_rect(
+                    rect, color=stroke, fill=_rgb(item.fill), width=item.stroke_width / HU_PER_PT if stroke else 0
+                )
+        elif isinstance(item, Line):
+            start = pymupdf.Point(item.x1 / HU_PER_PT - x, item.y1 / HU_PER_PT - y)
+            end = pymupdf.Point(item.x2 / HU_PER_PT - x, item.y2 / HU_PER_PT - y)
+            if pymupdf.Rect(start, end).normalize().intersects(area) or start in area:
+                target.draw_line(start, end, color=_rgb(item.color) or (0, 0, 0), width=item.width / HU_PER_PT)
+        elif isinstance(item, Glyph) and item.char.strip():
+            origin = pymupdf.Point(item.x / HU_PER_PT - x, item.y / HU_PER_PT - y)
+            if origin in area:
+                target.insert_text(
+                    origin, item.char, fontsize=item.size / HU_PER_PT, fontname="korea", color=_rgb(item.color)
+                )
+    return target.get_pixmap(alpha=False)
+
+
+def ink_grid(pixmap: pymupdf.Pixmap) -> tuple[float, list[float], list[float]]:
+    """흰색 아닌 화소 비율, CHART_GRID×CHART_GRID 칸별 비율, 색 화소의 색상 구간(CHART_HUE_BINS개)별 비율.
+
+    흰색 아닌 화소는 세 채널 가운데 가장 어두운 값이 200 아래, 색 화소는 채널 차가 60 넘는 화소다.
+    """
+    width, height, samples, n = pixmap.width, pixmap.height, pixmap.samples, pixmap.n
+    cells = [0] * (CHART_GRID * CHART_GRID)
+    sizes = [0] * (CHART_GRID * CHART_GRID)
+    hues = [0] * CHART_HUE_BINS
+    total = 0
+    for row in range(height):
+        base = row * pixmap.stride
+        cell_row = row * CHART_GRID // height * CHART_GRID
+        for column in range(width):
+            offset = base + column * n
+            cell = cell_row + column * CHART_GRID // width
+            sizes[cell] += 1
+            red, green, blue = samples[offset : offset + 3]
+            if min(red, green, blue) < 200:
+                cells[cell] += 1
+                total += 1
+            if max(red, green, blue) - min(red, green, blue) > 60:
+                hue = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)[0]
+                hues[int(hue * CHART_HUE_BINS) % CHART_HUE_BINS] += 1
+    area = max(width * height, 1)
+    return total / area, [c / s if s else 0.0 for c, s in zip(cells, sizes, strict=True)], [h / area for h in hues]
+
+
+def judge_chart(ours: pymupdf.Pixmap, reference: pymupdf.Pixmap) -> dict:
+    """차트 영역 하나의 비교 값과 깨짐 이유(없으면 None)."""
+    ink_ours, grid_ours, hues_ours = ink_grid(ours)
+    ink_reference, grid_reference, hues_reference = ink_grid(reference)
+    difference = statistics.fmean(abs(a - b) for a, b in zip(grid_ours, grid_reference, strict=True))
+    color = sum(abs(a - b) for a, b in zip(hues_ours, hues_reference, strict=True))
+    color_share = color / max(sum(hues_reference), sum(hues_ours), 1e-9)
+    reason = None
+    if ink_ours < CHART_EMPTY_RATIO * ink_reference:
+        reason = "빔"
+    elif difference > CHART_GRID_DIFF:
+        reason = "모양 다름"
+    elif color > CHART_COLOR_DIFF and color_share > CHART_COLOR_SHARE:
+        reason = "색 다름"
+    return {
+        "ink_ours": round(ink_ours, 4),
+        "ink_reference": round(ink_reference, 4),
+        "grid_difference": round(difference, 4),
+        "color_difference": round(color, 4),
+        "color_share": round(color_share, 2),
+        "reason": reason,
+    }
+
+
+def _search_runs(runs: list[str], text: str) -> list[int] | None:
+    """runs가 text 안에 차례대로 나오는 자리. 하나라도 없으면 None."""
+    found, start = [], 0
+    for run in runs:
+        at = text.find(run, start)
+        if at < 0:
+            return None
+        found.append(at)
+        start = at + len(run)
+    return found
+
+
+def _edge(text: str, head: bool) -> str:
+    size = max(EDGE_MIN_CHARS, int(len(text) * EDGE_SHARE))
+    return text[:size] if head else text[-size:]
+
+
+def pagination_moves(index: int, records: list[dict], texts: list[dict]) -> list[str] | None:
+    """index 쪽이 쪽 나눔 위치만 다른 쪽이면 옮겨 간 글 목록, 아니면 None.
+
+    빠진 글은 우리 다음 쪽 앞이나 앞 쪽 끝에 차례대로 있어야 한다. 세로 밀림은 쪽 맨 위 내용이 바뀐 경우(앞 쪽에서
+    넘어온 글이 있거나 맨 위 글이 앞 쪽으로 갔음)에만 받아들인다. 겹침·넘침·차트 깨짐이 있으면 깨진 쪽이다.
+    """
+    kinds = set(records[index]["kinds"])
+    if not kinds or kinds - {"세로 밀림", "빠짐"}:
+        return None
+    missing = texts[index]["missing_runs"]
+    # 한두 글자(쪽 번호 등)는 이웃 쪽 아무 데나 있어 옮겨 갔다는 근거가 못 된다.
+    if missing and (sum(map(len, missing)) < MOVED_MIN_CHARS or max(map(len, missing)) < MOVED_RUN_CHARS):
+        return None
+    previous = texts[index - 1] if index > 0 else None
+    following = texts[index + 1] if index + 1 < len(texts) else None
+    moves, down, up = [], [], []
+    for run in texts[index]["missing_runs"]:
+        if following is not None and _search_runs([*down, run], _edge(following["ours"], head=True)) is not None:
+            down.append(run)
+            moves.append(f"다음 쪽 앞으로: {run[:20]}")
+        elif previous is not None and _search_runs([*up, run], _edge(previous["ours"], head=False)) is not None:
+            up.append(run)
+            moves.append(f"앞 쪽 끝으로: {run[:20]}")
+        else:
+            return None
+    if "세로 밀림" in kinds:
+        gained = [
+            run
+            for run in texts[index]["extra_runs"]
+            if previous is not None and len(run) >= MOVED_RUN_CHARS and run in _edge(previous["reference"], head=False)
+        ]
+        if not up and not gained:
+            return None
+        moves += [f"앞 쪽에서 넘어옴: {run[:20]}" for run in gained]
+    return moves
+
+
 def _has_nested_table(document) -> bool:
     """셀 안 문단이 표를 품은 문서인가(표 안의 표 문서군)."""
     context = _paragraph_context(document)
@@ -498,10 +736,20 @@ def measure(target: Target) -> dict:
             return {"status": "render-error", "reason": f"{type(error).__name__}: {error}", "groups": groups}
         reference = pdf_pages(str(target.reference))
         image_boxes = pdf_image_boxes(str(target.reference))
-        records = []
+        records, texts = [], []
+        charts = chart_object_sizes(document)
         with pymupdf.open(str(target.reference)) as pdf_document:
             for index in range(max(len(pages), len(reference))):
-                records.append(_page_record(index, pages, reference, image_boxes, pdf_document))
+                record, page_texts = _page_record(index, pages, reference, image_boxes, pdf_document, charts)
+                records.append(record)
+                texts.append(page_texts)
+        # 이웃 쪽 글이 다 모인 뒤에 쪽 나눔 차이를 가른다. 원래 깨짐 종류(kinds)로 판정하므로 차례가 결과를 안 바꾼다.
+        moves = [pagination_moves(index, records, texts) for index in range(len(records))]
+        for record, moved in zip(records, moves, strict=True):
+            if moved is not None:
+                record["pagination"] = moved
+                record["pagination_first"] = record["first"]
+                record["kinds"], record["first"] = [], None
         return {
             "status": "ok",
             "groups": groups,
@@ -543,27 +791,37 @@ def _crashed(target: Target, error: BaseException) -> dict:
     return {"status": "check-error", "reason": f"{type(error).__name__}: {error}", "groups": list(target.groups)}
 
 
-def _page_record(index: int, pages, reference, image_boxes, pdf_document) -> dict:
+def _page_record(index: int, pages, reference, image_boxes, pdf_document, charts) -> tuple[dict, dict]:
+    """쪽 하나의 기록과, 쪽 나눔 차이 판정에 쓸 글(우리·정답 쪽 글, 빠진 글, 정답 이 쪽에 없는 렌더 글)."""
     record = {"page": index + 1, "kinds": [], "first": None, "events": 0}
+    texts = {"ours": "", "reference": "", "missing_runs": [], "extra_runs": []}
     if index >= len(reference):
         record["kinds"] = ["넘침"]
         record["first"] = {"kind": "넘침", "detail": "정답에 없는 쪽", "container": "쪽 수 다름"}
         record["events"] = 1
-        return record
+        return record, texts
     if index >= len(pages):
         record["kinds"] = ["빠짐"]
         record["first"] = {"kind": "빠짐", "detail": "렌더에 없는 쪽", "container": "쪽 수 다름"}
         record["events"] = 1
-        return record
+        return record, texts
     page = pages[index]
     data = _page_input(page, reference[index], image_boxes[index], pdf_document, index)
-    found = judge_page(data)
+    notes: dict = {}
+    found = judge_page(data, notes)
+    found += _chart_events(page, pdf_document[index], record, charts)
+    texts = {
+        "ours": "".join(c.char for c in data.rendered if not _is_pua(c.char)),
+        "reference": "".join(c.char for c in data.reference if not _is_pua(c.char)),
+        "missing_runs": [event["run"] for event in found if event["kind"] == "빠짐"],
+        "extra_runs": notes["extra_runs"],
+    }
     tails = [event for event in found if event["kind"] == TAIL_SHIFT]
     if tails:
         record["tail_shift"] = [event["reference_text"] for event in tails]
     events = [event for event in found if event["kind"] != TAIL_SHIFT]
     if not events:
-        return record
+        return record, texts
     record["kinds"] = [kind for kind in KINDS if any(event["kind"] == kind for event in events)]
     record["events"] = len(events)
     first = events[0]
@@ -577,7 +835,22 @@ def _page_record(index: int, pages, reference, image_boxes, pdf_document) -> dic
         **_line_record(page, owner),
     }
     record["by_kind"] = dict(collections.Counter(event["kind"] for event in events))
-    return record
+    return record, texts
+
+
+def _chart_events(page, pdf_page, record: dict, charts: list[tuple[int, int]]) -> list[dict]:
+    """차트·OLE 영역마다 우리 그림과 정답 PDF 그림을 견줘 깨진 영역을 「차트 깨짐」 사건으로 돌려준다."""
+    events = []
+    for box in chart_regions(page, charts):
+        x, y, w, h = box
+        reference = pdf_page.get_pixmap(clip=pymupdf.Rect(x, y, x + w, y + h), alpha=False)
+        result = judge_chart(render_region(page, box), reference) | {"box": [round(v, 1) for v in box]}
+        record.setdefault("charts", []).append(result)
+        if result["reason"]:
+            ink = f"잉크 {result['ink_ours']}/{result['ink_reference']}"
+            detail = f"차트 {result['reason']}({ink}, 칸 차 {result['grid_difference']})"
+            events.append(_event("차트 깨짐", -1, y, detail) | {"reference_text": ""})
+    return events
 
 
 def cause_key(first: dict) -> str:
@@ -607,6 +880,8 @@ def summarize(results: dict[str, dict]) -> dict:
                 "broken_pages": 0,
                 "kinds": dict.fromkeys(KINDS, 0),
                 "tail_shift_pages": 0,
+                "pagination_pages": 0,
+                "chart_regions": 0,
             },
         )
 
@@ -623,6 +898,8 @@ def summarize(results: dict[str, dict]) -> dict:
             row["broken_pages"] += len(broken)
             row["failed" if broken else "passed"] += 1
             row["tail_shift_pages"] += sum("tail_shift" in page for page in result["page_records"])
+            row["pagination_pages"] += sum("pagination" in page for page in result["page_records"])
+            row["chart_regions"] += sum(len(page.get("charts", [])) for page in result["page_records"])
             for page in broken:
                 for kind in page["kinds"]:
                     row["kinds"][kind] += 1
@@ -647,13 +924,18 @@ def summarize(results: dict[str, dict]) -> dict:
 
 def markdown(summary: dict, limit: int) -> str:
     out = ["# 깨진 쪽 집계", "", f"세로 밀림 문턱 {VERTICAL_SHIFT_PT}pt.", ""]
-    out += ["| 문서군 | 문서 | 통과 | 실패 | 검사불가 | 쪽 | 깨진 쪽 | " + " | ".join(KINDS) + f" | {TAIL_SHIFT} 쪽 |"]
-    out.append("|---" * (8 + len(KINDS)) + "|")
+    out += [
+        "| 문서군 | 문서 | 통과 | 실패 | 검사불가 | 쪽 | 깨진 쪽 | "
+        + " | ".join(KINDS)
+        + f" | {TAIL_SHIFT} 쪽 | 쪽 나눔 차이 쪽 | 차트 영역 |"
+    ]
+    out.append("|---" * (10 + len(KINDS)) + "|")
     for name, row in summary["groups"].items():
         kinds = " | ".join(str(row["kinds"][kind]) for kind in KINDS)
         out.append(
             f"| {name} | {row['documents']} | {row['passed']} | {row['failed']} | {row['unchecked']} | "
-            f"{row['pages']} | {row['broken_pages']} | {kinds} | {row['tail_shift_pages']} |"
+            f"{row['pages']} | {row['broken_pages']} | {kinds} | {row['tail_shift_pages']} | "
+            f"{row['pagination_pages']} | {row['chart_regions']} |"
         )
     out += ["", "## 원인 묶음(처음 깨진 줄 특징, 사용자 표본에서 나온 묶음 먼저)", ""]
     out.append("| 순위 | 묶음 | 깨진 쪽 | 사용자 표본 쪽 | 문서 | 예(문서:쪽) |")
