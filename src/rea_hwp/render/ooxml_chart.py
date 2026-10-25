@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import itertools
 import math
 import struct
 import xml.etree.ElementTree as ET
@@ -447,11 +448,21 @@ def _label_glyphs(
 #: 계열 색 = 테마 강조색(idx % 6, FUN_1039bd60 표 0x10557cc0). 값은 미리보기 비트맵 8비트 팔레트로 확인한 것뿐이다.
 _ACCENT_COLORS = ((0x61, 0x82, 0xD6), (0xFF, 0x84, 0x3A), (0xB2, 0xB2, 0xB2), (0xFF, 0xD7, 0x00), (0x28, 0x9B, 0x6E))
 #: 자동 표식 모양 = 계열 번호 순서(OOXML ST_MarkerStyle 자동 차례). 정답 PDF로 본 셋(2·3·4)만 옮겼다.
-_AUTO_MARKERS = {2: "triangle", 3: "x", 4: "star"}
+_AUTO_MARKERS = {0: "diamond", 1: "square", 2: "triangle", 3: "x", 4: "star"}
 #: 주식형 하강 막대 채움(정답 PDF 실측 #3a~#46 사이), 고저선·막대 테두리는 검정 1px.
 _DOWN_BAR_FILL = (0x40, 0x40, 0x40)
-#: 표식 기본 크기(pt). 정답 PDF의 X 표식 폭 8.8px로 확인했다.
+#: 표식 기본 크기(pt). 주식형은 정답 PDF의 X 표식 폭 8.8px, 꺾은선은 OOXML 기본 5(표식 폭 7.7px 실측)다.
 _MARKER_PT = 7.0
+_LINE_MARKER_PT = 5.0
+#: 계열 선 두께 2.25pt(a:ln w 기본 28575 EMU)를 px로.
+_SERIES_LINE_PX = 3.0
+#: 정답 PDF 실측(꺾은선 범례): 범례 폭 = 글 폭 + 19.4, 선 표식은 범례 왼쪽 + 2.1에서 15.4 길이, 글은 그 뒤 2.2,
+#: 항목 간격 19.2, 가운데 보정 -2.7, 글 줄 위 보정 -1.1.
+_LINE_LEGEND_EXTRA_PX = 19.4
+_LINE_KEY_LEFT_PX, _LINE_KEY_PX, _LINE_KEY_TEXT_GAP_PX = 2.1, 15.4, 2.2
+_LINE_LEGEND_PITCH_PX = 19.2
+_LINE_LEGEND_CENTER_SHIFT_PX = -2.7
+_LINE_LEGEND_TEXT_SHIFT_PX = -1.1
 #: 축·격자선·차트 테두리 색(미리보기 비트맵 팔레트 #868686).
 _LINE_COLOR = (0x86, 0x86, 0x86)
 _WHITE = (0xFF, 0xFF, 0xFF)
@@ -570,6 +581,8 @@ class _Bar2D:
     stock: bool = False
     #: 누적 막대(grouping stacked, overlap 100).
     stacked: bool = False
+    #: 꺾은선(lineChart standard): 계열마다 선과 표식.
+    line: bool = False
     hi_low: bool = False
     up_down: bool = False
 
@@ -651,6 +664,36 @@ def _parse_stock(contents: bytes) -> _Bar2D | None:
         hi_low=hi_low is not None,
         up_down=up_down is not None,
     )
+
+
+def _parse_line(contents: bytes) -> _Bar2D | None:
+    """표식 있는 꺾은선(lineChart standard, 계열 모양 기본, 자동 표식) 기본 모양만 읽는다. 밖이면 None."""
+    frame = _chart_frame(contents)
+    if frame is None:
+        return None
+    plot, size_pt, face = frame
+    kinds = [child for child in plot if child.tag.endswith("Chart")]
+    if len(kinds) != 1 or kinds[0].tag != _C + "lineChart" or not _default_axes(plot, False, gridlines=True):
+        return None
+    group = kinds[0]
+    if (
+        _val(group, "grouping", "standard") != "standard"
+        or _val(group, "varyColors", "0") != "0"
+        or _val(group, "marker", "1") != "1"
+        or any(group.find(_C + tag) is not None for tag in ("dLbls", "dropLines", "hiLowLines", "upDownBars"))
+    ):
+        return None
+    read = _read_series(group, plain=True)
+    if read is None:
+        return None
+    categories, plain = read
+    series = []
+    for ser, item in zip(group.findall(_C + "ser"), plain, strict=True):
+        marker = ser.find(_C + "marker")
+        if marker is None or len(marker) or _val(ser, "smooth", "0") != "0" or item.index not in _AUTO_MARKERS:
+            return None  # 표식 모양·크기를 정한 것과 곡선은 옮기지 않았다
+        series.append(_Series(item.name, item.index, item.values, _AUTO_MARKERS[item.index], _LINE_MARKER_PT))
+    return _Bar2D(False, categories, series, 0.0, size_pt, face, line=True)
 
 
 def _chart_frame(contents: bytes) -> tuple[ET.Element, float, str] | None:
@@ -866,7 +909,7 @@ def draw_ooxml_bar_chart(
     contents: bytes, left: float, top: float, width: float, height: float
 ) -> OoxmlChartDrawing | None:
     """개체 상자(쪽 좌표 pt)에 새 차트 2차원 막대를 엔진처럼 그린다. 옮긴 범위 밖이면 None(미리보기 그림으로 대신)."""
-    chart = _parse_bar2d(contents) or _parse_stock(contents)
+    chart = _parse_bar2d(contents) or _parse_stock(contents) or _parse_line(contents)
     if chart is None or chart.size_pt not in _TITLE_PT:
         return None
     try:
@@ -897,11 +940,21 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
         return left + x * to_pt, top + y * to_pt
 
     def marker_shape(name: str, x: float, y: float, size_pt: float, color: tuple[int, int, int]) -> None:
-        """표식(가운데 x, y px). 세모는 채우고 X·별은 1px 선으로 긋는다."""
+        """표식(가운데 x, y px). 마름모·네모·세모는 채우고 X·별은 1px 선으로 긋는다."""
         r = size_pt * 96 / 72 / 2
-        if name == "triangle":
-            corners = (point(x, y - r), point(x + r, y + r), point(x - r, y + r))
-            drawing.shapes.append(OoxmlShape("polygon", corners, fill=color))
+        filled = {
+            "triangle": ((x, y - r), (x + r, y + r), (x - r, y + r)),
+            # 꺾은선 표식은 같은 색 0.75pt 테두리까지 채운다(정답 PDF 폭 7.7px = 5pt + 1px)
+            "diamond": ((x, y - r - 0.5), (x + r + 0.5, y), (x, y + r + 0.5), (x - r - 0.5, y)),
+            "square": (
+                (x - r - 0.5, y - r - 0.5),
+                (x + r + 0.5, y - r - 0.5),
+                (x + r + 0.5, y + r + 0.5),
+                (x - r - 0.5, y + r + 0.5),
+            ),
+        }
+        if name in filled:
+            drawing.shapes.append(OoxmlShape("polygon", tuple(point(*c) for c in filled[name]), fill=color))
             return
         strokes = [((x - r, y - r), (x + r, y + r)), ((x - r, y + r), (x + r, y - r))]
         if name == "star":
@@ -942,7 +995,8 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
     # 범례(오른쪽): 폭 = 최대 글자폭 + 표식 + 2*여백(FUN_10353770)
     marker = line_px(size) * _LEGEND_MARKER_RATIO
     gap = marker * _LEGEND_MARGIN_RATIO
-    legend_w = min(max(text_px(s.name) for s in chart.series) + marker + 2 * gap, box_w / 3)
+    legend_extra = _LINE_LEGEND_EXTRA_PX if chart.line else marker + 2 * gap
+    legend_w = min(max(text_px(s.name) for s in chart.series) + legend_extra, box_w / 3)
     legend_x = box_w - _PLOT_MARGIN_PX - legend_w
 
     # 그림 영역(FUN_10379410)
@@ -956,7 +1010,15 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
     if chart.stacked:
         values = [sum(column) for column in zip(*(s.values for s in chart.series), strict=True)]
     low, high = min(values + [0.0]), max(values + [0.0])
-    place = _place_stock if chart.stock else _place_horizontal_bars if chart.horizontal else _place_vertical_bars
+    place = (
+        _place_stock
+        if chart.stock
+        else _place_line
+        if chart.line
+        else _place_horizontal_bars
+        if chart.horizontal
+        else _place_vertical_bars
+    )
     placed = place(chart, (plot_x0, plot_y0, plot_x1, plot_y1), label_h, low, high, text_px)
     if placed is None:
         return None
@@ -970,6 +1032,10 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
             text(label, x, line_center - line_px(size) / 2)
         elif kind == "marker":
             marker_shape(*args)
+        elif kind == "series":
+            x0, y0, x1, y1, color = args
+            ends = (point(x0, y0), point(x1, y1))
+            drawing.shapes.append(OoxmlShape("line", ends, stroke=color, width=_SERIES_LINE_PX * to_pt))
         elif kind == "line":
             x0, y0, x1, y1, color = args
             drawing.shapes.append(
@@ -984,12 +1050,21 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
             rect(*args)
 
     # 범례 항목: 표식과 이름, 그림 영역 높이 가운데
-    pitch = _LEGEND_PITCH_PX
-    first = (plot_y0 + plot_y1) / 2 - pitch * len(chart.series) / 2 + _LEGEND_CENTER_SHIFT_PX
+    pitch = _LINE_LEGEND_PITCH_PX if chart.line else _LEGEND_PITCH_PX
+    shift = _LINE_LEGEND_CENTER_SHIFT_PX if chart.line else _LEGEND_CENTER_SHIFT_PX
+    first = (plot_y0 + plot_y1) / 2 - pitch * len(chart.series) / 2 + shift
     # 가로 막대와 누적 막대는 범례를 계열 역순으로 적는다(정답 PDF)
     for k, series in enumerate(reversed(chart.series) if chart.horizontal or chart.stacked else chart.series):
         center = first + (k + 0.5) * pitch
         color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
+        if chart.line:
+            key_x = legend_x + _LINE_KEY_LEFT_PX
+            ends = (point(key_x, center), point(key_x + _LINE_KEY_PX, center))
+            drawing.shapes.append(OoxmlShape("line", ends, stroke=color, width=_SERIES_LINE_PX * to_pt))
+            marker_shape(series.marker or "", key_x + _LINE_KEY_PX / 2, center, series.marker_pt, color)
+            text_x = key_x + _LINE_KEY_PX + _LINE_KEY_TEXT_GAP_PX
+            text(series.name, text_x, center - line_px(size) / 2 + _LINE_LEGEND_TEXT_SHIFT_PX)
+            continue
         if not chart.stock:
             rect(legend_x + gap, center - marker / 2, legend_x + gap + marker, center + marker / 2, color)
         elif series.marker is not None:
@@ -1138,4 +1213,20 @@ def _place_stock(chart: _Bar2D, plot, label_h: float, low: float, high: float, t
             fill = _WHITE if closing >= opening else _DOWN_BAR_FILL
             top, bottom = y_of(max(opening, closing)), y_of(min(opening, closing))
             placed.append(("box", x - bar_w / 2, top, x + bar_w / 2, bottom, fill))
+    return placed
+
+
+def _place_line(chart: _Bar2D, plot, label_h: float, low: float, high: float, text_px) -> list[tuple] | None:
+    """꺾은선: 항목 가운데를 잇는 2.25pt 선과 표식을 계열 차례로 그린다(뒤 계열이 위)."""
+    axes = _vertical_axes(chart, plot, label_h, low, high, text_px, gridlines=True)
+    if axes is None:
+        return None
+    placed, axis_x, slot, y_of = axes
+    for series in chart.series:
+        color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
+        points = [(axis_x + (i + 0.5) * slot, y_of(value)) for i, value in enumerate(series.values)]
+        for (x0, y0), (x1, y1) in itertools.pairwise(points):
+            placed.append(("series", x0, y0, x1, y1, color))
+        for x, y in points:
+            placed.append(("marker", series.marker, x, y, series.marker_pt, color))
     return placed

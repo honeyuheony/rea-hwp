@@ -106,3 +106,16 @@ def test_stacked_column_value_axis_covers_column_sums():
     [svg] = chart_svgs(page)
     # 한글 정답 PDF: 두 계열 합 최대 9.5 -> 값 축 0~10, 주단위 2
     assert "0246810" in svg_text(svg)
+
+
+LINE_ROW_ADDED_DOC = CORPUS / "issue5447__표식이있는꺽은선형-행추가.hwp"
+
+
+@pytest.mark.skipif(not LINE_ROW_ADDED_DOC.exists(), reason="corpus not available")
+def test_line_chart_marks_every_point_and_legend_key():
+    page = layout_document(HwpDocument.open(LINE_ROW_ADDED_DOC))[0]
+
+    [svg] = chart_svgs(page)
+    # 항목 5 x 계열 3 표식과 범례 표식 3(마름모·네모·세모)
+    assert svg.count("<polygon") == 18
+    assert svg.count('stroke-width="2.250"') == 3 * 4 + 3
