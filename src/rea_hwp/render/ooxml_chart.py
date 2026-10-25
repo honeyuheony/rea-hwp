@@ -560,7 +560,35 @@ class _Bar2D:
 
 
 def _parse_bar2d(contents: bytes) -> _Bar2D | None:
-    """옮긴 범위(제목 기본 글, 범례 r, 기본 축, 자동 눈금, 묶은 2차원 세로 막대 하나, 기본 색)만 읽는다. 밖이면 None."""
+    """옮긴 범위(제목 기본 글, 범례 r, 기본 축, 자동 눈금, 묶은 2차원 막대 하나, 기본 색)만 읽는다. 밖이면 None."""
+    frame = _chart_frame(contents)
+    if frame is None:
+        return None
+    plot, size_pt, face = frame
+    kinds = [child for child in plot if child.tag.endswith("Chart")]
+    if len(kinds) != 1 or kinds[0].tag != _C + "barChart":
+        return None
+    bar = kinds[0]
+    if (
+        _val(bar, "barDir") not in ("col", "bar")
+        or _val(bar, "grouping") != "clustered"
+        or _val(bar, "varyColors", "0") != "0"
+        or _val(bar, "overlap", "0") != "0"
+        or bar.find(_C + "dLbls") is not None
+    ):
+        return None
+    horizontal = _val(bar, "barDir") == "bar"
+    if not _default_axes(plot, horizontal, gridlines=True):
+        return None
+    read = _read_series(bar, plain=True)
+    if read is None:
+        return None
+    categories, series = read
+    return _Bar2D(horizontal, categories, series, float(_val(bar, "gapWidth", "150") or 150), size_pt, face)
+
+
+def _chart_frame(contents: bytes) -> tuple[ET.Element, float, str] | None:
+    """차트 공간·제목·범례·글꼴이 옮긴 기본 모양인지 보고 (그림 영역, 글 크기 pt, 글꼴)을 돌려준다. 밖이면 None."""
     try:
         root = ET.fromstring(contents)
     except ET.ParseError:
@@ -586,48 +614,6 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
     plot = chart.find(_C + "plotArea")
     if plot is None or _has_manual_layout(plot):
         return None
-    kinds = [child for child in plot if child.tag.endswith("Chart")]
-    if len(kinds) != 1 or kinds[0].tag != _C + "barChart":
-        return None
-    bar = kinds[0]
-    if (
-        _val(bar, "barDir") not in ("col", "bar")
-        or _val(bar, "grouping") != "clustered"
-        or _val(bar, "varyColors", "0") != "0"
-        or _val(bar, "overlap", "0") != "0"
-        or bar.find(_C + "dLbls") is not None
-    ):
-        return None
-    cat_axes, val_axes = plot.findall(_C + "catAx"), plot.findall(_C + "valAx")
-    others = [child for child in plot if child.tag in (_C + "serAx", _C + "dateAx")]
-    if len(cat_axes) != 1 or len(val_axes) != 1 or others:
-        return None
-    horizontal = _val(bar, "barDir") == "bar"
-    for axis, position in ((cat_axes[0], "l" if horizontal else "b"), (val_axes[0], "b" if horizontal else "l")):
-        scaling = axis.find(_C + "scaling")
-        if (
-            axis.find(_C + "txPr") is not None
-            or axis.find(_C + "spPr") is not None
-            or axis.find(_C + "title") is not None
-            or _val(axis, "delete", "0") != "0"
-            or _val(axis, "axPos") != position
-            or _val(axis, "tickLblPos", "nextTo") != "nextTo"
-            or _val(axis, "majorTickMark", "out") != "out"
-            or _val(axis, "minorTickMark", "none") != "none"
-            or _val(axis, "crosses", "autoZero") != "autoZero"
-            or _val(scaling, "orientation", "minMax") != "minMax"
-            or (scaling is not None and any(scaling.find(_C + tag) is not None for tag in ("min", "max", "logBase")))
-            or axis.find(_C + "majorUnit") is not None
-            or axis.find(_C + "minorGridlines") is not None
-        ):
-            return None
-    if cat_axes[0].find(_C + "majorGridlines") is not None or val_axes[0].find(_C + "majorGridlines") is None:
-        return None
-    if _val(val_axes[0], "crossBetween", "between") != "between":
-        return None
-    number_format = val_axes[0].find(_C + "numFmt")
-    if number_format is not None and number_format.get("formatCode") != "General":
-        return None
     legend = chart.find(_C + "legend")
     if (
         legend is None
@@ -646,6 +632,7 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
     east_asian = run.find(_A + "ea") if run is not None else None
     if (
         body is None
+        or run is None
         or body.get("vert", "horz") != "horz"
         or body.get("rot", "0") != "0"
         or latin is None
@@ -654,10 +641,50 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
         or run.get("i", "0") != "0"
     ):
         return None
+    return plot, int(run.get("sz", "1000")) / 100, latin.get("typeface", "")
+
+
+def _default_axes(plot: ET.Element, horizontal: bool, gridlines: bool) -> bool:
+    """항목 축 하나와 값 축 하나가 기본 모양(자동 눈금, 바깥 눈금 표시, 값 축 격자선 gridlines)인가."""
+    cat_axes, val_axes = plot.findall(_C + "catAx"), plot.findall(_C + "valAx")
+    others = [child for child in plot if child.tag in (_C + "serAx", _C + "dateAx")]
+    if len(cat_axes) != 1 or len(val_axes) != 1 or others:
+        return False
+    for axis, position in ((cat_axes[0], "l" if horizontal else "b"), (val_axes[0], "b" if horizontal else "l")):
+        scaling = axis.find(_C + "scaling")
+        if (
+            axis.find(_C + "txPr") is not None
+            or axis.find(_C + "spPr") is not None
+            or axis.find(_C + "title") is not None
+            or _val(axis, "delete", "0") != "0"
+            or _val(axis, "axPos") != position
+            or _val(axis, "tickLblPos", "nextTo") != "nextTo"
+            or _val(axis, "majorTickMark", "out") != "out"
+            or _val(axis, "minorTickMark", "none") != "none"
+            or _val(axis, "crosses", "autoZero") != "autoZero"
+            or _val(scaling, "orientation", "minMax") != "minMax"
+            or (scaling is not None and any(scaling.find(_C + tag) is not None for tag in ("min", "max", "logBase")))
+            or axis.find(_C + "majorUnit") is not None
+            or axis.find(_C + "minorGridlines") is not None
+        ):
+            return False
+    if cat_axes[0].find(_C + "majorGridlines") is not None:
+        return False
+    if (val_axes[0].find(_C + "majorGridlines") is not None) != gridlines:
+        return False
+    if _val(val_axes[0], "crossBetween", "between") != "between":
+        return False
+    number_format = val_axes[0].find(_C + "numFmt")
+    return number_format is None or number_format.get("formatCode") == "General"
+
+
+def _read_series(group: ET.Element, plain: bool) -> tuple[list[str], list[_Series]] | None:
+    """계열 이름·번호·값과 공통 항목 이름. plain이면 계열 모양(spPr)이 없는 것만 받는다. 밖이면 None."""
     series = []
     categories: list[str] | None = None
-    for ser in bar.findall(_C + "ser"):
-        if any(ser.find(_C + tag) is not None for tag in ("spPr", "dLbls", "trendline", "errBars", "dPt")):
+    for ser in group.findall(_C + "ser"):
+        extra = ("dLbls", "trendline", "errBars", "dPt") + (("spPr",) if plain else ())
+        if any(ser.find(_C + tag) is not None for tag in extra):
             return None
         name = ser.find(f"{_C}tx//{_C}v")
         # 값·항목은 참조 캐시(numRef/strRef)나 글자 그대로(numLit/strLit)로 저장된다
@@ -687,14 +714,7 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
         series.append(_Series(name.text, int(index.get("val", "0")), values))
     if not series or not categories:
         return None
-    return _Bar2D(
-        horizontal,
-        categories,
-        series,
-        float(_val(bar, "gapWidth", "150") or 150),
-        int(run.get("sz", "1000")) / 100,
-        latin.get("typeface", ""),
-    )
+    return categories, series
 
 
 def value_axis_scale(
@@ -890,6 +910,24 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
 
 def _place_vertical_bars(chart: _Bar2D, plot, label_h: float, low: float, high: float, text_px) -> list[tuple] | None:
     """세로 막대: 값 축 왼쪽, 항목 축 아래. ("h"|"v", 선) / ("text", 글, x, 줄 가운데 y) / ("rect", 사각형, 색), px."""
+    axes = _vertical_axes(chart, plot, label_h, low, high, text_px, gridlines=True)
+    if axes is None:
+        return None
+    placed, axis_x, slot, y_of = axes
+    # 막대: 폭 = 항목 칸 / (계열 수 + 간격 비율), 양쪽 간격 절반씩(gapWidth, overlap 0)
+    bar_w = slot / (len(chart.series) + chart.gap_width / 100)
+    zero = y_of(None)
+    for k, series in enumerate(chart.series):
+        color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
+        for i, value in enumerate(series.values):
+            x0 = axis_x + i * slot + chart.gap_width / 100 * bar_w / 2 + k * bar_w
+            y = y_of(value)
+            placed.append(("rect", x0, min(y, zero), x0 + bar_w, max(y, zero), color))
+    return placed
+
+
+def _vertical_axes(chart: _Bar2D, plot, label_h: float, low: float, high: float, text_px, gridlines: bool):
+    """값 축 왼쪽·항목 축 아래인 축과 라벨. (놓을 것, 값 축 x, 항목 칸 폭, 값 -> y(None이면 0 기준선))."""
     plot_x0, plot_y0, plot_x1, plot_y1 = plot
     placed: list[tuple] = []
     axis_top = plot_y0 + label_h / 2
@@ -903,33 +941,27 @@ def _place_vertical_bars(chart: _Bar2D, plot, label_h: float, low: float, high: 
     if plot_x1 <= axis_x or hi <= lo:
         return None
 
-    def y_of(value: float) -> float:
+    def y_of(value: float | None) -> float:
+        value = min(max(0.0, lo), hi) if value is None else value
         return axis_y - (value - lo) / (hi - lo) * (axis_y - axis_top)
 
-    # 격자선·값 라벨·값 축 눈금
+    # 격자선(또는 눈금 표시만)·값 라벨·값 축
     for i, label in enumerate(labels):
         y = y_of(lo + i * major)
-        placed.append(("h", axis_x - _TICK_PX, plot_x1, y))
+        placed.append(("h", axis_x - _TICK_PX, plot_x1 if gridlines else axis_x, y))
         placed.append(("text", label, axis_x - _AXIS_LABEL_GAP_PX - text_px(label), y))
     placed.append(("v", axis_x, axis_top, axis_y + _LINE_PX / 2))
     # 항목 축: 눈금은 항목 경계, 라벨은 항목 가운데
     n = len(chart.categories)
     slot = (plot_x1 - axis_x) / n
+    if not gridlines:
+        placed.append(("h", axis_x, plot_x1, axis_y))
     for i in range(n + 1):
         placed.append(("v", axis_x + i * slot, axis_y, axis_y + _TICK_PX))
     line_center = axis_y + _CATEGORY_TEXT_TOP_PX + _LINE_HEIGHT_RATIO * chart.size_pt * 96 / 72 / 2
     for i, name in enumerate(chart.categories):
         placed.append(("text", name, axis_x + (i + 0.5) * slot - text_px(name) / 2, line_center))
-    # 막대: 폭 = 항목 칸 / (계열 수 + 간격 비율), 양쪽 간격 절반씩(gapWidth, overlap 0)
-    bar_w = slot / (len(chart.series) + chart.gap_width / 100)
-    zero = y_of(min(max(0.0, lo), hi))
-    for k, series in enumerate(chart.series):
-        color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
-        for i, value in enumerate(series.values):
-            x0 = axis_x + i * slot + chart.gap_width / 100 * bar_w / 2 + k * bar_w
-            y = y_of(value)
-            placed.append(("rect", x0, min(y, zero), x0 + bar_w, max(y, zero), color))
-    return placed
+    return placed, axis_x, slot, y_of
 
 
 def _place_horizontal_bars(chart: _Bar2D, plot, label_h: float, low: float, high: float, text_px) -> list[tuple] | None:
