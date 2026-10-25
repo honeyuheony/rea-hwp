@@ -94,3 +94,15 @@ def test_stock_chart_draws_down_bars_from_first_to_last_series():
     # 한글 정답 PDF: 고가(첫 계열)에서 종가(끝 계열)로 내려가는 검은 막대 넷과 종가 세모 표식(범례 포함 다섯)
     assert svg.count('fill="#404040" stroke="#000000"') == 4
     assert svg.count("<polygon") == 5
+
+
+STACKED_SERIES_REMOVED_DOC = CORPUS / "issue5447__누적세로막대형-계열삭제.hwp"
+
+
+@pytest.mark.skipif(not STACKED_SERIES_REMOVED_DOC.exists(), reason="corpus not available")
+def test_stacked_column_value_axis_covers_column_sums():
+    page = layout_document(HwpDocument.open(STACKED_SERIES_REMOVED_DOC))[0]
+
+    [svg] = chart_svgs(page)
+    # 한글 정답 PDF: 두 계열 합 최대 9.5 -> 값 축 0~10, 주단위 2
+    assert "0246810" in svg_text(svg)

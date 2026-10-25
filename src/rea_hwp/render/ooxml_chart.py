@@ -568,6 +568,8 @@ class _Bar2D:
     face: str
     #: 주식형이면 고저선과 올림·내림 막대 유무.
     stock: bool = False
+    #: 누적 막대(grouping stacked, overlap 100).
+    stacked: bool = False
     hi_low: bool = False
     up_down: bool = False
 
@@ -584,20 +586,23 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
     bar = kinds[0]
     if (
         _val(bar, "barDir") not in ("col", "bar")
-        or _val(bar, "grouping") != "clustered"
+        or (_val(bar, "grouping"), _val(bar, "overlap", "0")) not in (("clustered", "0"), ("stacked", "100"))
         or _val(bar, "varyColors", "0") != "0"
-        or _val(bar, "overlap", "0") != "0"
         or bar.find(_C + "dLbls") is not None
     ):
         return None
     horizontal = _val(bar, "barDir") == "bar"
+    stacked = _val(bar, "grouping") == "stacked"
+    if stacked and horizontal:
+        return None  # 누적 가로 막대는 정답으로 확인하지 못했다
     if not _default_axes(plot, horizontal, gridlines=True):
         return None
     read = _read_series(bar, plain=True)
     if read is None:
         return None
     categories, series = read
-    return _Bar2D(horizontal, categories, series, float(_val(bar, "gapWidth", "150") or 150), size_pt, face)
+    gap = float(_val(bar, "gapWidth", "150") or 150)
+    return _Bar2D(horizontal, categories, series, gap, size_pt, face, stacked=stacked)
 
 
 def _parse_stock(contents: bytes) -> _Bar2D | None:
@@ -948,6 +953,8 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
         return None
     label_h = line_px(size) + _MEASURE_PAD_PX + _LABEL_PAD_2D_PX
     values = [v for s in chart.series for v in s.values]
+    if chart.stacked:
+        values = [sum(column) for column in zip(*(s.values for s in chart.series), strict=True)]
     low, high = min(values + [0.0]), max(values + [0.0])
     place = _place_stock if chart.stock else _place_horizontal_bars if chart.horizontal else _place_vertical_bars
     placed = place(chart, (plot_x0, plot_y0, plot_x1, plot_y1), label_h, low, high, text_px)
@@ -979,8 +986,8 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
     # 범례 항목: 표식과 이름, 그림 영역 높이 가운데
     pitch = _LEGEND_PITCH_PX
     first = (plot_y0 + plot_y1) / 2 - pitch * len(chart.series) / 2 + _LEGEND_CENTER_SHIFT_PX
-    # 가로 막대는 범례를 계열 역순으로 적는다(정답 PDF)
-    for k, series in enumerate(reversed(chart.series) if chart.horizontal else chart.series):
+    # 가로 막대와 누적 막대는 범례를 계열 역순으로 적는다(정답 PDF)
+    for k, series in enumerate(reversed(chart.series) if chart.horizontal or chart.stacked else chart.series):
         center = first + (k + 0.5) * pitch
         color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
         if not chart.stock:
@@ -1001,15 +1008,19 @@ def _place_vertical_bars(chart: _Bar2D, plot, label_h: float, low: float, high: 
     if axes is None:
         return None
     placed, axis_x, slot, y_of = axes
-    # 막대: 폭 = 항목 칸 / (계열 수 + 간격 비율), 양쪽 간격 절반씩(gapWidth, overlap 0)
-    bar_w = slot / (len(chart.series) + chart.gap_width / 100)
-    zero = y_of(None)
+    # 막대: 폭 = 항목 칸 / (나란한 막대 수 + 간격 비율), 양쪽 간격 절반씩(gapWidth). 누적은 한 막대에 쌓는다.
+    columns = 1 if chart.stacked else len(chart.series)
+    bar_w = slot / (columns + chart.gap_width / 100)
+    base = [0.0] * len(chart.categories)
     for k, series in enumerate(chart.series):
         color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
         for i, value in enumerate(series.values):
-            x0 = axis_x + i * slot + chart.gap_width / 100 * bar_w / 2 + k * bar_w
-            y = y_of(value)
-            placed.append(("rect", x0, min(y, zero), x0 + bar_w, max(y, zero), color))
+            x0 = axis_x + i * slot + chart.gap_width / 100 * bar_w / 2 + (0 if chart.stacked else k) * bar_w
+            start = base[i] if chart.stacked else None
+            y0, y1 = y_of(start), y_of(value + (start or 0.0))
+            if chart.stacked:
+                base[i] += value
+            placed.append(("rect", x0, min(y0, y1), x0 + bar_w, max(y0, y1), color))
     return placed
 
 
