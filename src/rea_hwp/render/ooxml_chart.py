@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import io
 import math
+import struct
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import olefile
 
@@ -437,3 +438,457 @@ def _label_glyphs(
                 glyphs.append(ChartGlyph(char, x, y, size, chart.face, 45.0))
             pen += text_px(char)
     return ChartDrawing(glyphs=glyphs)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 2차원 막대(barChart). 도형과 글자를 엔진 px(1/96인치, 개체 상자 왼쪽 위 원점)로 놓고 pt로 바꾼다.
+# ---------------------------------------------------------------------------------------------------------------
+
+#: 계열 색 = 테마 강조색(idx % 6, FUN_1039bd60 표 0x10557cc0). 값은 미리보기 비트맵 8비트 팔레트로 확인한 것뿐이다.
+_ACCENT_COLORS = ((0x61, 0x82, 0xD6), (0xFF, 0x84, 0x3A), (0xB2, 0xB2, 0xB2), (0xFF, 0xD7, 0x00))
+#: 축·격자선·차트 테두리 색(미리보기 비트맵 팔레트 #868686).
+_LINE_COLOR = (0x86, 0x86, 0x86)
+_WHITE = (0xFF, 0xFF, 0xFF)
+_BLACK = (0, 0, 0)
+#: 선 두께 1px.
+_LINE_PX = 1.0
+#: 라벨 크기 = 글 크기 + 2pt(CalculateLabels 0x102da650: (dpi+dpi)/72).
+_LABEL_PAD_2D_PX = 2 * 96 / 72
+#: 값 라벨과 축 사이 10pt(CalculateAxisMargin 0x102db1d0: dpi*10/72).
+_AXIS_LABEL_GAP_PX = 10 * 96 / 72
+#: 눈금 반복에서 라벨 높이에 곱하는 여유(0x1055dfdc = 0.085, FUN_103d1170).
+_LABEL_SPACING = 0.085
+#: 최댓값이 위 눈금에서 주단위/5 안이면 한 칸 늘린다(DAT_1055e228 = 5, FUN_103d1170).
+_HEADROOM_DIVISOR = 5.0
+#: 눈금 표시 길이(정답 PDF 실측 4.7~5px).
+_TICK_PX = 5.0
+#: 범례 표식 = 글 줄높이 * 0.5, 표식 여백 = 표식 * 0.8(FUN_10352e70).
+_LEGEND_MARKER_RATIO, _LEGEND_MARGIN_RATIO = 0.5, 0.8
+#: 글 높이 측정은 줄높이 + 5(FUN_103c2e50).
+_MEASURE_PAD_PX = 5.0
+#: 정답 PDF 실측(엔진 함수로 확인하지 못함): 항목 라벨 칸 아래 여백, 축에서 항목 글 줄 위까지, 값 축 x 보정,
+#: 범례 항목 간격, 범례 가운데 보정, 표식과 글 사이, 범례 글 줄 위 보정.
+_CATEGORY_BELOW_PX = 10.6
+_CATEGORY_TEXT_TOP_PX = 14.64
+_VALUE_AXIS_SHIFT_PX = 0.75
+_LEGEND_PITCH_PX = 18.0
+_LEGEND_CENTER_SHIFT_PX = -2.0
+_LEGEND_TEXT_GAP_PX = 4.8
+_LEGEND_TEXT_SHIFT_PX = -1.9
+
+
+@dataclass(frozen=True)
+class OoxmlShape:
+    """쪽 좌표 pt 도형. rect(왼쪽 위·오른쪽 아래, 채움·선), line(두 점, 선 두께 pt), polygon(꼭짓점, 채움)."""
+
+    kind: str
+    points: tuple[tuple[float, float], ...]
+    fill: tuple[int, int, int] | None = None
+    stroke: tuple[int, int, int] | None = None
+    width: float = 0.0
+
+
+@dataclass
+class OoxmlChartDrawing:
+    #: 개체 상자(쪽 좌표 pt): 왼쪽, 위, 너비, 높이.
+    box: tuple[float, float, float, float]
+    glyphs: list[ChartGlyph] = field(default_factory=list)
+    shapes: list[OoxmlShape] = field(default_factory=list)
+
+
+def ooxml_chart_svg(drawing: OoxmlChartDrawing) -> str:
+    """개체 상자에 맞춘 SVG(단위 pt). 글자는 하나씩 놓은 text 요소다."""
+    left, top, width, height = drawing.box
+
+    def xy(point: tuple[float, float]) -> str:
+        return f"{point[0] - left:.3f},{point[1] - top:.3f}"
+
+    def rgb(color: tuple[int, int, int] | None) -> str:
+        return "none" if color is None else "#{:02x}{:02x}{:02x}".format(*color)
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.3f}pt" height="{height:.3f}pt" '
+        f'viewBox="0 0 {width:.3f} {height:.3f}">'
+    ]
+    for shape in drawing.shapes:
+        if shape.kind == "rect":
+            (x0, y0), (x1, y1) = shape.points
+            stroke = f' stroke="{rgb(shape.stroke)}" stroke-width="{shape.width:.3f}"' if shape.stroke else ""
+            parts.append(
+                f'<rect x="{x0 - left:.3f}" y="{y0 - top:.3f}" width="{x1 - x0:.3f}" height="{y1 - y0:.3f}" '
+                f'fill="{rgb(shape.fill)}"{stroke}/>'
+            )
+        elif shape.kind == "line":
+            (x0, y0), (x1, y1) = shape.points
+            parts.append(
+                f'<line x1="{x0 - left:.3f}" y1="{y0 - top:.3f}" x2="{x1 - left:.3f}" y2="{y1 - top:.3f}" '
+                f'stroke="{rgb(shape.stroke)}" stroke-width="{shape.width:.3f}"/>'
+            )
+        else:
+            points = " ".join(xy(point) for point in shape.points)
+            parts.append(f'<polygon points="{points}" fill="{rgb(shape.fill)}"/>')
+    for glyph in drawing.glyphs:
+        char = glyph.char.replace("&", "&amp;").replace("<", "&lt;")
+        parts.append(
+            f'<text x="{glyph.x - left:.3f}" y="{glyph.y - top:.3f}" font-family="{glyph.font}" '
+            f'font-size="{glyph.size:.3f}">{char}</text>'
+        )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+@dataclass(frozen=True)
+class _Series:
+    name: str
+    index: int
+    values: list[float]
+
+
+@dataclass(frozen=True)
+class _Bar2D:
+    categories: list[str]
+    series: list[_Series]
+    gap_width: float
+    size_pt: float
+    face: str
+
+
+def _parse_bar2d(contents: bytes) -> _Bar2D | None:
+    """옮긴 범위(제목 기본 글, 범례 r, 기본 축, 자동 눈금, 묶은 2차원 세로 막대 하나, 기본 색)만 읽는다. 밖이면 None."""
+    try:
+        root = ET.fromstring(contents)
+    except ET.ParseError:
+        return None
+    chart = root.find(_C + "chart")
+    if root.tag != _C + "chartSpace" or chart is None or root.find(_C + "spPr") is not None:
+        return None
+    title = chart.find(_C + "title")
+    if (
+        title is None
+        or title.find(_C + "tx") is not None
+        or title.find(_C + "spPr") is not None
+        or _val(title, "overlay", "0") != "0"
+        or _has_manual_layout(title)
+        or title.find(f".//{_A}defRPr[@sz]") is not None
+        or _val(chart, "autoTitleDeleted", "0") != "0"
+        or chart.find(_C + "view3D") is not None
+    ):
+        return None
+    style = root.find(".//{http://schemas.haansoft.com/office/8.0}hncChartStyle")
+    if style is not None and (style.get("colorIndex", "0") != "0" or style.get("styleIndex", "0") != "0"):
+        return None
+    plot = chart.find(_C + "plotArea")
+    if plot is None or _has_manual_layout(plot):
+        return None
+    kinds = [child for child in plot if child.tag.endswith("Chart")]
+    if len(kinds) != 1 or kinds[0].tag != _C + "barChart":
+        return None
+    bar = kinds[0]
+    if (
+        _val(bar, "barDir") != "col"
+        or _val(bar, "grouping") != "clustered"
+        or _val(bar, "varyColors", "0") != "0"
+        or _val(bar, "overlap", "0") != "0"
+        or bar.find(_C + "dLbls") is not None
+    ):
+        return None
+    cat_axes, val_axes = plot.findall(_C + "catAx"), plot.findall(_C + "valAx")
+    others = [child for child in plot if child.tag in (_C + "serAx", _C + "dateAx")]
+    if len(cat_axes) != 1 or len(val_axes) != 1 or others:
+        return None
+    for axis, position in ((cat_axes[0], "b"), (val_axes[0], "l")):
+        scaling = axis.find(_C + "scaling")
+        if (
+            axis.find(_C + "txPr") is not None
+            or axis.find(_C + "spPr") is not None
+            or axis.find(_C + "title") is not None
+            or _val(axis, "delete", "0") != "0"
+            or _val(axis, "axPos") != position
+            or _val(axis, "tickLblPos", "nextTo") != "nextTo"
+            or _val(axis, "majorTickMark", "out") != "out"
+            or _val(axis, "minorTickMark", "none") != "none"
+            or _val(axis, "crosses", "autoZero") != "autoZero"
+            or _val(scaling, "orientation", "minMax") != "minMax"
+            or (scaling is not None and any(scaling.find(_C + tag) is not None for tag in ("min", "max", "logBase")))
+            or axis.find(_C + "majorUnit") is not None
+            or axis.find(_C + "minorGridlines") is not None
+        ):
+            return None
+    if cat_axes[0].find(_C + "majorGridlines") is not None or val_axes[0].find(_C + "majorGridlines") is None:
+        return None
+    if _val(val_axes[0], "crossBetween", "between") != "between":
+        return None
+    number_format = val_axes[0].find(_C + "numFmt")
+    if number_format is not None and number_format.get("formatCode") != "General":
+        return None
+    legend = chart.find(_C + "legend")
+    if (
+        legend is None
+        or _val(legend, "legendPos", "r") != "r"
+        or _has_manual_layout(legend)
+        or _val(legend, "overlay", "0") != "0"
+        or legend.find(_C + "txPr") is not None
+        or legend.find(_C + "spPr") is not None
+        or legend.find(_C + "legendEntry") is not None
+    ):
+        return None
+    text = root.find(_C + "txPr")
+    body = text.find(_A + "bodyPr") if text is not None else None
+    run = text.find(f".//{_A}defRPr") if text is not None else None
+    latin = run.find(_A + "latin") if run is not None else None
+    east_asian = run.find(_A + "ea") if run is not None else None
+    if (
+        body is None
+        or body.get("vert", "horz") != "horz"
+        or body.get("rot", "0") != "0"
+        or latin is None
+        or (east_asian is not None and east_asian.get("typeface") != latin.get("typeface"))
+        or run.get("b", "0") != "0"
+        or run.get("i", "0") != "0"
+    ):
+        return None
+    series = []
+    categories: list[str] | None = None
+    for ser in bar.findall(_C + "ser"):
+        if any(ser.find(_C + tag) is not None for tag in ("spPr", "dLbls", "trendline", "errBars", "dPt")):
+            return None
+        name = ser.find(f"{_C}tx//{_C}v")
+        cache = ser.find(f"{_C}val/{_C}numRef/{_C}numCache")
+        index = ser.find(_C + "idx")
+        if name is None or name.text is None or cache is None or index is None:
+            return None
+        count = int(_val(cache, "ptCount", "0") or 0)
+        points = {int(point.get("idx", "-1")): point.findtext(_C + "v") for point in cache.findall(_C + "pt")}
+        try:
+            values = [float(points[i] or "") for i in range(count)]
+        except (KeyError, ValueError):
+            return None  # 빈 칸(dispBlanksAs)은 옮기지 않았다
+        labels = [
+            point.findtext(_C + "v") or ""
+            for point in sorted(
+                ser.findall(f"{_C}cat/{_C}strRef/{_C}strCache/{_C}pt"), key=lambda p: int(p.get("idx", "0"))
+            )
+        ]
+        if categories is None:
+            categories = labels
+        if labels != categories or len(values) != len(categories) or int(index.get("val", "-1")) not in range(4):
+            return None
+        series.append(_Series(name.text, int(index.get("val", "0")), values))
+    if not series or not categories:
+        return None
+    return _Bar2D(
+        categories,
+        series,
+        float(_val(bar, "gapWidth", "150") or 150),
+        int(run.get("sz", "1000")) / 100,
+        latin.get("typeface", ""),
+    )
+
+
+def value_axis_scale(low: float, high: float, axis_len: float, label_h: float) -> tuple[float, float, float, int]:
+    """2차원 값 축 자동 눈금(ValueAxisShapeRender FUN_103d1170 -> AxisLayoutUtil::AutoScale 0x102da320).
+
+    (최소, 최대, 주단위, 칸 수). 칸 높이가 라벨 높이*1.085보다 작으면 칸 수를 줄여 다시 맞춘다.
+    """
+    lo, hi, major = low, high, 0.0
+    count = requested = 10
+    while True:
+        lo, hi, major, count = _auto_scale(lo, hi, major, requested)
+        # 문턱은 float로 줄여 비교한다((double)(float)dVar26). 4.3 -> 4.5처럼 차이가 문턱과 같으면 늘린다.
+        threshold = _as_float32(major / _HEADROOM_DIVISOR * (2 if count > 8 else 1))
+        if count != 1 and hi >= major and hi - high <= threshold:
+            hi += major
+            count += 1
+        threshold = _as_float32(major / _HEADROOM_DIVISOR * (2 if count > 9 else 1))
+        if lo < 0 and abs(lo) - abs(low) <= threshold:
+            lo -= major
+            count += 1
+        if count < 2:
+            break
+        if label_h * _LABEL_SPACING <= axis_len / count - label_h:
+            if count < 11:
+                break
+        elif count <= 3:
+            break
+        requested = count - 1
+        if requested <= 0:
+            break
+    return lo, hi, major, count
+
+
+def _as_float32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+def _auto_scale(lo: float, hi: float, major: float, count: int) -> tuple[float, float, float, int]:
+    """AxisLayoutUtil::AutoScale(0x102da320)의 최소·최대·주단위 자동 경우."""
+    if abs(hi) + abs(lo) < major:
+        hi = major
+    if not (lo < hi and count > 0):
+        return lo, hi, major, count
+    divisions = float(count)
+    new_lo, new_hi = lo, hi
+    while divisions > 0:
+        step = (hi - lo) / divisions
+        if step < 1e-31:
+            step = 0.0
+        exponent = int(math.log10(step)) if step > 0 else 0
+        if step < 1.0:
+            exponent -= 1
+        power = 100.0 if exponent == 2 else 10.0**exponent
+        i = 0
+        # 표 0x1055e8e0(√2, √10, √50)과 0x1055e8d0(1, 2, 5, 10)
+        while i < 3 and not (step / power < (1.414214, 3.162278, 7.071068)[i]):
+            i += 1
+        major = (1.0, 2.0, 5.0, 10.0)[i] * power
+        q = lo / major
+        k = int(q) - (1 if q < 0 else 0)
+        if abs((k + 1.0) - q) < 2e-5:
+            k += 1
+        new_lo = min(k * major, lo)
+        q = hi / major
+        k = int(q + 1.0) - (1 if q < -1.0 else 0)
+        if abs((q + 1.0) - k) < 2e-5:
+            k -= 1
+        new_hi = max(k * major, hi)
+        if (new_hi - new_lo) / major <= count:
+            break
+        divisions -= 1.0
+    if divisions <= 1.0:
+        return new_lo, new_hi, new_hi - new_lo, 1
+    return new_lo, new_hi, major, int((new_hi - new_lo) / major + 2e-5)
+
+
+def draw_ooxml_bar_chart(
+    contents: bytes, left: float, top: float, width: float, height: float
+) -> OoxmlChartDrawing | None:
+    """개체 상자(쪽 좌표 pt)에 새 차트 2차원 막대를 엔진처럼 그린다. 옮긴 범위 밖이면 None(미리보기 그림으로 대신)."""
+    chart = _parse_bar2d(contents)
+    if chart is None or chart.size_pt not in _TITLE_PT:
+        return None
+    try:
+        return _draw_bar2d(chart, left, top, width, height)
+    except UnsupportedChart:
+        return None  # 폭·세로 지표 표에 없는 글꼴·글자는 옮긴 범위 밖으로 둔다
+
+
+def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: float) -> OoxmlChartDrawing | None:
+    em_px = lambda pt: pt * 96 / 72  # noqa: E731
+    line_px = lambda pt: _LINE_HEIGHT_RATIO * em_px(pt)  # noqa: E731
+    size = chart.size_pt
+    face = FontFace(chart.face, size)
+    ascent, descent = face.vertical[_HHEA_ASCENT_FIELD], face.vertical[_HHEA_DESCENT_FIELD]
+    base_ratio = ascent / (ascent + descent)
+
+    def text_px(text: str, pt: float = size) -> float:
+        return sum(face.design_advance(char) / face.metric.em * em_px(pt) for char in text)
+
+    drawing = OoxmlChartDrawing((left, top, width, height))
+    to_pt = 72 / 96
+
+    def rect(x0: float, y0: float, x1: float, y1: float, color: tuple[int, int, int]) -> None:
+        corners = ((left + x0 * to_pt, top + y0 * to_pt), (left + x1 * to_pt, top + y1 * to_pt))
+        drawing.shapes.append(OoxmlShape("rect", corners, fill=color))
+
+    def hline(x0: float, x1: float, y: float) -> None:
+        rect(x0, y - _LINE_PX / 2, x1, y + _LINE_PX / 2, _LINE_COLOR)
+
+    def vline(x: float, y0: float, y1: float) -> None:
+        rect(x - _LINE_PX / 2, y0, x + _LINE_PX / 2, y1, _LINE_COLOR)
+
+    def text(value: str, x: float, line_top: float, pt: float = size) -> None:
+        """한 줄 글(왼쪽 x, 줄 위 line_top, px). 기준선 = 줄 위 + 줄높이*ascent/(ascent+descent)."""
+        baseline = line_top + base_ratio * line_px(pt)
+        pen = x
+        for char in value:
+            if char.strip():
+                drawing.glyphs.append(ChartGlyph(char, left + pen * to_pt, top + baseline * to_pt, pt, chart.face))
+            pen += text_px(char, pt)
+
+    box_w, box_h = width * 96 / 72, height * 96 / 72
+    # 차트 영역: 흰 바탕과 1px 테두리
+    rect(0, 0, box_w, box_h, _WHITE)
+    hline(0, box_w, _LINE_PX / 2)
+    hline(0, box_w, box_h - _LINE_PX / 2)
+    vline(_LINE_PX / 2, 0, box_h)
+    vline(box_w - _LINE_PX / 2, 0, box_h)
+
+    # 제목 = 기본 글 「차트 제목」, 높이 = 줄높이 + 5 + 5(FUN_103c5ae0), 가운데
+    title_pt = _TITLE_PT[size]
+    title_h = line_px(title_pt) + 5 + 5
+    title = "차트 제목"
+    text(title, (box_w - text_px(title, title_pt)) / 2, _PLOT_MARGIN_PX + 5, title_pt)
+
+    # 범례(오른쪽): 폭 = 최대 글자폭 + 표식 + 2*여백(FUN_10353770)
+    marker = line_px(size) * _LEGEND_MARKER_RATIO
+    gap = marker * _LEGEND_MARGIN_RATIO
+    legend_w = min(max(text_px(s.name) for s in chart.series) + marker + 2 * gap, box_w / 3)
+    legend_x = box_w - _PLOT_MARGIN_PX - legend_w
+
+    # 그림 영역(FUN_10379410)
+    plot_x0, plot_y0 = _PLOT_MARGIN_PX, title_h + 2 * _PLOT_MARGIN_PX
+    plot_x1 = box_w - legend_w - 2 * _PLOT_MARGIN_PX
+    plot_y1 = box_h - _PLOT_MARGIN_PX
+    if plot_x1 <= plot_x0 or plot_y1 <= plot_y0:
+        return None
+    label_h = line_px(size) + _MEASURE_PAD_PX + _LABEL_PAD_2D_PX
+    axis_top = plot_y0 + label_h / 2
+    axis_y = plot_y1 - (label_h + _CATEGORY_BELOW_PX)
+    if axis_y <= axis_top:
+        return None
+    values = [v for s in chart.series for v in s.values]
+    low, high = min(values + [0.0]), max(values + [0.0])
+    lo, hi, major, count = value_axis_scale(low, high, axis_y - axis_top, label_h)
+    labels = ["%.10g" % (lo + i * major) for i in range(count + 1)]
+    value_w = max(text_px(label) for label in labels)
+    axis_x = plot_x0 + value_w + _LABEL_PAD_2D_PX + _AXIS_LABEL_GAP_PX + _VALUE_AXIS_SHIFT_PX
+    axis_x1 = plot_x1
+    if axis_x1 <= axis_x or hi <= lo:
+        return None
+
+    def y_of(value: float) -> float:
+        return axis_y - (value - lo) / (hi - lo) * (axis_y - axis_top)
+
+    # 격자선·값 라벨·값 축 눈금
+    for i, label in enumerate(labels):
+        y = y_of(lo + i * major)
+        hline(axis_x - _TICK_PX, axis_x1, y)
+        text(label, axis_x - _AXIS_LABEL_GAP_PX - text_px(label), y - line_px(size) / 2)
+    vline(axis_x, axis_top, axis_y + _LINE_PX / 2)
+
+    # 항목 축: 눈금은 항목 경계, 라벨은 항목 가운데
+    n = len(chart.categories)
+    slot = (axis_x1 - axis_x) / n
+    for i in range(n + 1):
+        vline(axis_x + i * slot, axis_y, axis_y + _TICK_PX)
+    for i, name in enumerate(chart.categories):
+        text(name, axis_x + (i + 0.5) * slot - text_px(name) / 2, axis_y + _CATEGORY_TEXT_TOP_PX)
+
+    # 막대: 폭 = 항목 칸 / (계열 수 + 간격 비율), 양쪽 간격 절반씩(gapWidth, overlap 0)
+    bar_w = slot / (len(chart.series) + chart.gap_width / 100)
+    zero = y_of(min(max(0.0, lo), hi))
+    for k, series in enumerate(chart.series):
+        color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
+        for i, value in enumerate(series.values):
+            x0 = axis_x + i * slot + chart.gap_width / 100 * bar_w / 2 + k * bar_w
+            y = y_of(value)
+            rect(x0, min(y, zero), x0 + bar_w, max(y, zero), color)
+
+    # 범례 항목: 표식과 이름, 그림 영역 높이 가운데
+    pitch = _LEGEND_PITCH_PX
+    first = (plot_y0 + plot_y1) / 2 - pitch * len(chart.series) / 2 + _LEGEND_CENTER_SHIFT_PX
+    for k, series in enumerate(chart.series):
+        center = first + (k + 0.5) * pitch
+        rect(
+            legend_x + gap,
+            center - marker / 2,
+            legend_x + gap + marker,
+            center + marker / 2,
+            _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)],
+        )
+        text(
+            series.name,
+            legend_x + gap + marker + _LEGEND_TEXT_GAP_PX,
+            center - line_px(size) / 2 + _LEGEND_TEXT_SHIFT_PX,
+        )
+    return drawing
