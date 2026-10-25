@@ -567,6 +567,8 @@ class _Series:
     #: 표식 모양(triangle, x, star)과 크기 pt. 없으면 None.
     marker: str | None = None
     marker_pt: float = _MARKER_PT
+    #: 분산형 x 값. 다른 차트는 None(항목 차례).
+    xs: list[float] | None = None
 
 
 @dataclass(frozen=True)
@@ -583,6 +585,8 @@ class _Bar2D:
     stacked: bool = False
     #: 꺾은선(lineChart standard): 계열마다 선과 표식.
     line: bool = False
+    #: 직선과 표식이 있는 분산형(scatterChart lineMarker). line도 참이다.
+    scatter: bool = False
     hi_low: bool = False
     up_down: bool = False
 
@@ -694,6 +698,76 @@ def _parse_line(contents: bytes) -> _Bar2D | None:
             return None  # 표식 모양·크기를 정한 것과 곡선은 옮기지 않았다
         series.append(_Series(item.name, item.index, item.values, _AUTO_MARKERS[item.index], _LINE_MARKER_PT))
     return _Bar2D(False, categories, series, 0.0, size_pt, face, line=True)
+
+
+def _parse_scatter(contents: bytes) -> _Bar2D | None:
+    """직선과 표식이 있는 분산형(scatterStyle lineMarker, 기본 값 축 둘, 자동 표식) 기본 모양만 읽는다. 밖이면 None."""
+    frame = _chart_frame(contents)
+    if frame is None:
+        return None
+    plot, size_pt, face = frame
+    kinds = [child for child in plot if child.tag.endswith("Chart")]
+    axes = plot.findall(_C + "valAx")
+    if len(kinds) != 1 or kinds[0].tag != _C + "scatterChart" or plot.find(_C + "catAx") is not None:
+        return None
+    group = kinds[0]
+    if _val(group, "scatterStyle") != "lineMarker" or _val(group, "varyColors", "0") != "0":
+        return None
+    if sorted(_val(axis, "axPos") or "" for axis in axes) != ["b", "l"]:
+        return None
+    for axis in axes:
+        gridlines = _val(axis, "axPos") == "l"
+        if not _plain_value_axis(axis) or (axis.find(_C + "majorGridlines") is not None) != gridlines:
+            return None
+    series = []
+    for ser in group.findall(_C + "ser"):
+        index, name = ser.find(_C + "idx"), ser.find(f"{_C}tx//{_C}v")
+        if index is None or name is None or name.text is None:
+            return None
+        number = int(index.get("val", "-1"))
+        extra = ("spPr", "marker", "dLbls", "trendline", "errBars", "dPt")
+        if any(ser.find(_C + tag) is not None for tag in extra) or _val(ser, "smooth", "0") != "0":
+            return None
+        xs, ys = _number_cache(ser.find(_C + "xVal")), _number_cache(ser.find(_C + "yVal"))
+        if xs is None or ys is None or len(xs) != len(ys) or not ys or number not in _AUTO_MARKERS:
+            return None
+        series.append(_Series(name.text, number, ys, _AUTO_MARKERS[number], _LINE_MARKER_PT, xs))
+    if not series:
+        return None
+    return _Bar2D(False, [], series, 0.0, size_pt, face, line=True, scatter=True)
+
+
+def _plain_value_axis(axis: ET.Element) -> bool:
+    """자동 눈금, 바깥 눈금 표시, 일반 숫자 서식인 값 축인가."""
+    scaling = axis.find(_C + "scaling")
+    number_format = axis.find(_C + "numFmt")
+    return not (
+        any(axis.find(_C + tag) is not None for tag in ("txPr", "spPr", "title", "majorUnit", "minorGridlines"))
+        or _val(axis, "delete", "0") != "0"
+        or _val(axis, "tickLblPos", "nextTo") != "nextTo"
+        or _val(axis, "majorTickMark", "out") != "out"
+        or _val(axis, "minorTickMark", "none") != "none"
+        or _val(axis, "crosses", "autoZero") != "autoZero"
+        or _val(scaling, "orientation", "minMax") != "minMax"
+        or (scaling is not None and any(scaling.find(_C + tag) is not None for tag in ("min", "max", "logBase")))
+        or (number_format is not None and number_format.get("formatCode") != "General")
+    )
+
+
+def _number_cache(values: ET.Element | None) -> list[float] | None:
+    """numRef 캐시나 numLit의 값 목록. 빈 칸이 있거나 숫자가 아니면 None."""
+    if values is None:
+        return None
+    cache = values.find(f"{_C}numRef/{_C}numCache")
+    if cache is None:
+        cache = values.find(_C + "numLit")
+    if cache is None:
+        return None
+    points = {int(point.get("idx", "-1")): point.findtext(_C + "v") for point in cache.findall(_C + "pt")}
+    try:
+        return [float(points[i] or "") for i in range(int(_val(cache, "ptCount", "0") or 0))]
+    except (KeyError, ValueError):
+        return None
 
 
 def _chart_frame(contents: bytes) -> tuple[ET.Element, float, str] | None:
@@ -909,7 +983,7 @@ def draw_ooxml_bar_chart(
     contents: bytes, left: float, top: float, width: float, height: float
 ) -> OoxmlChartDrawing | None:
     """개체 상자(쪽 좌표 pt)에 새 차트 2차원 막대를 엔진처럼 그린다. 옮긴 범위 밖이면 None(미리보기 그림으로 대신)."""
-    chart = _parse_bar2d(contents) or _parse_stock(contents) or _parse_line(contents)
+    chart = _parse_bar2d(contents) or _parse_stock(contents) or _parse_line(contents) or _parse_scatter(contents)
     if chart is None or chart.size_pt not in _TITLE_PT:
         return None
     try:
@@ -1011,7 +1085,9 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
         values = [sum(column) for column in zip(*(s.values for s in chart.series), strict=True)]
     low, high = min(values + [0.0]), max(values + [0.0])
     place = (
-        _place_stock
+        _place_scatter
+        if chart.scatter
+        else _place_stock
         if chart.stock
         else _place_line
         if chart.line
@@ -1225,6 +1301,65 @@ def _place_line(chart: _Bar2D, plot, label_h: float, low: float, high: float, te
     for series in chart.series:
         color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
         points = [(axis_x + (i + 0.5) * slot, y_of(value)) for i, value in enumerate(series.values)]
+        for (x0, y0), (x1, y1) in itertools.pairwise(points):
+            placed.append(("series", x0, y0, x1, y1, color))
+        for x, y in points:
+            placed.append(("marker", series.marker, x, y, series.marker_pt, color))
+    return placed
+
+
+def _place_scatter(chart: _Bar2D, plot, label_h: float, low: float, high: float, text_px) -> list[tuple] | None:
+    """분산형: y 값 축 왼쪽(격자선), x 값 축 아래(눈금 표시만), 점을 잇는 선과 표식."""
+    plot_x0, plot_y0, plot_x1, plot_y1 = plot
+    placed: list[tuple] = []
+    axis_top = plot_y0 + label_h / 2
+    axis_y = plot_y1 - (label_h + _VALUE_BELOW_PX)
+    if axis_y <= axis_top:
+        return None
+    y_lo, y_hi, y_major, y_count = value_axis_scale(low, high, axis_y - axis_top, label_h)
+    y_labels = [f"{y_lo + i * y_major:.10g}" for i in range(y_count + 1)]
+    axis_x = plot_x0 + max(text_px(label) for label in y_labels) + _LABEL_PAD_2D_PX + _AXIS_LABEL_GAP_PX
+    axis_x += _VALUE_AXIS_SHIFT_PX
+    xs = [x for series in chart.series for x in series.xs or []]
+    x_low, x_high = min(xs + [0.0]), max(xs + [0.0])
+
+    def label_w(value: float) -> float:
+        return text_px(f"{value:.10g}") + _MEASURE_PAD_PX + _LABEL_PAD_2D_PX
+
+    # 오른쪽 끝은 마지막 x 라벨 폭의 절반만큼 비운다(가로 막대와 같은 실측). 눈금이 바뀌면 다시 맞춘다.
+    right, widest = plot_x1, label_w(x_high)
+    x_lo = x_hi = x_major = 0.0
+    x_count = 0
+    for _ in range(4):
+        x_lo, x_hi, x_major, x_count = value_axis_scale(x_low, x_high, right - axis_x, widest, True)
+        widest = max(label_w(x_lo + i * x_major) for i in range(x_count + 1))
+        if right == plot_x1 - label_w(x_hi) / 2:
+            break
+        right = plot_x1 - label_w(x_hi) / 2
+    if right <= axis_x or y_hi <= y_lo or x_hi <= x_lo:
+        return None
+
+    def x_of(value: float) -> float:
+        return axis_x + (value - x_lo) / (x_hi - x_lo) * (right - axis_x)
+
+    def y_of(value: float) -> float:
+        return axis_y - (value - y_lo) / (y_hi - y_lo) * (axis_y - axis_top)
+
+    for i, label in enumerate(y_labels):
+        y = y_of(y_lo + i * y_major)
+        placed.append(("h", axis_x - _TICK_PX, right, y))
+        placed.append(("text", label, axis_x - _AXIS_LABEL_GAP_PX - text_px(label), y))
+    placed.append(("v", axis_x, axis_top, axis_y + _LINE_PX / 2))
+    line_h = _LINE_HEIGHT_RATIO * chart.size_pt * 96 / 72
+    for i in range(x_count + 1):
+        value = x_lo + i * x_major
+        x = x_of(value)
+        label = f"{value:.10g}"
+        placed.append(("v", x, axis_y, axis_y + _TICK_PX))
+        placed.append(("text", label, x - text_px(label) / 2, axis_y + _VALUE_TEXT_TOP_PX + line_h / 2))
+    for series in chart.series:
+        color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
+        points = [(x_of(x), y_of(y)) for x, y in zip(series.xs or [], series.values, strict=True)]
         for (x0, y0), (x1, y1) in itertools.pairwise(points):
             placed.append(("series", x0, y0, x1, y1, color))
         for x, y in points:

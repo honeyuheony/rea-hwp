@@ -119,3 +119,15 @@ def test_line_chart_marks_every_point_and_legend_key():
     # 항목 5 x 계열 3 표식과 범례 표식 3(마름모·네모·세모)
     assert svg.count("<polygon") == 18
     assert svg.count('stroke-width="2.250"') == 3 * 4 + 3
+
+
+SCATTER_POINT_ADDED_DOC = CORPUS / "issue5447__직선및표식이있는분산형-점추가.hwp"
+
+
+@pytest.mark.skipif(not SCATTER_POINT_ADDED_DOC.exists(), reason="corpus not available")
+def test_scatter_chart_x_axis_reaches_added_point():
+    page = layout_document(HwpDocument.open(SCATTER_POINT_ADDED_DOC))[0]
+
+    [svg] = chart_svgs(page)
+    # 한글 정답 PDF: 더한 점 x=9 -> x 축 0~10, 주단위 1
+    assert "012345678910" in svg_text(svg)
