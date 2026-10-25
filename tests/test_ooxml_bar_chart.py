@@ -65,3 +65,19 @@ def test_chart_with_custom_series_style_keeps_preview_picture():
     [svg] = chart_svgs(pages[23])
     assert "<image" in svg
     assert "<text" not in svg
+
+
+SINGLE_SERIES_BAR_DOC = CORPUS / "chart__특이케이스__가로막대형_하나만있을떄_단일시리즈제목.hwp"
+
+
+def test_horizontal_value_axis_adds_step_when_maximum_sits_on_float_threshold():
+    # 한글 정답 PDF: 가로 막대 최댓값 4.3 -> 0~5, 주단위 0.5(4.5-4.3이 문턱 0.2와 float로 같다)
+    assert value_axis_scale(0.0, 4.3, 300.0, 20.0, True) == (0.0, 5.0, 0.5, 10)
+
+
+@pytest.mark.skipif(not SINGLE_SERIES_BAR_DOC.exists(), reason="corpus not available")
+def test_single_series_bar_chart_titles_with_series_name():
+    page = layout_document(HwpDocument.open(SINGLE_SERIES_BAR_DOC))[0]
+
+    [svg] = chart_svgs(page)
+    assert svg_text(svg).startswith("계열1")

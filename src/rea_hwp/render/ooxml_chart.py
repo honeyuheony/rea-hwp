@@ -475,6 +475,11 @@ _LEGEND_PITCH_PX = 18.0
 _LEGEND_CENTER_SHIFT_PX = -2.0
 _LEGEND_TEXT_GAP_PX = 4.8
 _LEGEND_TEXT_SHIFT_PX = -1.9
+#: 정답 PDF 실측(가로 막대): 값 라벨 칸 아래 여백, 축에서 값 글 줄 위까지, 항목 축 x 보정, 항목 라벨과 축 사이.
+_VALUE_BELOW_PX = 9.0
+_VALUE_TEXT_TOP_PX = 13.1
+_CATEGORY_AXIS_SHIFT_PX = 2.4
+_CATEGORY_LABEL_GAP_PX = 14.4
 
 
 @dataclass(frozen=True)
@@ -546,6 +551,7 @@ class _Series:
 
 @dataclass(frozen=True)
 class _Bar2D:
+    horizontal: bool
     categories: list[str]
     series: list[_Series]
     gap_width: float
@@ -585,7 +591,7 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
         return None
     bar = kinds[0]
     if (
-        _val(bar, "barDir") != "col"
+        _val(bar, "barDir") not in ("col", "bar")
         or _val(bar, "grouping") != "clustered"
         or _val(bar, "varyColors", "0") != "0"
         or _val(bar, "overlap", "0") != "0"
@@ -596,7 +602,8 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
     others = [child for child in plot if child.tag in (_C + "serAx", _C + "dateAx")]
     if len(cat_axes) != 1 or len(val_axes) != 1 or others:
         return None
-    for axis, position in ((cat_axes[0], "b"), (val_axes[0], "l")):
+    horizontal = _val(bar, "barDir") == "bar"
+    for axis, position in ((cat_axes[0], "l" if horizontal else "b"), (val_axes[0], "b" if horizontal else "l")):
         scaling = axis.find(_C + "scaling")
         if (
             axis.find(_C + "txPr") is not None
@@ -653,7 +660,10 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
         if any(ser.find(_C + tag) is not None for tag in ("spPr", "dLbls", "trendline", "errBars", "dPt")):
             return None
         name = ser.find(f"{_C}tx//{_C}v")
+        # 값·항목은 참조 캐시(numRef/strRef)나 글자 그대로(numLit/strLit)로 저장된다
         cache = ser.find(f"{_C}val/{_C}numRef/{_C}numCache")
+        if cache is None:
+            cache = ser.find(f"{_C}val/{_C}numLit")
         index = ser.find(_C + "idx")
         if name is None or name.text is None or cache is None or index is None:
             return None
@@ -666,7 +676,8 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
         labels = [
             point.findtext(_C + "v") or ""
             for point in sorted(
-                ser.findall(f"{_C}cat/{_C}strRef/{_C}strCache/{_C}pt"), key=lambda p: int(p.get("idx", "0"))
+                ser.findall(f"{_C}cat/{_C}strRef/{_C}strCache/{_C}pt") + ser.findall(f"{_C}cat/{_C}strLit/{_C}pt"),
+                key=lambda p: int(p.get("idx", "0")),
             )
         ]
         if categories is None:
@@ -677,6 +688,7 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
     if not series or not categories:
         return None
     return _Bar2D(
+        horizontal,
         categories,
         series,
         float(_val(bar, "gapWidth", "150") or 150),
@@ -685,10 +697,12 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
     )
 
 
-def value_axis_scale(low: float, high: float, axis_len: float, label_h: float) -> tuple[float, float, float, int]:
+def value_axis_scale(
+    low: float, high: float, axis_len: float, label_size: float, horizontal: bool = False
+) -> tuple[float, float, float, int]:
     """2차원 값 축 자동 눈금(ValueAxisShapeRender FUN_103d1170 -> AxisLayoutUtil::AutoScale 0x102da320).
 
-    (최소, 최대, 주단위, 칸 수). 칸 높이가 라벨 높이*1.085보다 작으면 칸 수를 줄여 다시 맞춘다.
+    (최소, 최대, 주단위, 칸 수). 칸이 라벨(세로 축은 높이*1.085, 가로 축은 폭)보다 작으면 칸 수를 줄여 다시 맞춘다.
     """
     lo, hi, major = low, high, 0.0
     count = requested = 10
@@ -705,7 +719,10 @@ def value_axis_scale(low: float, high: float, axis_len: float, label_h: float) -
             count += 1
         if count < 2:
             break
-        if label_h * _LABEL_SPACING <= axis_len / count - label_h:
+        if horizontal:
+            if label_size <= axis_len / count and count < 11:
+                break
+        elif label_size * _LABEL_SPACING <= axis_len / count - label_size:
             if count < 11:
                 break
         elif count <= 3:
@@ -816,7 +833,8 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
     # 제목 = 기본 글 「차트 제목」, 높이 = 줄높이 + 5 + 5(FUN_103c5ae0), 가운데
     title_pt = _TITLE_PT[size]
     title_h = line_px(title_pt) + 5 + 5
-    title = "차트 제목"
+    # 계열이 하나면 기본 제목은 계열 이름이다(정답 PDF: 가로막대형_하나만있을떄_단일시리즈제목)
+    title = chart.series[0].name if len(chart.series) == 1 else "차트 제목"
     text(title, (box_w - text_px(title, title_pt)) / 2, _PLOT_MARGIN_PX + 5, title_pt)
 
     # 범례(오른쪽): 폭 = 최대 글자폭 + 표식 + 2*여백(FUN_10353770)
@@ -832,52 +850,28 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
     if plot_x1 <= plot_x0 or plot_y1 <= plot_y0:
         return None
     label_h = line_px(size) + _MEASURE_PAD_PX + _LABEL_PAD_2D_PX
-    axis_top = plot_y0 + label_h / 2
-    axis_y = plot_y1 - (label_h + _CATEGORY_BELOW_PX)
-    if axis_y <= axis_top:
-        return None
     values = [v for s in chart.series for v in s.values]
     low, high = min(values + [0.0]), max(values + [0.0])
-    lo, hi, major, count = value_axis_scale(low, high, axis_y - axis_top, label_h)
-    labels = ["%.10g" % (lo + i * major) for i in range(count + 1)]
-    value_w = max(text_px(label) for label in labels)
-    axis_x = plot_x0 + value_w + _LABEL_PAD_2D_PX + _AXIS_LABEL_GAP_PX + _VALUE_AXIS_SHIFT_PX
-    axis_x1 = plot_x1
-    if axis_x1 <= axis_x or hi <= lo:
+    place = _place_horizontal_bars if chart.horizontal else _place_vertical_bars
+    placed = place(chart, (plot_x0, plot_y0, plot_x1, plot_y1), label_h, low, high, text_px)
+    if placed is None:
         return None
-
-    def y_of(value: float) -> float:
-        return axis_y - (value - lo) / (hi - lo) * (axis_y - axis_top)
-
-    # 격자선·값 라벨·값 축 눈금
-    for i, label in enumerate(labels):
-        y = y_of(lo + i * major)
-        hline(axis_x - _TICK_PX, axis_x1, y)
-        text(label, axis_x - _AXIS_LABEL_GAP_PX - text_px(label), y - line_px(size) / 2)
-    vline(axis_x, axis_top, axis_y + _LINE_PX / 2)
-
-    # 항목 축: 눈금은 항목 경계, 라벨은 항목 가운데
-    n = len(chart.categories)
-    slot = (axis_x1 - axis_x) / n
-    for i in range(n + 1):
-        vline(axis_x + i * slot, axis_y, axis_y + _TICK_PX)
-    for i, name in enumerate(chart.categories):
-        text(name, axis_x + (i + 0.5) * slot - text_px(name) / 2, axis_y + _CATEGORY_TEXT_TOP_PX)
-
-    # 막대: 폭 = 항목 칸 / (계열 수 + 간격 비율), 양쪽 간격 절반씩(gapWidth, overlap 0)
-    bar_w = slot / (len(chart.series) + chart.gap_width / 100)
-    zero = y_of(min(max(0.0, lo), hi))
-    for k, series in enumerate(chart.series):
-        color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
-        for i, value in enumerate(series.values):
-            x0 = axis_x + i * slot + chart.gap_width / 100 * bar_w / 2 + k * bar_w
-            y = y_of(value)
-            rect(x0, min(y, zero), x0 + bar_w, max(y, zero), color)
+    for kind, *args in placed:
+        if kind == "h":
+            hline(*args)
+        elif kind == "v":
+            vline(*args)
+        elif kind == "text":
+            label, x, line_center = args
+            text(label, x, line_center - line_px(size) / 2)
+        else:
+            rect(*args)
 
     # 범례 항목: 표식과 이름, 그림 영역 높이 가운데
     pitch = _LEGEND_PITCH_PX
     first = (plot_y0 + plot_y1) / 2 - pitch * len(chart.series) / 2 + _LEGEND_CENTER_SHIFT_PX
-    for k, series in enumerate(chart.series):
+    # 가로 막대는 범례를 계열 역순으로 적는다(정답 PDF)
+    for k, series in enumerate(reversed(chart.series) if chart.horizontal else chart.series):
         center = first + (k + 0.5) * pitch
         rect(
             legend_x + gap,
@@ -892,3 +886,100 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
             center - line_px(size) / 2 + _LEGEND_TEXT_SHIFT_PX,
         )
     return drawing
+
+
+def _place_vertical_bars(chart: _Bar2D, plot, label_h: float, low: float, high: float, text_px) -> list[tuple] | None:
+    """세로 막대: 값 축 왼쪽, 항목 축 아래. ("h"|"v", 선) / ("text", 글, x, 줄 가운데 y) / ("rect", 사각형, 색), px."""
+    plot_x0, plot_y0, plot_x1, plot_y1 = plot
+    placed: list[tuple] = []
+    axis_top = plot_y0 + label_h / 2
+    axis_y = plot_y1 - (label_h + _CATEGORY_BELOW_PX)
+    if axis_y <= axis_top:
+        return None
+    lo, hi, major, count = value_axis_scale(low, high, axis_y - axis_top, label_h)
+    labels = ["%.10g" % (lo + i * major) for i in range(count + 1)]
+    value_w = max(text_px(label) for label in labels)
+    axis_x = plot_x0 + value_w + _LABEL_PAD_2D_PX + _AXIS_LABEL_GAP_PX + _VALUE_AXIS_SHIFT_PX
+    if plot_x1 <= axis_x or hi <= lo:
+        return None
+
+    def y_of(value: float) -> float:
+        return axis_y - (value - lo) / (hi - lo) * (axis_y - axis_top)
+
+    # 격자선·값 라벨·값 축 눈금
+    for i, label in enumerate(labels):
+        y = y_of(lo + i * major)
+        placed.append(("h", axis_x - _TICK_PX, plot_x1, y))
+        placed.append(("text", label, axis_x - _AXIS_LABEL_GAP_PX - text_px(label), y))
+    placed.append(("v", axis_x, axis_top, axis_y + _LINE_PX / 2))
+    # 항목 축: 눈금은 항목 경계, 라벨은 항목 가운데
+    n = len(chart.categories)
+    slot = (plot_x1 - axis_x) / n
+    for i in range(n + 1):
+        placed.append(("v", axis_x + i * slot, axis_y, axis_y + _TICK_PX))
+    line_center = axis_y + _CATEGORY_TEXT_TOP_PX + _LINE_HEIGHT_RATIO * chart.size_pt * 96 / 72 / 2
+    for i, name in enumerate(chart.categories):
+        placed.append(("text", name, axis_x + (i + 0.5) * slot - text_px(name) / 2, line_center))
+    # 막대: 폭 = 항목 칸 / (계열 수 + 간격 비율), 양쪽 간격 절반씩(gapWidth, overlap 0)
+    bar_w = slot / (len(chart.series) + chart.gap_width / 100)
+    zero = y_of(min(max(0.0, lo), hi))
+    for k, series in enumerate(chart.series):
+        color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
+        for i, value in enumerate(series.values):
+            x0 = axis_x + i * slot + chart.gap_width / 100 * bar_w / 2 + k * bar_w
+            y = y_of(value)
+            placed.append(("rect", x0, min(y, zero), x0 + bar_w, max(y, zero), color))
+    return placed
+
+
+def _place_horizontal_bars(chart: _Bar2D, plot, label_h: float, low: float, high: float, text_px) -> list[tuple] | None:
+    """가로 막대: 항목 축 왼쪽(아래에서 위로), 값 축 아래, 격자선 세로. 반환 형식은 _place_vertical_bars와 같다."""
+    plot_x0, plot_y0, plot_x1, plot_y1 = plot
+    placed: list[tuple] = []
+    category_w = max(text_px(name) for name in chart.categories)
+    axis_x = plot_x0 + category_w + _LABEL_PAD_2D_PX + _AXIS_LABEL_GAP_PX + _CATEGORY_AXIS_SHIFT_PX
+    axis_y = plot_y1 - (label_h + _VALUE_BELOW_PX)
+    axis_top = plot_y0
+
+    def label_w(value: float) -> float:
+        return text_px(f"{value:.10g}") + _MEASURE_PAD_PX + _LABEL_PAD_2D_PX
+
+    # 오른쪽 끝은 마지막 값 라벨 폭의 절반만큼 비운다(정답 PDF 실측). 눈금이 바뀌면 다시 맞춘다.
+    right, widest = plot_x1, label_w(high)
+    lo = hi = major = 0.0
+    count = 0
+    for _ in range(4):
+        lo, hi, major, count = value_axis_scale(low, high, right - axis_x, widest, True)
+        widest = max(label_w(lo + i * major) for i in range(count + 1))
+        if right == plot_x1 - label_w(hi) / 2:
+            break
+        right = plot_x1 - label_w(hi) / 2
+    if right <= axis_x or axis_y <= axis_top or hi <= lo:
+        return None
+
+    def x_of(value: float) -> float:
+        return axis_x + (value - lo) / (hi - lo) * (right - axis_x)
+
+    line_h = _LINE_HEIGHT_RATIO * chart.size_pt * 96 / 72
+    for i in range(count + 1):
+        value = lo + i * major
+        x = x_of(value)
+        placed.append(("v", x, axis_top, axis_y + _TICK_PX))
+        label = f"{value:.10g}"
+        placed.append(("text", label, x - text_px(label) / 2, axis_y + _VALUE_TEXT_TOP_PX + line_h / 2))
+    placed.append(("h", axis_x, right + _LINE_PX / 2, axis_y))
+    n = len(chart.categories)
+    slot = (axis_y - axis_top) / n
+    for i in range(n + 1):
+        placed.append(("h", axis_x - _TICK_PX, axis_x, axis_y - i * slot))
+    for i, name in enumerate(chart.categories):
+        placed.append(("text", name, axis_x - _CATEGORY_LABEL_GAP_PX - text_px(name), axis_y - (i + 0.5) * slot))
+    bar_h = slot / (len(chart.series) + chart.gap_width / 100)
+    zero = x_of(min(max(0.0, lo), hi))
+    for k, series in enumerate(chart.series):
+        color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
+        for i, value in enumerate(series.values):
+            y1 = axis_y - i * slot - chart.gap_width / 100 * bar_h / 2 - k * bar_h
+            x = x_of(value)
+            placed.append(("rect", min(x, zero), y1 - bar_h, max(x, zero), y1, color))
+    return placed
