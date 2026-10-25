@@ -57,7 +57,13 @@ from .equation.glyphs import EQUATION_FONT, glyph_table
 from .equation.legacy_draw import LegacyLine, draw_legacy
 from .forms import draw_form
 from .ole import content_metafile, has_ooxml_chart
-from .ooxml_chart import draw_ooxml_chart, ooxml_chart_contents
+from .ooxml_chart import (
+    OoxmlChartDrawing,
+    draw_ooxml_bar_chart,
+    draw_ooxml_chart,
+    ooxml_chart_contents,
+    ooxml_chart_svg,
+)
 from .raster import image_mime, pixel_size, png_from_raster
 from .reflow import ASCENT_PERCENT, RANGE_GRID
 from .scene import Glyph, Image, Line, MissingObject, Rect
@@ -841,9 +847,12 @@ class ObjectsMixin:
         ole = component.find(tags.SHAPE_COMPONENT_OLE)
         if ole is not None and isinstance(ole.model, ShapeOle):
             chart = self.chart_drawing(ole.model.bin_data_id, left, top, width, height)
-            drawing = self.ole_drawing(ole.model.bin_data_id) if chart is None else None
+            ooxml = self.ooxml_chart_drawing(ole.model.bin_data_id, left, top, width, height) if chart is None else None
+            drawing = self.ole_drawing(ole.model.bin_data_id) if chart is None and ooxml is None else None
             if chart is not None:
                 self.draw_chart(state, chart)
+            elif ooxml is not None:
+                self.draw_ooxml_chart(state, ooxml)
             elif drawing is not None:
                 self.draw_metafile(state, drawing, left, top, width, height)
                 # 새 차트는 도형을 비트맵으로 찍고 기울어진 범주 이름만 글자로 찍는다. 도형은 표현 그림으로 대신한다.
@@ -1075,17 +1084,30 @@ class ObjectsMixin:
             return None
         return draw_vtchart(contents[bin_data_id], left / 100, top / 100, width / 100, height / 100)
 
-    def ooxml_chart_labels(
+    def ooxml_chart_drawing(
         self, bin_data_id: int, left: float, top: float, width: float, height: float
-    ) -> ChartDrawing | None:
-        """새 차트(OOXMLChartContents)가 PDF 글자로 찍는 기울어진 범주 이름. 새 차트가 아니거나 범위 밖이면 None."""
+    ) -> OoxmlChartDrawing | None:
+        """새 차트를 미리보기 그림 대신 엔진처럼 다시 그린 것. 새 차트가 아니거나 옮긴 범위 밖이면 None."""
+        contents = self.ooxml_contents(bin_data_id)
+        if contents is None:
+            return None
+        return draw_ooxml_bar_chart(contents, left / 100, top / 100, width / 100, height / 100)
+
+    def ooxml_contents(self, bin_data_id: int) -> bytes | None:
         contents = self.__dict__.setdefault("_ooxml_chart_contents", {})
         if bin_data_id not in contents:
             data = self.bin_bytes(bin_data_id)
             contents[bin_data_id] = ooxml_chart_contents(data) if data is not None else None
-        if contents[bin_data_id] is None:
+        return contents[bin_data_id]
+
+    def ooxml_chart_labels(
+        self, bin_data_id: int, left: float, top: float, width: float, height: float
+    ) -> ChartDrawing | None:
+        """새 차트(OOXMLChartContents)가 PDF 글자로 찍는 기울어진 범주 이름. 새 차트가 아니거나 범위 밖이면 None."""
+        contents = self.ooxml_contents(bin_data_id)
+        if contents is None:
             return None
-        return draw_ooxml_chart(contents[bin_data_id], left / 100, top / 100, width / 100, height / 100)
+        return draw_ooxml_chart(contents, left / 100, top / 100, width / 100, height / 100)
 
     def draw_chart(self, state: PageState, chart: ChartDrawing) -> None:
         for shape in chart.shapes:
@@ -1100,6 +1122,13 @@ class ObjectsMixin:
             state.page.items.append(
                 Glyph(glyph.char, glyph.x * 100, glyph.y * 100, glyph.size * 100, glyph.font, rotation=glyph.angle)
             )
+
+    def draw_ooxml_chart(self, state: PageState, chart: OoxmlChartDrawing) -> None:
+        # 한글 PDF처럼 차트 글자도 그림의 일부로 둔다(쪽 글자 층·복사 대상이 아니다).
+        svg = ooxml_chart_svg(chart)
+        href = f"data:image/svg+xml;base64,{base64.b64encode(svg.encode('utf-8')).decode('ascii')}"
+        x, y, width, height = chart.box
+        state.page.items.append(Image(x * 100, y * 100, width * 100, height * 100, href))
 
     def textart_drawing(self, node: Node, width: float, height: float) -> TextArtDrawing | None:
         """글맵시 윤곽. 글꼴 파일이 없거나 아직 옮기지 못한 모양(원·여러 줄·HFT)이면 None이고 범위 밖으로 남긴다."""
