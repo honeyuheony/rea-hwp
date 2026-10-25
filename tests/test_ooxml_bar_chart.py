@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import re
+import signal
 
 import pytest
 from corpus_paths import CORPUS_ROOT
 
 from rea_hwp.document import HwpDocument
+from rea_hwp.render.chart import UnsupportedChart
 from rea_hwp.render.layout import layout_document
-from rea_hwp.render.ooxml_chart import value_axis_scale
+from rea_hwp.render.ooxml_chart import draw_ooxml_bar_chart, ooxml_chart_contents, value_axis_scale
 from rea_hwp.render.scene import Image
 
 CORPUS = CORPUS_ROOT / "oss" / "rhwp"
@@ -143,3 +146,74 @@ def test_stock_chart_draws_series_without_shape_as_line():
     [svg] = chart_svgs(page)
     # 모양(spPr) 없는 추가계열은 노란 2.25pt 선: 항목 사이 3개와 범례 1개
     assert svg.count('stroke="#ffd700" stroke-width="2.250"') == 4
+
+
+STACKED_DOC = CORPUS / "issue5447__누적세로막대형-계열삭제.hwp"
+_NUMBER = re.compile(r"(<c:v>)-?[0-9.]+(</c:v>)")
+
+
+@contextlib.contextmanager
+def time_limit(seconds: int):
+    def stop(signum, frame):
+        raise TimeoutError(f"{seconds}초 안에 끝나지 않았다")
+
+    previous = signal.signal(signal.SIGALRM, stop)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def chart_xml(path) -> str:
+    document = HwpDocument.open(path)
+    for bin_data_id in range(1, len(document.styles.bin_data) + 1):
+        item = document.bin_data(bin_data_id)
+        contents = ooxml_chart_contents(item.data) if item is not None else None
+        if contents is not None:
+            return contents.decode("utf-8")
+    raise AssertionError(f"새 차트가 없다: {path}")
+
+
+def first_value(xml: str, text: str) -> str:
+    return _NUMBER.sub(lambda m: m.group(1) + text + m.group(2), xml, count=1)
+
+
+def draw(xml: str):
+    with time_limit(5):
+        return draw_ooxml_bar_chart(xml.encode("utf-8"), 0.0, 0.0, 322.5, 187.5)
+
+
+@pytest.mark.parametrize(("low", "high"), [(0.0, 0.0), (float("nan"), 1.0), (0.0, float("inf")), (0.0, float("nan"))])
+def test_value_axis_scale_refuses_ranges_it_cannot_scale(low, high):
+    with time_limit(5), pytest.raises(UnsupportedChart):
+        value_axis_scale(low, high, 147.7, 23.67)
+
+
+@pytest.mark.skipif(not SERIES_REMOVED_DOC.exists(), reason="corpus not available")
+@pytest.mark.parametrize(
+    "broken",
+    [
+        lambda xml: _NUMBER.sub(r"\g<1>0\g<2>", xml),
+        lambda xml: first_value(xml, "NaN"),
+        lambda xml: first_value(xml, "INF"),
+        lambda xml: first_value(xml, "1e300"),
+        lambda xml: xml.replace('<c:gapWidth val="150"/>', '<c:gapWidth val="150%"/>'),
+        lambda xml: xml.replace('<c:idx val="0"/>', '<c:idx val="x"/>', 1),
+    ],
+    ids=["all-zero", "nan", "inf", "1e300", "strict-percent", "bad-idx"],
+)
+def test_broken_chart_numbers_fall_back_to_preview(broken):
+    xml = chart_xml(SERIES_REMOVED_DOC)
+    assert draw(xml) is not None
+
+    assert draw(broken(xml)) is None
+
+
+@pytest.mark.skipif(not STACKED_DOC.exists(), reason="corpus not available")
+def test_stacked_column_with_negative_value_falls_back_to_preview():
+    xml = chart_xml(STACKED_DOC)
+    assert draw(xml) is not None
+
+    assert draw(first_value(xml, "-3")) is None

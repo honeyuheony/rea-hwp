@@ -46,6 +46,18 @@ _DEVICE_DPI = 600.0
 _HHEA_ASCENT_FIELD, _HHEA_DESCENT_FIELD = 3, 2
 
 
+#: 차트 값으로 받는 절댓값 상한. float32(문턱 비교)와 눈금 계산이 넘치지 않는 범위로 둔다(엔진 근거 없음, 안전장치).
+_VALUE_LIMIT = 1e30
+
+
+def _chart_number(text: str | None) -> float:
+    """저장된 값 글자를 수로 읽는다. 유한하지 않거나 _VALUE_LIMIT를 넘으면 ValueError(미리보기 그림으로 돌린다)."""
+    value = float(text or "")
+    if not math.isfinite(value) or abs(value) > _VALUE_LIMIT:
+        raise ValueError(f"차트 값이 범위 밖이다: {text!r}")
+    return value
+
+
 def ooxml_chart_contents(bin_data: bytes) -> bytes | None:
     body = io.BytesIO(bin_data[_LENGTH_PREFIX:])
     if not olefile.isOleFile(body):
@@ -234,7 +246,7 @@ def _parse_supported(contents: bytes) -> _Bar3D | None:
             return None
         names.append(name.text)
         try:
-            values += [float(point.text or "") for point in cache.iter(_C + "v")]
+            values += [_chart_number(point.text) for point in cache.iter(_C + "v")]
         except ValueError:
             return None
     points = series[0].findall(f"{_C}cat/{_C}strRef/{_C}strCache/{_C}pt")
@@ -254,7 +266,10 @@ def _parse_supported(contents: bytes) -> _Bar3D | None:
 
 def draw_ooxml_chart(contents: bytes, left: float, top: float, width: float, height: float) -> ChartDrawing | None:
     """개체 상자(쪽 좌표 pt)에 놓인 새 차트의 기울어진 범주 이름. 이름이 돌지 않으면 빈 목록, 범위 밖이면 None."""
-    chart = _parse_supported(contents)
+    try:
+        chart = _parse_supported(contents)
+    except (ValueError, KeyError):
+        return None  # 숫자 속성이 깨진 차트는 미리보기 그림으로 둔다
     if chart is None or chart.size_pt not in _TITLE_PT:
         return None
     try:
@@ -447,7 +462,7 @@ def _label_glyphs(
 
 #: 계열 색 = 테마 강조색(idx % 6, FUN_1039bd60 표 0x10557cc0). 값은 미리보기 비트맵 8비트 팔레트로 확인한 것뿐이다.
 _ACCENT_COLORS = ((0x61, 0x82, 0xD6), (0xFF, 0x84, 0x3A), (0xB2, 0xB2, 0xB2), (0xFF, 0xD7, 0x00), (0x28, 0x9B, 0x6E))
-#: 자동 표식 모양 = 계열 번호 순서(OOXML ST_MarkerStyle 자동 차례). 정답 PDF로 본 셋(2·3·4)만 옮겼다.
+#: 자동 표식 모양 = 계열 번호 순서. 0·1은 꺾은선·분산형 정답 PDF(표식이있는꺽은선형), 2~4는 주식형 정답 PDF로 확인.
 _AUTO_MARKERS = {0: "diamond", 1: "square", 2: "triangle", 3: "x", 4: "star"}
 #: 주식형 하강 막대 채움(정답 PDF 실측 #3a~#46 사이), 고저선·막대 테두리는 검정 1px.
 _DOWN_BAR_FILL = (0x40, 0x40, 0x40)
@@ -473,6 +488,9 @@ _LINE_PX = 1.0
 _LABEL_PAD_2D_PX = 2 * 96 / 72
 #: 값 라벨과 축 사이 10pt(CalculateAxisMargin 0x102db1d0: dpi*10/72).
 _AXIS_LABEL_GAP_PX = 10 * 96 / 72
+#: 눈금·축 맞춤 반복 상한. 넘으면 미리보기 그림으로 돌린다(정상 차트는 몇 번 안에 끝난다).
+_SCALE_ROUNDS = 64
+_FIT_ROUNDS = 4
 #: 눈금 반복에서 라벨 높이에 곱하는 여유(0x1055dfdc = 0.085, FUN_103d1170).
 _LABEL_SPACING = 0.085
 #: 최댓값이 위 눈금에서 주단위/5 안이면 한 칸 늘린다(DAT_1055e228 = 5, FUN_103d1170).
@@ -620,6 +638,8 @@ def _parse_bar2d(contents: bytes) -> _Bar2D | None:
     if read is None:
         return None
     categories, series = read
+    if stacked and any(value < 0 for item in series for value in item.values):
+        return None  # 음수를 쌓는 규칙은 정답으로 확인하지 못했다
     gap = float(_val(bar, "gapWidth", "150") or 150)
     return _Bar2D(horizontal, categories, series, gap, size_pt, face, stacked=stacked)
 
@@ -768,7 +788,7 @@ def _number_cache(values: ET.Element | None) -> list[float] | None:
         return None
     points = {int(point.get("idx", "-1")): point.findtext(_C + "v") for point in cache.findall(_C + "pt")}
     try:
-        return [float(points[i] or "") for i in range(int(_val(cache, "ptCount", "0") or 0))]
+        return [_chart_number(points[i]) for i in range(int(_val(cache, "ptCount", "0") or 0))]
     except (KeyError, ValueError):
         return None
 
@@ -883,7 +903,7 @@ def _read_series(group: ET.Element, plain: bool) -> tuple[list[str], list[_Serie
         count = int(_val(cache, "ptCount", "0") or 0)
         points = {int(point.get("idx", "-1")): point.findtext(_C + "v") for point in cache.findall(_C + "pt")}
         try:
-            values = [float(points[i] or "") for i in range(count)]
+            values = [_chart_number(points[i]) for i in range(count)]
         except (KeyError, ValueError):
             return None  # 빈 칸(dispBlanksAs)은 옮기지 않았다
         labels = [
@@ -910,9 +930,12 @@ def value_axis_scale(
 
     (최소, 최대, 주단위, 칸 수). 칸이 라벨(세로 축은 높이*1.085, 가로 축은 폭)보다 작으면 칸 수를 줄여 다시 맞춘다.
     """
+    if not all(math.isfinite(v) for v in (low, high, axis_len, label_size)) or not low < high:
+        # 값이 모두 같으면(0 범위) 엔진 처리를 확인하지 못해 미리보기 그림으로 둔다
+        raise UnsupportedChart(f"값 축 범위를 정할 수 없다: {low}~{high}")
     lo, hi, major = low, high, 0.0
     count = requested = 10
-    while True:
+    for _ in range(_SCALE_ROUNDS):
         lo, hi, major, count = _auto_scale(lo, hi, major, requested)
         # 문턱은 float로 줄여 비교한다((double)(float)dVar26). 4.3 -> 4.5처럼 차이가 문턱과 같으면 늘린다.
         threshold = _as_float32(major / _HEADROOM_DIVISOR * (2 if count > 8 else 1))
@@ -936,6 +959,8 @@ def value_axis_scale(
         requested = count - 1
         if requested <= 0:
             break
+    else:
+        raise UnsupportedChart("값 축 눈금이 수렴하지 않았다")
     return lo, hi, major, count
 
 
@@ -986,13 +1011,15 @@ def draw_ooxml_bar_chart(
     contents: bytes, left: float, top: float, width: float, height: float
 ) -> OoxmlChartDrawing | None:
     """개체 상자(쪽 좌표 pt)에 새 차트 2차원 막대를 엔진처럼 그린다. 옮긴 범위 밖이면 None(미리보기 그림으로 대신)."""
-    chart = _parse_bar2d(contents) or _parse_stock(contents) or _parse_line(contents) or _parse_scatter(contents)
-    if chart is None or chart.size_pt not in _TITLE_PT:
-        return None
+    # 업로드 파일의 차트는 믿을 수 없어, 읽기·배치의 어떤 예외(깨진 숫자 속성, '150%' 같은 strict 퍼센트 등)도
+    # 쪽 렌더를 멈추지 않고 미리보기 그림으로 돌린다. 옮긴 범위 밖 글꼴·글자(UnsupportedChart)도 같다.
     try:
+        chart = _parse_bar2d(contents) or _parse_stock(contents) or _parse_line(contents) or _parse_scatter(contents)
+        if chart is None or chart.size_pt not in _TITLE_PT:
+            return None
         return _draw_bar2d(chart, left, top, width, height)
-    except UnsupportedChart:
-        return None  # 폭·세로 지표 표에 없는 글꼴·글자는 옮긴 범위 밖으로 둔다
+    except Exception:
+        return None
 
 
 def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: float) -> OoxmlChartDrawing | None:
@@ -1236,12 +1263,14 @@ def _place_horizontal_bars(chart: _Bar2D, plot, label_h: float, low: float, high
     right, widest = plot_x1, label_w(high)
     lo = hi = major = 0.0
     count = 0
-    for _ in range(4):
+    for _ in range(_FIT_ROUNDS):
         lo, hi, major, count = value_axis_scale(low, high, right - axis_x, widest, True)
         widest = max(label_w(lo + i * major) for i in range(count + 1))
         if right == plot_x1 - label_w(hi) / 2:
             break
         right = plot_x1 - label_w(hi) / 2
+    else:
+        raise UnsupportedChart("가로 값 축 길이가 수렴하지 않았다")
     if right <= axis_x or axis_y <= axis_top or hi <= lo:
         return None
 
@@ -1340,12 +1369,14 @@ def _place_scatter(chart: _Bar2D, plot, label_h: float, low: float, high: float,
     right, widest = plot_x1, label_w(x_high)
     x_lo = x_hi = x_major = 0.0
     x_count = 0
-    for _ in range(4):
+    for _ in range(_FIT_ROUNDS):
         x_lo, x_hi, x_major, x_count = value_axis_scale(x_low, x_high, right - axis_x, widest, True)
         widest = max(label_w(x_lo + i * x_major) for i in range(x_count + 1))
         if right == plot_x1 - label_w(x_hi) / 2:
             break
         right = plot_x1 - label_w(x_hi) / 2
+    else:
+        raise UnsupportedChart("x 값 축 길이가 수렴하지 않았다")
     if right <= axis_x or y_hi <= y_lo or x_hi <= x_lo:
         return None
 
