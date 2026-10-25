@@ -131,3 +131,15 @@ def test_scatter_chart_x_axis_reaches_added_point():
     [svg] = chart_svgs(page)
     # 한글 정답 PDF: 더한 점 x=9 -> x 축 0~10, 주단위 1
     assert "012345678910" in svg_text(svg)
+
+
+STOCK_MIDDLE_ADDED_DOC = CORPUS / "issue6037__engine__시가고가저가종가-중간계열추가.hwp"
+
+
+@pytest.mark.skipif(not STOCK_MIDDLE_ADDED_DOC.exists(), reason="corpus not available")
+def test_stock_chart_draws_series_without_shape_as_line():
+    page = layout_document(HwpDocument.open(STOCK_MIDDLE_ADDED_DOC))[0]
+
+    [svg] = chart_svgs(page)
+    # 모양(spPr) 없는 추가계열은 노란 2.25pt 선: 항목 사이 3개와 범례 1개
+    assert svg.count('stroke="#ffd700" stroke-width="2.250"') == 4

@@ -569,6 +569,8 @@ class _Series:
     marker_pt: float = _MARKER_PT
     #: 분산형 x 값. 다른 차트는 None(항목 차례).
     xs: list[float] | None = None
+    #: 주식형에서 계열 선을 그리는가(계열 모양 spPr가 없으면 2.25pt 선).
+    line_visible: bool = False
 
 
 @dataclass(frozen=True)
@@ -645,8 +647,9 @@ def _parse_stock(contents: bytes) -> _Bar2D | None:
     for ser, item in zip(stock.findall(_C + "ser"), plain, strict=True):
         line = ser.find(f"{_C}spPr/{_A}ln")
         shape = ser.find(_C + "spPr")
-        if shape is None or line is None or line.find(_A + "noFill") is None or len(shape) != 1:
-            return None  # 계열 선을 그리는 주식형은 옮기지 않았다
+        hidden = shape is not None and line is not None and line.find(_A + "noFill") is not None and len(shape) == 1
+        if shape is not None and not hidden:
+            return None  # 선 모양을 정한 계열은 옮기지 않았다
         marker = ser.find(_C + "marker")
         if marker is None or marker.find(_C + "spPr") is not None or _val(ser, "smooth", "0") != "0":
             return None
@@ -655,7 +658,7 @@ def _parse_stock(contents: bytes) -> _Bar2D | None:
         if symbol is None and shape_name is None or shape_name not in (None, "triangle", "x", "star"):
             return None
         marker_pt = float(_val(marker, "size", str(_MARKER_PT)) or _MARKER_PT)
-        series.append(_Series(item.name, item.index, item.values, shape_name, marker_pt))
+        series.append(_Series(item.name, item.index, item.values, shape_name, marker_pt, line_visible=shape is None))
     gap = float(_val(up_down, "gapWidth", "150") or 150) if up_down is not None else 150.0
     return _Bar2D(
         False,
@@ -1069,7 +1072,9 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
     # 범례(오른쪽): 폭 = 최대 글자폭 + 표식 + 2*여백(FUN_10353770)
     marker = line_px(size) * _LEGEND_MARKER_RATIO
     gap = marker * _LEGEND_MARGIN_RATIO
-    legend_extra = _LINE_LEGEND_EXTRA_PX if chart.line else marker + 2 * gap
+    # 선을 그리는 계열이 하나라도 있으면 범례 전체가 꺾은선 범례 모양이다(정답 PDF: 주식형 중간계열추가)
+    line_legend = chart.line or any(s.line_visible for s in chart.series)
+    legend_extra = _LINE_LEGEND_EXTRA_PX if line_legend else marker + 2 * gap
     legend_w = min(max(text_px(s.name) for s in chart.series) + legend_extra, box_w / 3)
     legend_x = box_w - _PLOT_MARGIN_PX - legend_w
 
@@ -1126,18 +1131,20 @@ def _draw_bar2d(chart: _Bar2D, left: float, top: float, width: float, height: fl
             rect(*args)
 
     # 범례 항목: 표식과 이름, 그림 영역 높이 가운데
-    pitch = _LINE_LEGEND_PITCH_PX if chart.line else _LEGEND_PITCH_PX
-    shift = _LINE_LEGEND_CENTER_SHIFT_PX if chart.line else _LEGEND_CENTER_SHIFT_PX
+    pitch = _LINE_LEGEND_PITCH_PX if line_legend else _LEGEND_PITCH_PX
+    shift = _LINE_LEGEND_CENTER_SHIFT_PX if line_legend else _LEGEND_CENTER_SHIFT_PX
     first = (plot_y0 + plot_y1) / 2 - pitch * len(chart.series) / 2 + shift
     # 가로 막대와 누적 막대는 범례를 계열 역순으로 적는다(정답 PDF)
     for k, series in enumerate(reversed(chart.series) if chart.horizontal or chart.stacked else chart.series):
         center = first + (k + 0.5) * pitch
         color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
-        if chart.line:
+        if line_legend:
             key_x = legend_x + _LINE_KEY_LEFT_PX
-            ends = (point(key_x, center), point(key_x + _LINE_KEY_PX, center))
-            drawing.shapes.append(OoxmlShape("line", ends, stroke=color, width=_SERIES_LINE_PX * to_pt))
-            marker_shape(series.marker or "", key_x + _LINE_KEY_PX / 2, center, series.marker_pt, color)
+            if chart.line or series.line_visible:
+                ends = (point(key_x, center), point(key_x + _LINE_KEY_PX, center))
+                drawing.shapes.append(OoxmlShape("line", ends, stroke=color, width=_SERIES_LINE_PX * to_pt))
+            if series.marker is not None:
+                marker_shape(series.marker, key_x + _LINE_KEY_PX / 2, center, series.marker_pt, color)
             text_x = key_x + _LINE_KEY_PX + _LINE_KEY_TEXT_GAP_PX
             text(series.name, text_x, center - line_px(size) / 2 + _LINE_LEGEND_TEXT_SHIFT_PX)
             continue
@@ -1278,8 +1285,11 @@ def _place_stock(chart: _Bar2D, plot, label_h: float, low: float, high: float, t
         for x, column in zip(centers, columns, strict=True):
             placed.append(("line", x, y_of(max(column)), x, y_of(min(column)), _BLACK))
     for series in chart.series:
+        color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
+        if series.line_visible:
+            for (x0, v0), (x1, v1) in itertools.pairwise(zip(centers, series.values, strict=True)):
+                placed.append(("series", x0, y_of(v0), x1, y_of(v1), color))
         if series.marker is not None:
-            color = _ACCENT_COLORS[series.index % len(_ACCENT_COLORS)]
             for x, value in zip(centers, series.values, strict=True):
                 placed.append(("marker", series.marker, x, y_of(value), series.marker_pt, color))
     if chart.up_down:
