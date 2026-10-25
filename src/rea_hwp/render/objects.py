@@ -1075,17 +1075,21 @@ class ObjectsMixin:
             return None
         return draw_vtchart(contents[bin_data_id], left / 100, top / 100, width / 100, height / 100)
 
-    def ooxml_chart_labels(
-        self, bin_data_id: int, left: float, top: float, width: float, height: float
-    ) -> ChartDrawing | None:
-        """새 차트(OOXMLChartContents)가 PDF 글자로 찍는 기울어진 범주 이름. 새 차트가 아니거나 범위 밖이면 None."""
+    def ooxml_contents(self, bin_data_id: int) -> bytes | None:
         contents = self.__dict__.setdefault("_ooxml_chart_contents", {})
         if bin_data_id not in contents:
             data = self.bin_bytes(bin_data_id)
             contents[bin_data_id] = ooxml_chart_contents(data) if data is not None else None
-        if contents[bin_data_id] is None:
+        return contents[bin_data_id]
+
+    def ooxml_chart_labels(
+        self, bin_data_id: int, left: float, top: float, width: float, height: float
+    ) -> ChartDrawing | None:
+        """새 차트(OOXMLChartContents)가 PDF 글자로 찍는 기울어진 범주 이름. 새 차트가 아니거나 범위 밖이면 None."""
+        contents = self.ooxml_contents(bin_data_id)
+        if contents is None:
             return None
-        return draw_ooxml_chart(contents[bin_data_id], left / 100, top / 100, width / 100, height / 100)
+        return draw_ooxml_chart(contents, left / 100, top / 100, width / 100, height / 100)
 
     def draw_chart(self, state: PageState, chart: ChartDrawing) -> None:
         for shape in chart.shapes:
