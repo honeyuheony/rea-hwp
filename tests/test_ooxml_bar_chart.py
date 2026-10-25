@@ -81,3 +81,16 @@ def test_single_series_bar_chart_titles_with_series_name():
 
     [svg] = chart_svgs(page)
     assert svg_text(svg).startswith("계열1")
+
+
+STOCK_SERIES_REMOVED_DOC = CORPUS / "issue5447__시가고가저가종가-계열삭제.hwp"
+
+
+@pytest.mark.skipif(not STOCK_SERIES_REMOVED_DOC.exists(), reason="corpus not available")
+def test_stock_chart_draws_down_bars_from_first_to_last_series():
+    page = layout_document(HwpDocument.open(STOCK_SERIES_REMOVED_DOC))[0]
+
+    [svg] = chart_svgs(page)
+    # 한글 정답 PDF: 고가(첫 계열)에서 종가(끝 계열)로 내려가는 검은 막대 넷과 종가 세모 표식(범례 포함 다섯)
+    assert svg.count('fill="#404040" stroke="#000000"') == 4
+    assert svg.count("<polygon") == 5
