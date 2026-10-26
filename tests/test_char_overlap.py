@@ -82,7 +82,7 @@ def test_overlap_digits_follow_hancom_tables(text, border, expected):
         ("\U000f02d0", 0),
         ("", 4),
         ("A", 4),
-        # 지적 4(6196e2b): 표 한 자리 판정은 한 글자일 때만이다. 「①②」·「❶가」는 풀지 않는다.
+        # 표 한 자리 판정은 한 글자일 때만이다. BMP 두 글자 「①②」·「❶가」의 둘째 글자를 버리지 않는다.
         ("①②", 1),
         ("❶가", 1),
     ],
@@ -122,9 +122,14 @@ def test_overlap_cell_width_ignores_letter_spacing():
 
 
 @needs_k_water
-def test_overlap_drawn_chars_go_into_copy_text():
-    lines = [line.text for line in _k_water_page_13().text_lines]
-    assert {"■3 SaaS", "■2 데이터 허브", "■1 클라우드 도입"} <= set(lines)
+def test_inverted_overlap_copies_only_drawn_box():
+    # 줄 글에는 글자로 그린 것만 넣는다. 구멍 숫자는 글자가 아니므로 정답 PDF 글 층처럼 「■」만 남는다.
+    page = _k_water_page_13()
+    lines = [line for line in page.text_lines if line.text.startswith("■")]
+    assert {"■ SaaS", "■ 데이터 허브", "■ 클라우드 도입"} <= {line.text for line in lines}
+    drawn = {id(item) for item in page.items}
+    assert all(id(glyph) in drawn for line in lines for glyph in line.glyphs if glyph is not None)
+    assert all(_glyph_line(line) is not None for line in lines)
 
 
 def test_holed_glyph_is_masked_in_svg():
@@ -165,37 +170,49 @@ def test_shadow_of_holed_glyph_has_own_shifted_holes():
     assert shadow.holes[0].x - box.holes[0].x == pytest.approx(shadow.x - box.x)
 
 
-# 6196e2b 리뷰 지적 재현.
+# 새 경로는 실측과 같은 조건(장평·상대 크기 100%, 첨자 아님, 숫자가 테두리 안)만 탄다. 나머지는 이전 경로다.
 
 
 @needs_k_water
 @pytest.mark.parametrize("inner", [-128, -10, 127])
-def test_broken_inner_size_stays_within_drawable_range(inner):
-    # 지적 1: 깨진 내부 크기(i8)여도 안쪽 글자 크기는 0보다 크고 글자 크기의 1.9배를 넘지 않는다.
+def test_digit_inner_size_is_clamped_against_broken_upload_values(inner):
+    # 업로드 파일의 깨진 내부 크기(i8)도 안쪽 숫자를 0보다 크고 글자 크기의 1.9배 이하로 둔다.
     layout = _k_water_layout()
-    shape = _shape()
-    for border in (4, 1):
-        model = _overlap("\U000f02d0" if border == 4 else "③", border, inner)
-        size = layout.overlap_inner(model, shape).base_size
-        assert 0 < size <= 1.9 * 1700
-        assert layout.overlap_width(model, shape) <= 2 * 1700
+    size = layout.digit_inner(_overlap("\U000f02d0", 4, inner), _shape()).base_size
+    assert 0 < size <= 1.9 * 1700
+    for glyph in _place(_overlap("\U000f02d0", 4, inner), _shape()):
+        assert all(0 < hole.size <= 1.9 * 1700 for hole in glyph.holes)
 
 
 @needs_k_water
-def test_hole_digit_sits_inside_box_in_text_layer():
-    # 지적 2: 뷰어 글 층에서 구멍 숫자는 ■ 뒤로 흐르지 않고 구멍 자리(13.6pt, ■ 안)에 놓인다.
-    line = next(line for line in _k_water_page_13().text_lines if line.text.startswith("■3"))
-    box, digit = line.glyphs[0], line.glyphs[1]
-    assert digit is not box and digit.size == 1360
-    assert box.x < digit.x < box.x + 1700
-    assert line.char_x[1] == digit.x
-    assert _glyph_line(line) is not None
+def test_circle_path_keeps_inner_size_as_stored():
+    # 원 테두리는 이전 경로라 내부 크기를 제한하지 않는다(−9보다 작은 −10이면 크기 0 글자다).
+    sizes = sorted(glyph.size for glyph in _place(_overlap("③", 1, -10), _shape()))
+    assert sizes == [0, 1700]
+
+
+@needs_k_water
+@pytest.mark.parametrize(
+    "changes",
+    [{"ratios": [90] * 7}, {"rel_sizes": [80] * 7}, {"offsets": [10] * 7}, {"superscript": True}],
+    ids=["ratio-90", "relative-size-80", "raised", "superscript"],
+)
+def test_untested_shape_falls_back_to_old_path(changes):
+    # 장평·상대 크기·글자 위치·위 첨자가 실측과 다르면 숫자가 테두리 가운데를 벗어나므로 이전 경로(그리지 않음)다.
+    layout = _k_water_layout()
+    changes = dict(changes)
+    if changes.pop("superscript", False):
+        changes["attr"] = _shape().attr | (1 << 15)
+    shape = _shape(**changes)
+    model = _overlap("\U000f02d0", 4)
+    assert _place(model, shape) == []
+    assert layout.overlap_width(model, shape) == layout.text_width("\U000f02d0", shape)
 
 
 @needs_k_water
 @pytest.mark.parametrize("text", ["", "●", "□", "■"])
 def test_empty_or_frame_only_text_keeps_old_path(text):
-    # 지적 3: 숫자 표로 풀리지 않는 글(빈 글, 테두리 글자뿐인 글)은 전처럼 테두리 2~4를 그리지 않고 원래 글자 폭이다.
+    # 숫자 표로 풀리지 않는 글(빈 글, 테두리 글자뿐인 글)은 전처럼 테두리 2~4를 그리지 않고 원래 글자 폭이다.
     layout = _k_water_layout()
     shape = _shape()
     for border in (2, 3, 4):
@@ -205,14 +222,23 @@ def test_empty_or_frame_only_text_keeps_old_path(text):
 
 
 @needs_k_water
+def test_digits_wider_than_frame_keep_old_path():
+    # 세 자리 숫자(내부 크기 100%)는 테두리보다 넓어 구멍이 잘리므로 이전 경로(그리지 않음)다.
+    layout = _k_water_layout()
+    model = _overlap("\U000f04d7\U000f04e2\U000f04ed", 4, inner=0)
+    assert _place(model, _shape()) == []
+    assert layout.overlap_width(model, _shape()) == max(layout.text_width(c, _shape()) for c in model.text)
+
+
+@needs_k_water
 def test_two_circled_digits_keep_old_circle_path():
-    # 지적 4: 「①②」는 전처럼 ◯ 안에 1·2를 모두 찍는다.
+    # 「①②」는 숫자 표 한 자리가 아니므로 전처럼 ◯ 안에 1·2를 모두 찍는다.
     assert sorted(glyph.char for glyph in _place(_overlap("①②", 1), _shape())) == ["1", "2", "◯"]
 
 
 @needs_k_water
 def test_circle_with_several_chars_keeps_old_width():
-    # 지적 5: 테두리 1 여러 글자 칸은 전처럼 가장 넓은 원래 글자 폭이다.
+    # 테두리 1 여러 글자 칸은 전처럼 가장 넓은 원래 글자 폭이다.
     layout = _k_water_layout()
     shape = _shape()
     assert layout.overlap_width(_overlap("AB", 1, inner=0), shape) == max(
@@ -221,22 +247,20 @@ def test_circle_with_several_chars_keeps_old_width():
 
 
 @needs_k_water
-def test_wide_inner_digits_are_centered_under_frame():
-    # 지적 6: 세 자리 숫자(내부 크기 100%)가 테두리보다 넓으면 테두리를 안쪽 글 가운데에 둔다.
+def test_square_digit_copies_box_and_drawn_digit():
+    # 사각(□)은 숫자를 글자로 찍으므로 줄 글이 「□3」이고, 두 Glyph 모두 page.items 안 글자다.
     layout = _k_water_layout()
-    shape = _shape()
-    box = _place(_overlap("\U000f04d7\U000f04e2\U000f04ed", 4, inner=0), shape)[0]
-    assert [hole.char for hole in box.holes] == ["1", "2", "3"]
-    inner = layout.overlap_inner(_overlap("1", 4, inner=0), shape)
-    last = box.holes[-1]
-    right = last.x + layout.measurer.advance(last.char, inner, layout.measurer.slot(last.char, inner), 0)
-    frame = layout.measurer.advance("■", shape, metrics.HANGUL, 0)
-    assert box.x + frame / 2 == pytest.approx((box.holes[0].x + right) / 2, abs=13)
-    assert box.holes[0].x >= 10000 - 12
+    layout.line_pieces, layout.line_marks = [], []
+    try:
+        glyphs = _place(_overlap("\U000f02b3", 3), _shape())
+        assert "".join(layout.line_pieces) == "□3"
+        assert [glyph for _, glyph in layout.line_marks] == glyphs
+    finally:
+        del layout.line_pieces, layout.line_marks
 
 
 @needs_circled
 def test_unicode_circled_digit_is_not_copied_as_drawn_parts():
-    # 지적 7: 원래 경로(테두리 1 「①」)는 전처럼 줄 글에 넣지 않아 「◯1」로 복사되지 않는다.
+    # 원래 경로(테두리 1 「①」)는 전처럼 줄 글에 넣지 않아 「◯1」로 복사되지 않는다.
     pages = layout_document(HwpDocument.open(CIRCLED))
     assert not any("◯" in line.text for page in pages for line in page.text_lines)

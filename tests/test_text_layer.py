@@ -27,6 +27,8 @@ DOCUMENTS = [
     CORPUS_ROOT / "oss/hwp-rs/crates__hwp__tests__integration__project__files__dutmal.hwp",
     CORPUS_ROOT / "oss/hwp-rs/crates__hwp__tests__integration__hancom__files__한글문서파일형식_5.0_revision1.3.hwp",
     USER_CORPUS_ROOT / "user-report-title.hwp",
+    # 반전 사각 글자 겹침(13쪽): 구멍으로 그린 숫자도 줄 글의 Glyph가 page.items 안 글자라는 약속을 지키는지 본다.
+    CORPUS_ROOT / "oss/rhwp/k-water-rfp.hwp",
 ]
 
 
