@@ -9,6 +9,7 @@ import json
 import re
 import urllib.parse
 from collections.abc import Callable
+from dataclasses import replace
 from importlib import resources
 from xml.sax.saxutils import escape, quoteattr
 
@@ -131,6 +132,18 @@ def _glyph(glyph: Glyph, equation_fallback: bool = False) -> str:
     )
 
 
+def _holed_glyph(glyph: Glyph, index: int, equation_fallback: bool = False) -> str:
+    """구멍 글자(holes) 모양을 마스크로 비운 글자. 한글 PDF가 클립 경로로 낸 구멍처럼 아래 내용이 비쳐 보인다."""
+    left, top, side = format_pt(glyph.x - glyph.size), format_pt(glyph.y - 2 * glyph.size), format_pt(4 * glyph.size)
+    holes = "".join(_glyph(replace(hole, color="#000000"), equation_fallback) for hole in glyph.holes)
+    mask = (
+        f'<defs><mask id="hole{index}" maskUnits="userSpaceOnUse" x="{left}" y="{top}" width="{side}" '
+        f'height="{side}"><rect x="{left}" y="{top}" width="{side}" height="{side}" fill="#ffffff"/>{holes}'
+        "</mask></defs>"
+    )
+    return mask + _glyph(glyph, equation_fallback).replace("<text ", f'<text mask="url(#hole{index})" ', 1)
+
+
 def _line(line: Line) -> str:
     dash = f' stroke-dasharray="{line.dash}"' if line.dash else ""
     return (
@@ -231,7 +244,9 @@ def page_to_svg(page: Page, equation_fallback: bool = False, *, image_href: Imag
     ]
     for index, item in enumerate(page.items):
         if isinstance(item, Glyph):
-            parts.append(_glyph(item, equation_fallback))
+            parts.append(
+                _holed_glyph(item, index, equation_fallback) if item.holes else _glyph(item, equation_fallback)
+            )
         elif isinstance(item, Line):
             parts.append(_line(item))
         elif isinstance(item, Rect):

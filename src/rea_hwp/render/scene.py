@@ -23,6 +23,9 @@ class Glyph:
     advance: float = 0.0
     #: 원점을 축으로 돌린 각도(도, 반시계).
     rotation: float = 0.0
+    #: 이 글자 모양에서 빼 비우는 글자(반전 테두리 글자 겹침의 안쪽 숫자). 한글 PDF처럼 글자로 찍지 않으므로
+    #: page.items에 넣지 않는다.
+    holes: list[Glyph] = field(default_factory=list)
 
 
 @dataclass
