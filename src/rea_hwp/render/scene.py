@@ -92,7 +92,8 @@ class TextLine:
     paragraph: str | None = None
     #: text 글자마다의 원점 x(공백·탭·수식 스크립트 글자 포함, 그린 글자는 Glyph.x와 같음). 비면 위치를 모르는 줄.
     char_x: list[float] = field(default_factory=list)
-    #: text 글자마다 그린 Glyph(page.items 안 같은 객체, 이은 자모는 같은 Glyph). 그린 글리프가 없는 글자는 None.
+    #: text 글자마다 그린 Glyph(page.items 안 같은 객체, 이은 자모는 같은 Glyph, 구멍 숫자는 테두리 글자 holes 안의
+    #: Glyph). 그린 글리프가 없는 글자는 None.
     glyphs: list[Glyph | None] = field(default_factory=list)
     #: 줄 위 끝 y(LINE_SEG 세로 위치). 저장 줄 없이 놓은 글(쪽 번호 같은 생성 글, 덧말)은 None.
     top: float | None = None
