@@ -1879,10 +1879,21 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         return self.measurer.advance(item.char, shape, slot)
 
     def append_glyph(
-        self, state: PageState, char: str, shape: CharShape, slot: int, x: float, baseline: float
+        self,
+        state: PageState,
+        char: str,
+        shape: CharShape,
+        slot: int,
+        x: float,
+        baseline: float,
+        holes: list[Glyph] | None = None,
     ) -> Glyph:
-        """그림자가 있으면 그림자 글자를 본 글자보다 먼저(아래에) 넣는다. 넣은 본 글자를 돌려준다."""
+        """그림자가 있으면 그림자 글자를 본 글자보다 먼저(아래에) 넣는다. 넣은 본 글자를 돌려준다.
+
+        holes는 글자 모양에서 비울 구멍 글자다. 그림자 글자도 그림자 간격만큼 옮긴 제 구멍을 갖는다.
+        """
         glyph = self.make_glyph(char, shape, slot, x, baseline)
+        glyph.holes = holes or []
         state.page.items.extend(self.shadow_strikes(glyph, shape))
         state.page.items.append(glyph)
         return glyph
@@ -1992,7 +2003,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         strikes = []
         for step in range(steps + 1 if shape.shadow_type == 2 else 1):
             ratio = step / steps if shape.shadow_type == 2 and steps else 1.0
-            strikes.append(dataclasses.replace(glyph, x=glyph.x + dx * ratio, y=glyph.y + dy * ratio, color=color))
+            holes = [dataclasses.replace(hole, x=hole.x + dx * ratio, y=hole.y + dy * ratio) for hole in glyph.holes]
+            strikes.append(
+                dataclasses.replace(glyph, x=glyph.x + dx * ratio, y=glyph.y + dy * ratio, color=color, holes=holes)
+            )
         return strikes
 
     def make_glyph(self, char: str, shape: CharShape, slot: int, x: float, baseline: float) -> Glyph:
@@ -2182,40 +2196,50 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         )
         return inner
 
-    def plain_width(self, text: str, shape: CharShape) -> float:
-        """자간을 넣지 않은 글 폭."""
-        return sum(self.measurer.advance(char, shape, self.measurer.slot(char, shape), 0) for char in text)
+    def plain_width(self, text: str, shape: CharShape, slot: int | None = None) -> float:
+        """자간을 넣지 않은 글 폭. slot을 주면 모든 글자를 그 슬롯으로 잰다(테두리 글자는 한글 슬롯으로 찍는다)."""
+        return sum(
+            self.measurer.advance(char, shape, self.measurer.slot(char, shape) if slot is None else slot, 0)
+            for char in text
+        )
+
+    def overlap_text(self, model: OverlapCtrl) -> tuple[str, int]:
+        """폭과 그리기가 함께 쓰는 (겹칠 글, 테두리). 한글이 읽을 때 고친 값이다(_overlap_text)."""
+        return _overlap_text(model.text or "", model.values.get("border_type") or 0)
 
     def overlap_width(self, model: OverlapCtrl, shape: CharShape) -> float:
         """글자 겹침 한 칸 폭: 찍는 글자 가운데 가장 넓은 폭(수출입 현황 3쪽 PDF: 17pt 네모 숫자 한 칸 17pt).
 
-        자간은 넣지 않는다(k-water-rfp 13쪽 PDF: 자간 −11·−16·−21%인 17pt 반전 사각 세 칸이 모두 16.92pt).
+        자간은 넣지 않는다. 근거는 정답 PDF 두 곳이다: k-water-rfp 13쪽(테두리 4)은 자간 −11·−16·−21%인 17pt 칸
+        세 개가 모두 16.92pt이고, issue2007_nested_cell_pagination 10~15쪽(테두리 0, PUA)은 자간을 빼면 뒤 글자 x
+        오차가 0.96pt에서 0.24pt로 준다. 테두리 1~4는 그리는 대로 한글 슬롯 테두리 글자와 안쪽 글 중 넓은 폭이다.
+        글자를 그리지 않는 경우(테두리 5~13, 테두리 1~4에 남은 PUA, 빈 글)는 전처럼 원래 글자 중 가장 넓은 폭이다.
         """
-        text, border = _overlap_text(model.text or "", model.values.get("border_type") or 0)
-        if border in OVERLAP_DRAWN_BORDERS:
-            frame = self.plain_width(OVERLAP_BORDER_GLYPHS[border], shape)
+        text, border = self.overlap_text(model)
+        if border in OVERLAP_DRAWN_BORDERS and text and not _has_private_use(text):
+            frame = self.plain_width(OVERLAP_BORDER_GLYPHS[border], shape, metrics.HANGUL)
             return max(frame, self.plain_width(text, self.overlap_inner(model, shape)))
-        return max((self.plain_width(char, shape) for char in model.text or ""), default=0)
+        drawn = text if border == 0 else model.text or ""
+        return max((self.plain_width(char, shape) for char in drawn), default=0)
 
     def place_overlap(self, state: PageState, model: OverlapCtrl, shape: CharShape, x: float, baseline: float) -> None:
         """글자 겹침. 한글 2022 PDF 실측(글자겹침 견본·kr_156369074·수출입 현황·table-vpos-01·k-water-rfp).
 
-        겹칠 글자와 테두리는 한글이 읽을 때 고친 값(_overlap_text)을 쓴다. 테두리 없음: 겹칠 글자를 모두 같은 x에 겹쳐
+        겹칠 글자와 테두리는 한글이 읽을 때 고친 값(overlap_text)을 쓴다. 테두리 없음: 겹칠 글자를 모두 같은 x에 겹쳐
         찍는다. 원·사각 테두리: 테두리 글자(◯ ● □ ■)를 찍고 그 안에 글을 (100+10×내부 크기)% 크기로 가운데 맞춰
         (크기-내부 크기)×0.4만큼 올려 찍는다. 한글 전용 문자(PUA)가 남으면 테두리 없을 때 U+F000 한 글자를 찍고,
         테두리가 있으면 찍지 않는다. 다른 테두리는 실측이 없어 찍지 않는다. 찍은 글은 줄 글(복사 층)에도 넣는다.
         """
-        text, border = _overlap_text(
-            model.text or "", model.values.get("border_type") or 0, model.values.get("expansion")
-        )
-        copy = text
+        text, border = self.overlap_text(model)
         marks: list[tuple[float, Glyph | None]] = []
-        if any(ord(char) >= PRIVATE_USE_PLANE for char in text):
-            if border == 0:
-                self.append_glyph(state, PUA_GLYPH, shape, metrics.HANGUL, device_round(x), baseline)
-            # 그린 U+F000은 정답 PDF 글 층 값일 뿐이라 복사 글은 원래 글자로 두고 그린 글자와 잇지 않는다.
-            marks = [(x, None) for _ in text]
+        if _has_private_use(text):
+            if border != 0:
+                return
+            glyph = self.append_glyph(state, PUA_GLYPH, shape, metrics.HANGUL, device_round(x), baseline)
+            # 그린 U+F000은 정답 PDF 글 층 값일 뿐이라 복사 글은 원래 글자로 두되, 뷰어 글 층 자리는 그린 글자에 잇는다.
+            copy, marks = text, [(glyph.x, glyph) for _ in text]
         elif border == 0:
+            copy = text
             for char in text:
                 glyph = (
                     self.append_glyph(state, char, shape, self.measurer.slot(char, shape), device_round(x), baseline)
@@ -2226,26 +2250,37 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         elif border in OVERLAP_DRAWN_BORDERS:
             frame = OVERLAP_BORDER_GLYPHS[border]
             copy = frame + text
-            box = self.append_glyph(state, frame, shape, metrics.HANGUL, device_round(x), baseline)
-            marks.append((box.x, box))
             inner = self.overlap_inner(model, shape)
             raised = baseline - (shape.base_size - inner.base_size) * 0.4
-            # 안쪽 글자도 자간 없는 폭으로 가운데 맞춘다
-            # (k-water-rfp 13쪽: 「3」 구멍 왼쪽 150.91pt, 자간을 넣으면 151.66pt).
-            inner_x = x + (shape.base_size - self.plain_width(text, inner)) / 2
+            # 안쪽 글은 테두리 글자 폭이 아니라 글자 크기 가운데에, 자간 없는 폭으로 맞춘다(글자겹침 견본 PDF: 「3」
+            # x 오차가 크기 기준 0.00pt, ◯ 전진폭 기준 0.12pt. k-water-rfp 13쪽: 「3」 구멍 왼쪽 150.91pt, 자간을 넣으면
+            # 151.66pt). 안쪽 글이 크기보다 넓으면 칸 앞에서 시작한다(실측 없음, 앞 글자 위로 넘어가지 않게만 한다).
+            inner_x = x + max(shape.base_size - self.plain_width(text, inner), 0) / 2
+            placed = []
             for char in text:
                 slot = self.measurer.slot(char, inner)
-                glyph = None
-                if char.strip() and border in OVERLAP_INVERTED_BORDERS:
-                    # 한글은 안쪽 글자 모양을 클립 경로에서 빼고 ■를 칠해 구멍을 낸다(k-water-rfp 13쪽 PDF: ■ 하나와
-                    # 0.12pt 띠 클립, 숫자 글자는 없음). 같은 구멍으로 두고 글자로 찍지 않는다.
-                    box.holes.append(self.make_glyph(char, inner, slot, device_round(inner_x), raised))
-                elif char.strip():
-                    glyph = self.append_glyph(state, char, inner, slot, device_round(inner_x), raised)
-                marks.append((glyph.x if glyph else inner_x, glyph))
+                placed.append((char, slot, inner_x))
                 inner_x += self.measurer.advance(char, inner, slot, 0)
+            inverted = border in OVERLAP_INVERTED_BORDERS
+            # 한글은 반전 테두리 안쪽 글자 모양을 클립 경로에서 빼고 ■를 칠해 구멍을 낸다(k-water-rfp 13쪽 PDF: ■ 하나와
+            # 0.12pt 띠 클립, 숫자 글자는 없음). 같은 구멍으로 두고 글자로 찍지 않는다.
+            holes = [
+                self.make_glyph(char, inner, slot, device_round(left), raised)
+                for char, slot, left in placed
+                if inverted and char.strip()
+            ]
+            box = self.append_glyph(state, frame, shape, metrics.HANGUL, device_round(x), baseline, holes)
+            marks.append((box.x, box))
+            for char, slot, left in placed:
+                glyph = None
+                if inverted:
+                    # 구멍 글자는 뷰어 글 층에서 그린 테두리 글자에 이어 붙인다.
+                    glyph = box if char.strip() else None
+                elif char.strip():
+                    glyph = self.append_glyph(state, char, inner, slot, device_round(left), raised)
+                marks.append((glyph.x if glyph else left, glyph))
         else:
-            marks = [(x, None) for _ in text]
+            return
         pieces = self.__dict__.get("line_pieces")
         if pieces is not None:
             pieces.append(copy)
@@ -2412,17 +2447,20 @@ def _line_has_ink(view: ParagraphView, index: int, floats: bool = True) -> bool:
     return False
 
 
-def _overlap_text(text: str, border: int, expansion: int | None = None) -> tuple[str, int]:
+def _overlap_text(text: str, border: int) -> tuple[str, int]:
     """글자 겹침을 읽을 때 한글이 고치는 (겹칠 글자, 테두리)(HwpApp.dll FUN_10549090·FUN_104e8be0).
 
-    테두리가 없고 확장(expansion)이 0이면 앞 U+3000을 뗀다. 테두리가 있으면 숫자 글자(①, ❸, 한컴 PUA 네모 숫자 …)를
+    테두리가 없으면 글을 그대로 둔다. 확장 0에서 앞 U+3000을 떼는 읽기 보정은 옮기지 않는다: 떼고 폭을 재면 뒤 글자가
+    정답 PDF보다 행정업무운영 편람 59쪽 5.40pt, aift 2쪽 9.96pt 앞에 놓여 칸 폭에 U+3000이 남는다.
+    테두리가 있으면 숫자 글자(①, ❸, 한컴 PUA 네모 숫자 …)를
     숫자로 풀고 테두리를 그 글자의 묶음(1 원, 2 반전 원, 3 사각, 4 반전 사각)으로 바꾼다. 풀리지 않으면 앞에 붙은
-    테두리 글자를 떼고, 14보다 큰 테두리는 원으로 둔다.
+    테두리 글자를 떼고, 14보다 큰 테두리는 원으로 둔다. 원 테두리에 남은 원문자는 원 안 글자로 풀고, 빈 글은
+    테두리를 그대로 둔다(이 둘은 이전 동작이다).
     """
     if not text:
-        return text, 0
+        return text, border
     if not border:
-        return (text[1:] if expansion == 0 and text[0] == "　" else text), 0
+        return text, 0
     codes = [ord(char) for char in text]
     units = sum(2 if code > 0xFFFF else 1 for code in codes)
     if units == 1 or units // 2 == 1:
@@ -2440,7 +2478,23 @@ def _overlap_text(text: str, border: int, expansion: int | None = None) -> tuple
                 return "".join(str(code - start) for code, start in zip(codes, starts, strict=True)), kind
     if border < len(OVERLAP_BORDER_GLYPHS) and text[0] == OVERLAP_BORDER_GLYPHS[border]:
         text = text[1:]
-    return text, 1 if border > 14 else border
+    border = 1 if border > 14 else border
+    if border == 1:
+        # 숫자 표에 없는 원문자(⑩, Ⓐ, ㉠ …)는 전처럼 원 안에 찍을 글자로 푼다(HwpApp 근거 없음, 이전 동작 유지).
+        text = "".join(_circled_char(char) for char in text)
+    return text, border
+
+
+def _circled_char(char: str) -> str:
+    """원문자(⑩, Ⓐ …)를 원 안에 찍는 글자(10, A …)로 푼다. 원문자가 아니면 그대로."""
+    decomposition = unicodedata.decomposition(char)
+    if decomposition.startswith("<circle> "):
+        return "".join(chr(int(code, 16)) for code in decomposition.split()[1:])
+    return char
+
+
+def _has_private_use(text: str) -> bool:
+    return any(ord(char) >= PRIVATE_USE_PLANE for char in text)
 
 
 def _section_def(nodes: list[Node]) -> SectionDefCtrl | None:

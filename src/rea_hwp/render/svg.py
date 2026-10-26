@@ -141,7 +141,8 @@ def _holed_glyph(glyph: Glyph, index: int, equation_fallback: bool = False) -> s
         f'height="{side}"><rect x="{left}" y="{top}" width="{side}" height="{side}" fill="#ffffff"/>{holes}'
         "</mask></defs>"
     )
-    return mask + _glyph(glyph, equation_fallback).replace("<text ", f'<text mask="url(#hole{index})" ', 1)
+    # 장평·회전 글자는 transform으로 찍혀 마스크 좌표도 그 안에서 풀리므로, 마스크는 변환 없는 바깥 묶음에 건다.
+    return f'{mask}<g mask="url(#hole{index})">{_glyph(glyph, equation_fallback)}</g>'
 
 
 def _line(line: Line) -> str:
