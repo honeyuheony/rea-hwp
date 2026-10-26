@@ -1837,8 +1837,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
     def trailing_spacing(self, char: str, shape: CharShape) -> int:
         """글자 전진폭 가운데 자간이 차지하는 몫(음수 자간이면 음수)."""
         slot = self.measurer.slot(char, shape)
-        bare = type(shape)(values={**shape.values, "spacings": [0] * len(shape.spacings)}, tail=shape.tail)
-        return self.measurer.advance(char, shape, slot) - self.measurer.advance(char, bare, slot)
+        return self.measurer.advance(char, shape, slot) - self.measurer.advance(char, shape, slot, 0)
 
     def item_width(self, view: ParagraphView, char_index: int) -> float:
         item = view.chars[char_index]
@@ -2062,8 +2061,12 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             )
         return x
 
-    def text_width(self, text: str, shape: CharShape) -> float:
-        return sum(self.measurer.advance(char, shape, self.measurer.slot(char, shape)) for char in text)
+    def text_width(self, text: str, shape: CharShape, slot: int | None = None, spacing: int | None = None) -> float:
+        """글 폭. slot을 주면 모든 글자를 그 슬롯으로, spacing을 주면 글자 모양 자간 대신 그 자간(%)으로 측정한다."""
+        return sum(
+            self.measurer.advance(char, shape, self.measurer.slot(char, shape) if slot is None else slot, spacing)
+            for char in text
+        )
 
     def place_control(
         self,
@@ -2197,13 +2200,6 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         inner.values["base_size"] = round(shape.base_size * (100 + 10 * step) / 100)
         return inner
 
-    def plain_width(self, text: str, shape: CharShape, slot: int | None = None) -> float:
-        """자간을 넣지 않은 글 폭. slot을 주면 모든 글자를 그 슬롯으로 측정한다(테두리 글자는 한글 슬롯으로 찍는다)."""
-        return sum(
-            self.measurer.advance(char, shape, self.measurer.slot(char, shape) if slot is None else slot, 0)
-            for char in text
-        )
-
     def digit_overlap(self, model: OverlapCtrl) -> tuple[str, int] | None:
         """숫자 표로 풀려 새 경로로 그리는 글자 겹침이면 (숫자, 테두리 2~4), 아니면 None."""
         digits = _overlap_digits(model.text or "", model.values.get("border_type") or 0)
@@ -2216,8 +2212,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         17pt 반전 사각 세 칸이 모두 16.92pt). 안쪽 숫자가 글자 크기보다 좁으면 테두리는 칸 앞, 숫자는 글자 크기
         가운데다(같은 쪽: 「3」 구멍 왼쪽 150.91pt, 자간을 넣으면 151.66pt). 넓으면 둘 다 칸 가운데에 둔다(실측 없음).
         """
-        frame = self.plain_width(DIGIT_BORDER_GLYPHS[border], shape, metrics.HANGUL)
-        inner = self.plain_width(digits, self.overlap_inner(model, shape))
+        frame = self.text_width(DIGIT_BORDER_GLYPHS[border], shape, metrics.HANGUL, spacing=0)
+        inner = self.text_width(digits, self.overlap_inner(model, shape), spacing=0)
         cell = max(frame, inner)
         if inner <= shape.base_size:
             return cell, 0, (shape.base_size - inner) / 2
