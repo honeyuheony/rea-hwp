@@ -865,7 +865,7 @@ class ObjectsMixin:
             margins = header.margins
             paragraphs = [child for child in component.children if child.tag == tags.PARA_HEADER]
             inner_width = width - margins[0] - margins[1]
-            views = self.paragraph_views(paragraphs, inner_width, textbox=True)
+            views = self.paragraph_views(paragraphs, inner_width, textbox=True, vertical=bool(header.text_direction))
             area = Area(left + margins[0], top + margins[2], inner_width)
             inner_height = height - margins[2] - margins[3]
             with self.painting_list(("text box", id(component))):

@@ -10,7 +10,7 @@ from corpus_paths import CORPUS_ROOT
 
 from rea_hwp import tags
 from rea_hwp.document import HwpDocument
-from rea_hwp.models.controls import OverlapCtrl
+from rea_hwp.models.controls import CellListHeader, OverlapCtrl
 from rea_hwp.models.docinfo import CharShape
 from rea_hwp.render import metrics
 from rea_hwp.render.html import _glyph_line
@@ -294,25 +294,46 @@ def test_border_five_or_more_keeps_old_path(border):
     assert layout.overlap_width(model, _shape()) == layout.text_width("\U000f02d0", _shape())
 
 
-@needs_k_water
-def test_vertical_line_keeps_old_overlap_width():
-    # 세로쓰기 줄은 글자 겹침을 그리지 않으므로, 숫자 테두리여도 전진폭은 이전처럼 원래 글자 폭이다.
+def _k_water_overlap_paragraph():
     layout = _k_water_layout()
     # 표를 담은 바깥 문단도 자손에 글자 겹침이 있으므로, 보기에 글자 겹침 컨트롤이 직접 있는 문단을 고른다.
-    view, index = next(
-        (view, i)
+    return next(
+        node
         for section in layout.document.sections
         for node in _paragraphs(section.nodes)
-        if any(isinstance(child.model, OverlapCtrl) for child in _descendants(node))
-        for view in layout.paragraph_views([node], 50000)
-        for i, ctrl in view.controls.items()
-        if isinstance(ctrl.model, OverlapCtrl)
+        if any(
+            isinstance(ctrl.model, OverlapCtrl) for ctrl in layout.paragraph_views([node], 50000)[0].controls.values()
+        )
     )
+
+
+@needs_k_water
+def test_vertical_paragraph_view_keeps_old_overlap_width():
+    # 세로쓰기 글상자·표 칸 문단 보기는 vertical로 표시되고, 그 안 숫자 테두리 글자 겹침은 줄 나누기·그리기 모두
+    # 이전 폭을 쓴다(item_width가 보기 표시를 읽으므로 reflowed·rejudged_against·equation_relaid도 같다).
+    layout = _k_water_layout()
+    node = _k_water_overlap_paragraph()
+    flat = layout.paragraph_views([node], 50000)[0]
+    view = layout.paragraph_views([node], 50000, vertical=True)[0]
+    assert view.vertical and not flat.vertical
+    index = next(i for i, ctrl in view.controls.items() if isinstance(ctrl.model, OverlapCtrl))
     model = view.controls[index].model
     shape = layout.styles.char_shapes[view.shape_ids[index]]
+    assert layout.digit_overlap(model, shape) is not None
     old = max(layout.text_width(char, shape) for char in model.text)
-    assert layout.item_width(view, index, vertical=True) == old
-    assert layout.item_width(view, index) == layout.overlap_width(model, shape)
+    assert layout.item_width(view, index) == old != layout.item_width(flat, index)
+
+
+@needs_k_water
+def test_vertical_table_cell_keeps_old_overlap_path(monkeypatch):
+    # 세로쓰기 표 칸은 가로 줄로 그리는 경로(table_flow → place_control)라, 칸 보기의 세로 표시로 숫자 테두리를
+    # 그리지 않는다(이전 경로: 테두리 4는 그리지 않음). k-water 13쪽 번호 칸을 세로쓰기로 바꿔 확인한다.
+    horizontal = [item for item in _k_water_page_13().items if isinstance(item, Glyph) and item.holes]
+    assert horizontal
+    monkeypatch.setattr(CellListHeader, "text_direction", property(lambda self: 1))
+    page = layout_document(HwpDocument.open(K_WATER))[12]
+    glyphs = [item for item in page.items if isinstance(item, Glyph)]
+    assert not any(glyph.char == "■" or glyph.holes for glyph in glyphs)
 
 
 def _descendants(node):

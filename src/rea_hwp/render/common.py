@@ -93,6 +93,8 @@ class ParagraphView:
     controls: dict[int, Node]
     #: chars 순번 → 그 위치에 적용되는 글자 모양 ID(컨트롤 문자 포함).
     shape_ids: list[int]
+    #: 세로쓰기 글상자·표 칸의 문단. 글자 겹침은 이 표시를 보고 줄 나누기·그리기 모두 이전 폭과 그림을 쓴다.
+    vertical: bool = False
 
     @classmethod
     def build(cls, node: Node, styles: DocStyles) -> ParagraphView:
