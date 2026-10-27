@@ -1751,7 +1751,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             if isinstance(item, TextChar) and item.char in ("\r", "\n"):
                 continue
             if not isinstance(item, TextChar):
-                placements.append((char_index, self.item_width(view, char_index)))
+                placements.append((char_index, self.item_width(view, char_index, vertical=True)))
                 continue
             em = self.styles.char_shapes[item.shape_id].base_size
             if rotate_latin and not _is_wide(item.char):
@@ -1839,7 +1839,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         slot = self.measurer.slot(char, shape)
         return self.measurer.advance(char, shape, slot) - self.measurer.advance(char, shape, slot, 0)
 
-    def item_width(self, view: ParagraphView, char_index: int) -> float:
+    def item_width(self, view: ParagraphView, char_index: int, vertical: bool = False) -> float:
+        """한 항목의 전진폭. vertical이면 세로쓰기 줄 몫이다(글자 겹침은 그리지 않으므로 이전 폭을 쓴다)."""
         item = view.chars[char_index]
         if isinstance(item, ControlChar):
             if item.code == TAB:
@@ -1852,7 +1853,8 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
                 text, shape = self.note_mark(view, char_index, ctrl.model)
                 return self.text_width(text, shape)
             if ctrl is not None and isinstance(ctrl.model, OverlapCtrl):
-                return self.overlap_width(ctrl.model, self.styles.char_shapes[view.shape_ids[char_index]])
+                shape = self.styles.char_shapes[view.shape_ids[char_index]]
+                return self.overlap_width(ctrl.model, shape, digits=not vertical)
             if ctrl is not None and isinstance(ctrl.model, DutmalCtrl):
                 return self.dutmal_box(view, char_index, ctrl.model)[0]
             if ctrl is not None and isinstance(ctrl.model, ObjectCtrlHeader) and ctrl.model.treat_as_char:
@@ -2209,7 +2211,11 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         나머지(장평 90%, 세 자리 숫자 등)는 이전 경로로 둔다. 칸 폭은 한글 슬롯 테두리 글자의 자간 없는 폭이다
         (같은 쪽 PDF: 자간 −11·−16·−21%인 17pt 반전 사각 세 칸이 모두 16.92pt).
         """
-        digits = _overlap_digits(model.text or "", model.values.get("border_type") or 0)
+        stored = model.values.get("border_type") or 0
+        # 저장 테두리 5 이상(삼각·마름모 등, 깨진 값)은 한글이 숫자 표로 바꾸는지 근거가 없어 이전 경로로 둔다.
+        if not 1 <= stored <= 4:
+            return None
+        digits = _overlap_digits(model.text or "", stored)
         if digits is None or digits[1] not in DIGIT_BORDER_GLYPHS or shape.superscript or shape.subscript:
             return None
         text, border = digits
@@ -2222,10 +2228,10 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             return None
         return text, border, inner, cell
 
-    def overlap_width(self, model: OverlapCtrl, shape: CharShape) -> float:
+    def overlap_width(self, model: OverlapCtrl, shape: CharShape, digits: bool = True) -> float:
         """글자 겹침 한 칸 폭. 숫자 테두리는 digit_overlap의 칸 폭, 나머지는 겹친 글자 중 가장 넓은 글자 폭이다
-        (수출입 현황 3쪽 PDF: 17pt 네모 숫자 한 칸 17pt)."""
-        digit = self.digit_overlap(model, shape)
+        (수출입 현황 3쪽 PDF: 17pt 네모 숫자 한 칸 17pt). digits가 거짓이면(세로쓰기 줄) 늘 이전 폭이다."""
+        digit = self.digit_overlap(model, shape) if digits else None
         if digit is not None:
             return digit[3]
         return max((self.text_width(char, shape) for char in model.text or ""), default=0)
@@ -2240,7 +2246,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         """
         digit = self.digit_overlap(model, shape)
         if digit is not None:
-            self.place_digit_overlap(state, *digit[:3], shape, x, baseline)
+            self.place_digit_overlap(state, *digit, shape, x, baseline)
             return
         text = model.text or ""
         border = model.values.get("border_type") or 0
@@ -2269,10 +2275,20 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
             self.append_glyph(state, char, inner, slot, device_round(x + (shape.base_size - width) / 2), raised)
 
     def place_digit_overlap(
-        self, state: PageState, digits: str, border: int, inner: CharShape, shape: CharShape, x: float, baseline: float
+        self,
+        state: PageState,
+        digits: str,
+        border: int,
+        inner: CharShape,
+        cell: float,
+        shape: CharShape,
+        x: float,
+        baseline: float,
     ) -> None:
-        """숫자 테두리(●·□·■ 안 숫자). 테두리 글자는 칸 앞에, 숫자는 자간 없는 폭으로 글자 크기 가운데에 찍는다
-        (k-water-rfp 13쪽 PDF: 「3」 구멍 왼쪽 150.91pt, 자간을 넣으면 151.66pt). 높이는 원 테두리와 같다.
+        """숫자 테두리(●·□·■ 안 숫자). 테두리 글자는 칸 앞에, 숫자는 자간 없는 폭으로 그린 테두리 글자 전진폭(cell)
+        가운데에 찍는다(k-water-rfp 13쪽 PDF: 「3」 구멍 왼쪽 150.91pt, 자간을 넣으면 151.66pt). 그 글꼴 ■는 16.92pt로
+        글자 크기 17pt와 거의 같아 크기 가운데와 구별되지 않지만, 굴림(■ 0.889em)에서 크기 가운데면 구멍이 약 1pt
+        밀리고 두 자리 숫자가 ■ 밖으로 나간다. 높이는 원 테두리와 같다.
 
         반전 테두리(● ■)의 숫자는 글자로 찍지 않고 테두리 글자의 구멍(holes)으로 둔다. 한글은 숫자 모양을 클립
         경로에서 빼고 ■를 칠한다(같은 쪽 PDF: ■ 하나와 0.12pt 띠 클립, 숫자 글자는 없음).
@@ -2281,7 +2297,7 @@ class DocumentLayout(ObjectsMixin, TableFlowMixin, NotesMixin, DecorMixin):
         """
         frame = DIGIT_BORDER_GLYPHS[border]
         raised = baseline - (shape.base_size - inner.base_size) * 0.4
-        inner_x = x + (shape.base_size - self.text_width(digits, inner, spacing=0)) / 2
+        inner_x = x + (cell - self.text_width(digits, inner, spacing=0)) / 2
         inverted = border in OVERLAP_INVERTED_BORDERS
         placed = []
         for char in digits:

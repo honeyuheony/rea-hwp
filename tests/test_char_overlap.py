@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from corpus_paths import CORPUS_ROOT
 
+from rea_hwp import tags
 from rea_hwp.document import HwpDocument
 from rea_hwp.models.controls import OverlapCtrl
 from rea_hwp.models.docinfo import CharShape
@@ -264,3 +265,64 @@ def test_unicode_circled_digit_is_not_copied_as_drawn_parts():
     # 원래 경로(테두리 1 「①」)는 전처럼 줄 글에 넣지 않아 「◯1」로 복사되지 않는다.
     pages = layout_document(HwpDocument.open(CIRCLED))
     assert not any("◯" in line.text for page in pages for line in page.text_lines)
+
+
+@needs_k_water
+def test_digits_are_centered_on_drawn_box_in_narrow_box_font():
+    # 굴림은 ■가 0.889em이라, 글자 크기 가운데에 두면 구멍이 ■ 가운데에서 약 1pt 오른쪽으로 밀리고 두 자리 숫자가
+    # ■ 밖으로 나가 잘린다. 숫자는 그린 ■ 전진폭 가운데에 둔다.
+    layout = _k_water_layout()
+    shape = _shape(face_ids=[0] * 7)
+    frame = layout.measurer.advance("■", shape, metrics.HANGUL, 0)
+    assert frame < 0.9 * 1700
+    for text, inner in (("\U000f02d0", -2), ("\U000f02d7\U000f02e0", -3)):
+        box = _place(_overlap(text, 4, inner), shape)[0]
+        hole_shape = layout.digit_inner(_overlap(text, 4, inner), shape)
+        left = box.holes[0].x
+        right = box.holes[-1].x + layout.text_width(box.holes[-1].char, hole_shape, spacing=0)
+        assert (left + right) / 2 == pytest.approx(box.x + frame / 2, abs=13)
+        assert box.x - 12 <= left and right <= box.x + frame + 12
+
+
+@needs_k_water
+@pytest.mark.parametrize("border", [5, 7, 14, 200])
+def test_border_five_or_more_keeps_old_path(border):
+    # 테두리 5 이상(삼각·마름모 등, 깨진 값)은 숫자 표로 풀지 않고 이전 경로(그리지 않음, 원래 글자 폭)다.
+    layout = _k_water_layout()
+    model = _overlap("\U000f02d0", border)
+    assert _place(model, _shape()) == []
+    assert layout.overlap_width(model, _shape()) == layout.text_width("\U000f02d0", _shape())
+
+
+@needs_k_water
+def test_vertical_line_keeps_old_overlap_width():
+    # 세로쓰기 줄은 글자 겹침을 그리지 않으므로, 숫자 테두리여도 전진폭은 이전처럼 원래 글자 폭이다.
+    layout = _k_water_layout()
+    # 표를 담은 바깥 문단도 자손에 글자 겹침이 있으므로, 보기에 글자 겹침 컨트롤이 직접 있는 문단을 고른다.
+    view, index = next(
+        (view, i)
+        for section in layout.document.sections
+        for node in _paragraphs(section.nodes)
+        if any(isinstance(child.model, OverlapCtrl) for child in _descendants(node))
+        for view in layout.paragraph_views([node], 50000)
+        for i, ctrl in view.controls.items()
+        if isinstance(ctrl.model, OverlapCtrl)
+    )
+    model = view.controls[index].model
+    shape = layout.styles.char_shapes[view.shape_ids[index]]
+    old = max(layout.text_width(char, shape) for char in model.text)
+    assert layout.item_width(view, index, vertical=True) == old
+    assert layout.item_width(view, index) == layout.overlap_width(model, shape)
+
+
+def _descendants(node):
+    for child in node.children:
+        yield child
+        yield from _descendants(child)
+
+
+def _paragraphs(nodes):
+    for node in nodes:
+        if node.tag == tags.PARA_HEADER:
+            yield node
+        yield from _paragraphs(node.children)
