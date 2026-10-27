@@ -808,9 +808,8 @@ class ObjectsMixin:
         if text_list is None or not isinstance(text_list.model, TextBoxListHeader):
             return 0.0
         margins = text_list.model.margins
-        paragraphs = [child for child in component.children if child.tag == tags.PARA_HEADER]
         inner_width = ctrl.model.width - margins[0] - margins[1]
-        stored = self.paragraph_views(paragraphs, inner_width)
+        stored = self.textbox_views(component, text_list.model, inner_width, textbox=False)
         if not stored or not all(view.segments for view in stored):
             return 0.0
         fresh = self.recomposed_views(stored, inner_width)

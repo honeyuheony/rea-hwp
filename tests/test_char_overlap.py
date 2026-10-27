@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -20,8 +21,11 @@ from rea_hwp.render.svg import page_to_svg
 
 K_WATER = CORPUS_ROOT / "oss/rhwp/k-water-rfp.hwp"
 CIRCLED = CORPUS_ROOT / "public/kr_156369074_189352360.hwp"
+TABLE_IN_TBOX = CORPUS_ROOT / "oss/rhwp/table-in-tbox.hwp"
+VERTICAL_TBOX = CORPUS_ROOT / "oss/rhwp/hwpx__hancom-hwp__tbox-v-flow-01.hwp"
 needs_k_water = pytest.mark.skipif(not K_WATER.exists(), reason="corpus not available")
 needs_circled = pytest.mark.skipif(not CIRCLED.exists(), reason="corpus not available")
+needs_tbox = pytest.mark.skipif(not (TABLE_IN_TBOX.exists() and VERTICAL_TBOX.exists()), reason="corpus not available")
 
 
 @functools.cache
@@ -296,44 +300,70 @@ def test_border_five_or_more_keeps_old_path(border):
 
 def _k_water_overlap_paragraph():
     layout = _k_water_layout()
-    # 표를 담은 바깥 문단도 자손에 글자 겹침이 있으므로, 보기에 글자 겹침 컨트롤이 직접 있는 문단을 고른다.
+    # 자손에 글자 겹침이 있는 문단만 보기를 만들어 본다(문서 전체 문단을 다시 짜지 않게 미리 거른다). 표를 담은 바깥
+    # 문단도 자손에 글자 겹침이 있으므로, 보기에 글자 겹침 컨트롤이 직접 있는 문단을 고른다.
     return next(
         node
         for section in layout.document.sections
         for node in _paragraphs(section.nodes)
-        if any(
+        if any(isinstance(child.model, OverlapCtrl) for child in _descendants(node))
+        and any(
             isinstance(ctrl.model, OverlapCtrl) for ctrl in layout.paragraph_views([node], 50000)[0].controls.values()
         )
     )
 
 
 @needs_k_water
-def test_vertical_paragraph_view_keeps_old_overlap_width():
-    # 세로쓰기 글상자·표 칸 문단 보기는 vertical로 표시되고, 그 안 숫자 테두리 글자 겹침은 줄 나누기·그리기 모두
-    # 이전 폭을 쓴다(item_width가 보기 표시를 읽으므로 reflowed·rejudged_against·equation_relaid도 같다).
+def test_paragraph_view_direction_decides_overlap_width():
+    # 가로쓰기로 확인된 문단 보기(vertical=False)만 숫자 테두리 새 폭을 쓴다. 세로쓰기(vertical=True)와 글 방향을
+    # 모르는 보기(인자 없음)는 이전 폭이라, 새 호출부가 방향을 빠뜨려도 이전 경로로 안전하게 남는다.
     layout = _k_water_layout()
     node = _k_water_overlap_paragraph()
-    flat = layout.paragraph_views([node], 50000)[0]
-    view = layout.paragraph_views([node], 50000, vertical=True)[0]
-    assert view.vertical and not flat.vertical
-    index = next(i for i, ctrl in view.controls.items() if isinstance(ctrl.model, OverlapCtrl))
-    model = view.controls[index].model
-    shape = layout.styles.char_shapes[view.shape_ids[index]]
+    flat = layout.paragraph_views([node], 50000, vertical=False)[0]
+    upright = layout.paragraph_views([node], 50000, vertical=True)[0]
+    unknown = layout.paragraph_views([node], 50000)[0]
+    assert flat.horizontal and not upright.horizontal and not unknown.horizontal
+    index = next(i for i, ctrl in flat.controls.items() if isinstance(ctrl.model, OverlapCtrl))
+    model = flat.controls[index].model
+    shape = layout.styles.char_shapes[flat.shape_ids[index]]
     assert layout.digit_overlap(model, shape) is not None
     old = max(layout.text_width(char, shape) for char in model.text)
-    assert layout.item_width(view, index) == old != layout.item_width(flat, index)
+    assert layout.item_width(upright, index) == layout.item_width(unknown, index) == old
+    assert layout.item_width(flat, index) == layout.overlap_width(model, shape) != old
 
 
 @needs_k_water
 def test_vertical_table_cell_keeps_old_overlap_path(monkeypatch):
     # 세로쓰기 표 칸은 가로 줄로 그리는 경로(table_flow → place_control)라, 칸 보기의 세로 표시로 숫자 테두리를
-    # 그리지 않는다(이전 경로: 테두리 4는 그리지 않음). k-water 13쪽 번호 칸을 세로쓰기로 바꿔 확인한다.
-    horizontal = [item for item in _k_water_page_13().items if isinstance(item, Glyph) and item.holes]
-    assert horizontal
+    # 그리지 않는다(이전 경로: 테두리 4는 그리지 않음). k-water 번호 칸을 세로쓰기로 바꾸면 쪽 나눔이 바뀔 수 있어
+    # 모든 쪽을 보고, 그 칸 글(「SaaS」)이 실제로 놓였는지도 확인한다.
+    assert [item for item in _k_water_page_13().items if isinstance(item, Glyph) and item.holes]
     monkeypatch.setattr(CellListHeader, "text_direction", property(lambda self: 1))
-    page = layout_document(HwpDocument.open(K_WATER))[12]
-    glyphs = [item for item in page.items if isinstance(item, Glyph)]
+    pages = layout_document(HwpDocument.open(K_WATER))
+    glyphs = [item for page in pages for item in page.items if isinstance(item, Glyph)]
+    assert "SaaS" in "".join(glyph.char for glyph in glyphs)
     assert not any(glyph.char == "■" or glyph.holes for glyph in glyphs)
+
+
+@needs_tbox
+def test_textbox_measuring_and_drawing_share_textbox_views(monkeypatch):
+    # 글상자 크기 측정(textbox_growth)과 그리기(draw_component)가 같은 보기 도우미로 글 방향을 정한다. 어느 쪽이
+    # 도우미를 거치지 않으면 이 시험이 실패한다.
+    callers = set()
+    original = DocumentLayout.textbox_views
+
+    def spy(self, component, header, width, textbox=True):
+        callers.add(sys._getframe(1).f_code.co_name)
+        views = original(self, component, header, width, textbox)
+        assert all(view.horizontal == (not header.text_direction) for view in views)
+        return views
+
+    monkeypatch.setattr(DocumentLayout, "textbox_views", spy)
+    layout_document(HwpDocument.open(TABLE_IN_TBOX))
+    assert {"draw_component", "textbox_growth"} <= callers
+    callers.clear()
+    layout_document(HwpDocument.open(VERTICAL_TBOX))
+    assert "draw_component" in callers
 
 
 def _descendants(node):
