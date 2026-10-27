@@ -257,11 +257,17 @@ class ObjectsMixin:
         if not any(self.resized_equation(node) for node in _descendants(component) if node.tag == tags.CTRL_HEADER):
             return None
         margins = text_list.model.margins
-        paragraphs = [child for child in component.children if child.tag == tags.PARA_HEADER]
-        views = self.paragraph_views(paragraphs, ctrl.model.width - margins[0] - margins[1], textbox=True)
+        views = self.textbox_views(component, text_list.model, ctrl.model.width - margins[0] - margins[1])
         if not views or not views[-1].segments:
             return None
         return ctrl.model.width, views[-1].content_height + margins[2] + margins[3]
+
+    def textbox_views(
+        self, component: Node, header: TextBoxListHeader, width: float, textbox: bool = True
+    ) -> list[ParagraphView]:
+        """글상자 문단 보기. 글 방향은 목록 머리에서 정해, 글상자 크기 측정과 그리기가 같은 판정을 쓴다."""
+        paragraphs = [child for child in component.children if child.tag == tags.PARA_HEADER]
+        return self.paragraph_views(paragraphs, width, textbox=textbox, vertical=bool(header.text_direction))
 
     def resized_object(self, ctrl: Node) -> bool:
         """한글이 문서를 열 때 크기나 기준선을 바꿔 그 문단 줄을 다시 짜게 하는 개체인가."""
@@ -802,9 +808,8 @@ class ObjectsMixin:
         if text_list is None or not isinstance(text_list.model, TextBoxListHeader):
             return 0.0
         margins = text_list.model.margins
-        paragraphs = [child for child in component.children if child.tag == tags.PARA_HEADER]
         inner_width = ctrl.model.width - margins[0] - margins[1]
-        stored = self.paragraph_views(paragraphs, inner_width)
+        stored = self.textbox_views(component, text_list.model, inner_width, textbox=False)
         if not stored or not all(view.segments for view in stored):
             return 0.0
         fresh = self.recomposed_views(stored, inner_width)
@@ -863,9 +868,8 @@ class ObjectsMixin:
         if text_list is not None and isinstance(text_list.model, TextBoxListHeader):
             header = text_list.model
             margins = header.margins
-            paragraphs = [child for child in component.children if child.tag == tags.PARA_HEADER]
             inner_width = width - margins[0] - margins[1]
-            views = self.paragraph_views(paragraphs, inner_width, textbox=True)
+            views = self.textbox_views(component, header, inner_width)
             area = Area(left + margins[0], top + margins[2], inner_width)
             inner_height = height - margins[2] - margins[3]
             with self.painting_list(("text box", id(component))):
