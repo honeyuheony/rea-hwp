@@ -3,20 +3,20 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 
-HWP 5.0 문서를 쪽마다 SVG로 그리는 파이썬 라이브러리와 CLI입니다. 쪽 나눔과 글자 위치는 한컴오피스 한글 2022의 인쇄 결과에 맞춥니다.
+HWP 5.0 문서를 쪽 단위 SVG로 렌더링하는 파이썬 라이브러리·CLI. 쪽 나눔과 글자 위치는 한컴오피스 한글 2022 인쇄 결과 기준.
 
 ## 특징
 
-- 쪽마다 SVG 한 장. 글자마다 위치를 고정해 그립니다.
-- 쪽 SVG를 이어 보여 주는 단독 HTML 뷰어. 투명한 글 층으로 글을 골라 복사합니다.
-- 암호 문서와 배포용 문서를 엽니다.
-- 그림은 SVG 안 `data:` URI나, 따로 저장한 주소로 겁니다(`image_href`).
-- 믿을 수 없는 업로드 파일용 크기·레코드 수 상한(`Limits`)과 오류 자료형.
-- 의존성은 `olefile`, `cryptography` 둘입니다.
+- 쪽당 SVG 한 장, 글자마다 위치 고정
+- 쪽 SVG를 이어 보는 단독 HTML 뷰어 (글 선택·복사·브라우저 찾기 지원)
+- 암호 문서·배포용 문서 열기
+- 그림은 SVG 안 `data:` URI로 넣거나, 따로 저장한 뒤 주소로 연결(`image_href`)
+- 업로드 파일 대비: 크기·레코드 수 상한(`Limits`), 원인별 오류 자료형
+- 런타임 의존성 두 개: `olefile`, `cryptography`
 
 ## 설치
 
-Python 3.12 이상이 필요합니다.
+- Python 3.12 이상
 
 ```sh
 pip install "git+https://github.com/honeyuheony/rea-hwp.git@main"
@@ -24,7 +24,7 @@ pip install "git+https://github.com/honeyuheony/rea-hwp.git@main"
 uv add "rea-hwp @ git+https://github.com/honeyuheony/rea-hwp.git@main"
 ```
 
-글맵시까지 그리려면 `fonts` 묶음(`fonttools`)을 함께 설치합니다.
+- 글맵시까지 렌더링하려면 `fonts` 묶음(`fonttools`) 추가
 
 ```sh
 pip install "rea-hwp[fonts] @ git+https://github.com/honeyuheony/rea-hwp.git@main"
@@ -37,9 +37,9 @@ rea-hwp render example.hwp -o out
 # 6 pages -> out/index.html
 ```
 
-`out/index.html`을 브라우저에서 파일로 열면 됩니다. 암호 문서는 `--password 123456`을 덧붙입니다.
-
-`rea-hwp check example.hwp`는 레코드를 다시 인코딩해 원본 스트림과 같은지 비교하고, 다르면 종료 코드 1을 돌려줍니다.
+- `out/index.html`을 브라우저로 바로 열면 됨 (웹 서버 불필요)
+- 암호 문서: `--password 123456` 추가
+- `rea-hwp check example.hwp`: 레코드를 다시 인코딩해 원본 스트림과 비교, 다르면 종료 코드 1
 
 ## 라이브러리로 쓰기
 
@@ -52,15 +52,16 @@ for page in render_pages(document):
     print(page.number, len(svg))
 ```
 
-`Page.number`는 1부터입니다. 예시 전체는 [`examples/`](examples)에 있습니다.
+- `Page.number`는 1부터 시작
+- 전체 예시는 [`examples/`](examples) 참고
 
 | 파일 | 내용 |
 |---|---|
-| [`examples/convert.py`](examples/convert.py) | 파일 하나를 쪽 SVG 묶음(`page-NNNN.svg`)으로. |
-| [`examples/upload.py`](examples/upload.py) | 업로드받은 bytes를 열어 암호·오류별로 나누고, 그림은 디스크에 따로 저장한 뒤 쪽 SVG 문자열 목록을 돌려줍니다. |
-| [`examples/batch.py`](examples/batch.py) | 폴더 안 `*.hwp`를 문서마다 하위 폴더로 변환하고, 열 수 없는 문서는 건너뜁니다. |
+| [`examples/convert.py`](examples/convert.py) | 파일 하나 → 쪽 SVG 묶음(`page-NNNN.svg`) |
+| [`examples/upload.py`](examples/upload.py) | 업로드 bytes → 쪽 SVG 문자열 목록. 암호·오류별 분기, 그림은 디스크에 따로 저장 |
+| [`examples/batch.py`](examples/batch.py) | 폴더 안 `*.hwp` 일괄 변환. 열 수 없는 문서는 건너뜀 |
 
-### 파일 하나 변환하기
+### 파일 하나 변환
 
 ```python
 from pathlib import Path
@@ -77,10 +78,10 @@ def convert(path, out_dir, password=None) -> int:
     return len(pages)
 ```
 
-만드는 SVG는 `rea-hwp render`의 `page-NNNN.svg`와 같습니다. 뷰어(`index.html`)와 수식 대체 쪽(`.eq.svg`)이 필요하면
-`rea-hwp render`를 씁니다.
+- 결과 SVG는 `rea-hwp render`의 `page-NNNN.svg`와 동일
+- 뷰어(`index.html`)와 수식 대체 쪽(`.eq.svg`)이 필요하면 `rea-hwp render` 사용
 
-### 업로드 파일 처리하기
+### 업로드 파일 처리
 
 ```python
 import hashlib
@@ -128,16 +129,20 @@ def render_upload(upload: bytes, image_dir: Path, image_url: str = "/images", pa
     return [page_to_svg(page, image_href=store_image) for page in pages]
 ```
 
-`image_href`를 주지 않으면 그림은 `data:` URI로 SVG에 들어갑니다. 같은 그림은 같은 bytes로 넘어옵니다. `mime`은
-`image/png`, `image/jpeg`, `image/gif`, `image/bmp`, `image/svg+xml` 등입니다.
+- `image_href`를 생략하면 그림은 `data:` URI로 SVG에 포함
+- 같은 그림은 항상 같은 bytes로 전달
+- `mime` 값: `image/png`, `image/jpeg`, `image/gif`, `image/bmp`, `image/svg+xml` 등
 
-모든 오류는 `ReaHwpError`를 상속합니다. 주로 나누는 하위 자료형:
+오류는 모두 `ReaHwpError` 하위 자료형.
 
-- `PasswordRequiredError`, `WrongPasswordError`: 암호 없음, 틀린 암호
-- `UnsupportedFormatError`: HWP 3.0, HWPX, OLE가 아닌 파일
-- `DrmProtectedError`: DRM 문서
-- `CorruptFileError`: 잘리거나 깨진 파일
-- `LimitExceededError`: `Limits` 상한 초과. `HwpDocument.open(..., limits=Limits(max_records=...))`로 바꿉니다.
+| 자료형 | 상황 |
+|---|---|
+| `PasswordRequiredError` | 암호 없이 암호 문서를 엶 |
+| `WrongPasswordError` | 암호 틀림 |
+| `UnsupportedFormatError` | HWP 3.0, HWPX, OLE 형식이 아닌 파일 |
+| `DrmProtectedError` | DRM 문서 |
+| `CorruptFileError` | 잘리거나 깨진 파일 |
+| `LimitExceededError` | `Limits` 상한 초과. `HwpDocument.open(..., limits=Limits(max_records=...))`로 조정 |
 
 ### 렌더 설정
 
@@ -150,22 +155,22 @@ options = RenderOptions(font_dirs=(Path("/usr/share/fonts/truetype"),))
 pages = render_pages(document, options=options)
 ```
 
-`font_dirs`는 글맵시 글꼴(TTF·TTC)을 찾을 폴더입니다. 기본값은 Windows 글꼴 폴더와 한컴 공용 글꼴 폴더입니다. 그리지 못한
-글맵시는 `page.missing`에 남습니다. 라이브러리는 환경 변수를 읽지 않습니다.
+- `font_dirs`: 글맵시 글꼴(TTF·TTC) 검색 폴더
+- 기본값: Windows 글꼴 폴더, 한컴 공용 글꼴 폴더
+- 렌더링하지 못한 글맵시는 `page.missing`에 기록
+- 라이브러리는 환경 변수를 읽지 않음 (설정은 `RenderOptions`로만)
 
 ## 출력 형식
 
-`rea-hwp render -o out`이 만드는 파일입니다.
+`rea-hwp render -o out`의 출력 파일:
 
 | 파일 | 내용 |
 |---|---|
-| `page-NNNN.svg` | 쪽 하나. 번호는 1부터 네 자리. `viewBox`가 쪽 크기(pt)입니다. |
-| `page-NNNN.eq.svg` | 수식이 있는 쪽에만. 수식 글꼴 글자를 유니코드로 바꿔 OFL 수학 글꼴로 그린 판입니다. |
-| `index.html` | 쪽 SVG를 `<img>`로 이어 보여 주는 뷰어. 수식 글꼴이 없는 브라우저에서는 `.eq.svg`로 바꿔 보여 줍니다. |
+| `page-NNNN.svg` | 쪽 하나. 번호는 1부터 네 자리, `viewBox`는 쪽 크기(pt) |
+| `page-NNNN.eq.svg` | 수식이 있는 쪽에만 생성. 수식 글꼴 글자를 유니코드로 바꾸고 OFL 수학 글꼴로 렌더링한 쪽 |
+| `index.html` | 쪽 SVG를 `<img>`로 이어 보는 뷰어. 수식 글꼴이 없는 브라우저에서는 `.eq.svg`를 대신 표시 |
 
 ### SVG
-
-글자는 `<text>` 하나에 글자 하나씩 들어가며, 좌표 단위는 pt입니다.
 
 ```xml
 <svg xmlns="http://www.w3.org/2000/svg" width="595.28pt" height="841.88pt" viewBox="0 0 595.28 841.88">
@@ -173,20 +178,22 @@ pages = render_pages(document, options=options)
 <text x="212.64" y="94.935" font-size="20" font-family="HY헤드라인M" >통</text>
 ```
 
-`x`, `y`는 글자 원점(기준선 왼쪽 끝)이고 쪽 왼쪽 위가 0입니다.
+- `<text>` 하나에 글자 하나
+- 좌표 단위 pt, 원점은 쪽 왼쪽 위
+- `x`, `y`는 글자의 기준선 왼쪽 끝
 
 ### HTML 뷰어
 
-`index.html`은 같은 폴더의 `page-NNNN.svg`를 `<img>`로 불러오므로 웹 서버 없이 파일로 열립니다. 쪽마다 투명한 글 층을
-겹쳐 두어 마우스로 글을 골라 복사하고 브라우저 찾기(Ctrl+F)로 찾습니다. 출력 폴더를 그대로 정적 파일로 올려도 됩니다.
+- 같은 폴더의 `page-NNNN.svg`를 `<img>`로 불러오므로 파일로 바로 열림
+- 쪽마다 투명한 글 층을 겹쳐 글 선택·복사, 브라우저 찾기(Ctrl+F) 가능
+- 출력 폴더를 그대로 정적 파일로 배포 가능
 
 ## 제한 사항
 
-- HWP 5.0만 엽니다. HWPX와 HWP 3.0은 `UnsupportedFormatError`, DRM 문서는 `DrmProtectedError`를 냅니다.
-- SVG에는 글꼴 파일을 넣지 않고 `font-family="휴먼명조"`처럼 이름만 적습니다. 보는 PC에 그 글꼴이 없으면 브라우저가 다른
-  글꼴로 그리며, 글자 위치는 그대로이고 모양만 달라집니다.
-- 글맵시는 `fonttools`와 글꼴 파일이 모두 있어야 그립니다.
-- 문서를 고치거나 저장하는 기능은 없습니다.
+- HWP 5.0만 지원. HWPX·HWP 3.0은 `UnsupportedFormatError`, DRM 문서는 `DrmProtectedError`
+- SVG에 글꼴 파일은 넣지 않고 이름만 지정. 보는 PC에 그 글꼴이 없으면 브라우저가 다른 글꼴로 대체 (글자 위치는 그대로, 모양만 달라짐)
+- 글맵시는 `fonttools`와 글꼴 파일이 모두 있어야 렌더링
+- 문서 편집·저장 기능 없음
 
 ## 기여
 
@@ -196,11 +203,10 @@ uv run pytest
 uv run ruff check
 ```
 
-말뭉치 문서를 쓰는 시험은 환경 변수 `REA_HWP_CORPUS`가 없으면 건너뜁니다. `bench/`는 한글이 만든 PDF와 렌더 결과를 비교하는
-평가 도구이며 `bench` 묶음(`pymupdf`)이 필요합니다.
-
-`rea_hwp.__version__`은 렌더 결과나 공개 API가 바뀔 때마다 올리고, 바뀐 내용은 [CHANGELOG.md](CHANGELOG.md)에 적습니다.
+- 말뭉치 문서를 쓰는 시험은 환경 변수 `REA_HWP_CORPUS`가 없으면 건너뜀
+- `bench/`: 한글이 만든 PDF와 렌더링 결과를 비교하는 평가 도구 (`bench` 묶음의 `pymupdf` 필요)
+- 렌더링 결과나 공개 API가 바뀌면 `rea_hwp.__version__`을 올리고 [CHANGELOG.md](CHANGELOG.md)에 기록
 
 ## 라이선스
 
-[MIT](LICENSE). [NOTICE](NOTICE)도 함께 보세요.
+[MIT](LICENSE). [NOTICE](NOTICE)도 함께 참고.
