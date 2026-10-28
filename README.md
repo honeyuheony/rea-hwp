@@ -9,7 +9,6 @@ HWP 5.0 문서를 쪽마다 SVG로 그리는 파이썬 라이브러리와 CLI입
 
 - 쪽마다 SVG 한 장. 글자마다 위치를 고정해 그립니다.
 - 쪽 SVG를 이어 보여 주는 단독 HTML 뷰어. 투명한 글 층으로 글을 골라 복사합니다.
-- 글자 위치 표 `glyphs.json`(글자, x, y pt).
 - 암호 문서와 배포용 문서를 엽니다.
 - 그림은 SVG 안 `data:` URI나, 따로 저장한 주소로 겁니다(`image_href`).
 - 믿을 수 없는 업로드 파일용 크기·레코드 수 상한(`Limits`)과 오류 자료형.
@@ -34,7 +33,7 @@ pip install "rea-hwp[fonts] @ git+https://github.com/honeyuheony/rea-hwp.git@mai
 ## 빠른 시작
 
 ```sh
-rea-hwp render example.hwp -o out --glyphs
+rea-hwp render example.hwp -o out
 # 6 pages -> out/index.html
 ```
 
@@ -57,37 +56,29 @@ for page in render_pages(document):
 
 | 파일 | 내용 |
 |---|---|
-| [`examples/convert.py`](examples/convert.py) | 파일 하나를 `page-NNNN.svg`, `page-NNNN.eq.svg`, `glyphs.json`으로. CLI 출력과 같은 파일을 만듭니다. |
+| [`examples/convert.py`](examples/convert.py) | 파일 하나를 쪽 SVG 묶음(`page-NNNN.svg`)으로. |
 | [`examples/upload.py`](examples/upload.py) | 업로드받은 bytes를 열어 암호·오류별로 나누고, 그림은 디스크에 따로 저장한 뒤 쪽 SVG 문자열 목록을 돌려줍니다. |
 | [`examples/batch.py`](examples/batch.py) | 폴더 안 `*.hwp`를 문서마다 하위 폴더로 변환하고, 열 수 없는 문서는 건너뜁니다. |
 
 ### 파일 하나 변환하기
 
 ```python
-import json
 from pathlib import Path
 
 from rea_hwp import HwpDocument, page_to_svg, render_pages
-from rea_hwp.render.svg import equation_fonts, page_glyph_table
 
 
 def convert(path, out_dir, password=None) -> int:
     pages = render_pages(HwpDocument.open(path, password))
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    glyphs = []
     for page in pages:
-        stem = f"page-{page.number:04d}"
-        (out / f"{stem}.svg").write_text(page_to_svg(page), encoding="utf-8")
-        if equation_fonts(page):
-            (out / f"{stem}.eq.svg").write_text(page_to_svg(page, equation_fallback=True), encoding="utf-8")
-        glyphs.append(page_glyph_table(page))
-    (out / "glyphs.json").write_text(json.dumps(glyphs, ensure_ascii=False), encoding="utf-8")
+        (out / f"page-{page.number:04d}.svg").write_text(page_to_svg(page), encoding="utf-8")
     return len(pages)
 ```
 
-`equation_fonts`와 `page_glyph_table`은 `__all__`에 없는 내부 함수입니다. `rea-hwp render`가 같은 함수로 `.eq.svg`와
-`glyphs.json`을 만듭니다.
+만드는 SVG는 `rea-hwp render`의 `page-NNNN.svg`와 같습니다. 뷰어(`index.html`)와 수식 대체 쪽(`.eq.svg`)이 필요하면
+`rea-hwp render`를 씁니다.
 
 ### 업로드 파일 처리하기
 
@@ -171,7 +162,6 @@ pages = render_pages(document, options=options)
 | `page-NNNN.svg` | 쪽 하나. 번호는 1부터 네 자리. `viewBox`가 쪽 크기(pt)입니다. |
 | `page-NNNN.eq.svg` | 수식이 있는 쪽에만. 수식 글꼴 글자를 유니코드로 바꿔 OFL 수학 글꼴로 그린 판입니다. |
 | `index.html` | 쪽 SVG를 `<img>`로 이어 보여 주는 뷰어. 수식 글꼴이 없는 브라우저에서는 `.eq.svg`로 바꿔 보여 줍니다. |
-| `glyphs.json` | `--glyphs`를 줄 때만. |
 
 ### SVG
 
@@ -183,22 +173,12 @@ pages = render_pages(document, options=options)
 <text x="212.64" y="94.935" font-size="20" font-family="HY헤드라인M" >통</text>
 ```
 
-### glyphs.json
+`x`, `y`는 글자 원점(기준선 왼쪽 끝)이고 쪽 왼쪽 위가 0입니다.
 
-```json
-[
-  [["통", 212.64, 94.935], ["합", 242.64, 94.935], ["재", 272.64, 94.935], ...],
-  [...]
-]
-```
+### HTML 뷰어
 
-| 항목 | 뜻 |
-|---|---|
-| 바깥 배열 | 쪽 차례. `glyphs[0]`이 `page-0001.svg`입니다. |
-| 글자 | 쪽에 그린 글자 하나. 공백 글자는 뺍니다. 기호 글꼴 PUA(U+F020~F0FF)는 cp1252 글자로, 한컴 전용 기호(평면 15 PUA)는 U+F000으로 적습니다. 수식 글꼴 글자는 그 글꼴의 코드 그대로입니다. |
-| `x`, `y` | 글자 원점(기준선 왼쪽 끝). 쪽 왼쪽 위가 0, 단위 pt, 소수 셋째 자리까지. SVG 좌표와 같습니다. |
-
-순서는 SVG에 그린 차례이며 읽는 차례와 다를 수 있습니다. 본문·표·머리말·꼬리말·수식 글자가 모두 들어갑니다.
+`index.html`은 같은 폴더의 `page-NNNN.svg`를 `<img>`로 불러오므로 웹 서버 없이 파일로 열립니다. 쪽마다 투명한 글 층을
+겹쳐 두어 마우스로 글을 골라 복사하고 브라우저 찾기(Ctrl+F)로 찾습니다. 출력 폴더를 그대로 정적 파일로 올려도 됩니다.
 
 ## 제한 사항
 
